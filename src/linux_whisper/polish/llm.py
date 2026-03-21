@@ -1,0 +1,232 @@
+"""Stage 4c: LLM self-correction resolution and grammar repair (Qwen3 4B).
+
+Only invoked when the disfluency stage (4a) flags self-correction patterns in
+the transcript.  Uses llama-cpp-python to run a quantised GGUF model with a
+narrowly-scoped system prompt that forbids paraphrasing.
+
+If llama-cpp-python is not installed, the model file is missing, or inference
+exceeds the timeout, the input is returned unchanged.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import signal
+from pathlib import Path
+from threading import Thread
+from typing import Any
+
+from linux_whisper.config import MODELS_DIR, PolishConfig
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Optional llama-cpp-python import
+# ---------------------------------------------------------------------------
+try:
+    from llama_cpp import Llama
+
+    _LLAMA_AVAILABLE = True
+except ImportError:
+    _LLAMA_AVAILABLE = False
+    Llama = None  # type: ignore[assignment,misc]
+    logger.debug(
+        "llama-cpp-python not installed; LLMCorrector will pass text through unchanged"
+    )
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+_DEFAULT_MODEL_DIR = MODELS_DIR / "llm"
+_DEFAULT_MODEL_FILENAME = "Qwen3-4B-Instruct-Q4_K_M.gguf"
+_DEFAULT_TIMEOUT_MS = 500
+_DEFAULT_TEMPERATURE = 0.0
+_DEFAULT_MAX_TOKENS = 256
+
+# Focused system prompt — deliberately narrow.  Filler removal and punctuation
+# are already handled by stages 4a / 4b; the LLM only resolves semantic
+# self-corrections and grammar.
+_SYSTEM_PROMPT = """\
+You clean up dictated text. Preserve the speaker's exact words and meaning.
+
+Rules:
+- Resolve self-corrections: keep only the speaker's final intent
+  Example: "at 2 no actually at 4" → "at 4"
+- Fix grammar: subject-verb agreement, articles, tense
+- Do NOT remove filler words (already handled)
+- Do NOT add punctuation (already handled)
+- Do NOT paraphrase, rephrase, or add content
+- Do NOT add greetings, sign-offs, or pleasantries
+- Output ONLY the cleaned text, nothing else"""
+
+
+# ---------------------------------------------------------------------------
+# Main class
+# ---------------------------------------------------------------------------
+
+
+class LLMCorrector:
+    """Resolve self-corrections and fix grammar via a local GGUF LLM.
+
+    The corrector is intentionally conservative:
+
+    * It only activates when the upstream disfluency detector flags
+      self-corrections (unless ``llm_always`` is set).
+    * It enforces a hard timeout (default 500 ms).  If the model doesn't
+      finish in time the original text is returned.
+    * Temperature is fixed at 0 for deterministic output.
+    """
+
+    def __init__(self, config: PolishConfig | None = None) -> None:
+        self._config = config or PolishConfig()
+        self._model: Any | None = None  # Llama instance
+        self._loaded = False
+        self._timeout_s = _DEFAULT_TIMEOUT_MS / 1000.0
+
+        self._try_load_model()
+
+    # ------------------------------------------------------------------
+    # Model loading
+    # ------------------------------------------------------------------
+
+    def _try_load_model(self) -> None:
+        if not _LLAMA_AVAILABLE:
+            logger.info(
+                "llama-cpp-python not available — LLM correction disabled"
+            )
+            return
+
+        model_path = self._resolve_model_path()
+        if model_path is None or not model_path.exists():
+            logger.info(
+                "LLM GGUF model not found at %s — LLM correction disabled",
+                model_path,
+            )
+            return
+
+        n_threads = self._config.llm_threads if self._config.llm_threads > 0 else max(1, os.cpu_count() or 4)
+
+        try:
+            self._model = Llama(
+                model_path=str(model_path),
+                n_ctx=2048,
+                n_threads=n_threads,
+                n_threads_batch=n_threads,
+                verbose=False,
+            )
+            self._loaded = True
+            logger.info(
+                "Loaded LLM model from %s (threads=%d)",
+                model_path,
+                n_threads,
+            )
+        except Exception:
+            logger.exception("Failed to load LLM GGUF model")
+            self._model = None
+
+    def _resolve_model_path(self) -> Path | None:
+        """Determine the GGUF model file path from config."""
+        model_name = self._config.llm_model or "Qwen3-4B-Instruct-Q4_K_M"
+
+        # If the model name looks like an absolute path, use it directly.
+        if "/" in model_name or model_name.endswith(".gguf"):
+            candidate = Path(model_name)
+            if candidate.is_absolute():
+                return candidate
+            return _DEFAULT_MODEL_DIR / model_name
+
+        # Otherwise, look for <name>.gguf in the default directory.
+        return _DEFAULT_MODEL_DIR / f"{model_name}.gguf"
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    @property
+    def available(self) -> bool:
+        """True if the LLM model is loaded and ready."""
+        return self._loaded and self._model is not None
+
+    def process(self, text: str) -> str:
+        """Run LLM correction on *text*.
+
+        Returns the corrected text, or the original *text* unchanged if:
+        - The model is not loaded.
+        - Inference exceeds the timeout.
+        - The model returns empty or clearly degenerate output.
+        """
+        if not text or not text.strip():
+            return text
+
+        if not self.available:
+            logger.debug("LLM not available — returning text unchanged")
+            return text
+
+        result: str | None = None
+
+        def _infer() -> None:
+            nonlocal result
+            try:
+                result = self._run_inference(text)
+            except Exception:
+                logger.exception("LLM inference failed")
+                result = None
+
+        worker = Thread(target=_infer, daemon=True)
+        worker.start()
+        worker.join(timeout=self._timeout_s)
+
+        if worker.is_alive():
+            logger.warning(
+                "LLM inference exceeded %.0f ms timeout — returning input unchanged",
+                self._timeout_s * 1000,
+            )
+            return text
+
+        if result is None or not result.strip():
+            logger.warning("LLM returned empty output — returning input unchanged")
+            return text
+
+        # Sanity check: if the LLM output is vastly longer than the input it
+        # likely hallucinated.  Reject outputs that are > 2x the input length.
+        if len(result) > len(text) * 2:
+            logger.warning(
+                "LLM output suspiciously long (%d vs %d chars) — discarding",
+                len(result),
+                len(text),
+            )
+            return text
+
+        return result.strip()
+
+    # ------------------------------------------------------------------
+    # Inference
+    # ------------------------------------------------------------------
+
+    def _run_inference(self, text: str) -> str | None:
+        """Build the prompt and call the model."""
+        assert self._model is not None
+
+        messages = [
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": text},
+        ]
+
+        response = self._model.create_chat_completion(
+            messages=messages,
+            max_tokens=_DEFAULT_MAX_TOKENS,
+            temperature=_DEFAULT_TEMPERATURE,
+            top_p=1.0,
+            repeat_penalty=1.0,
+            # Deterministic: no sampling
+        )
+
+        choices = response.get("choices", [])
+        if not choices:
+            return None
+
+        message = choices[0].get("message", {})
+        content = message.get("content", "")
+        return content if isinstance(content, str) else None
