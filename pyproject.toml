@@ -8,29 +8,27 @@ license = { text = "MIT" }
 authors = [{ name = "Nathan Ramia" }]
 
 dependencies = [
-    # Core
-    "sounddevice>=0.5",
+    # Core (always required)
     "numpy>=2.0",
     "pyyaml>=6.0",
-    "pystray>=0.19",
-    "Pillow>=10.0",
-
-    # VAD + Encoder models
-    "onnxruntime>=1.19",
-
-    # STT
-    "moonshine>=0.2",
-
-    # LLM
-    "llama-cpp-python>=0.3",
-
-    # Input
-    "evdev>=1.7",
 ]
 
 [project.optional-dependencies]
+# ML backends (install what you need)
+audio = ["sounddevice>=0.5"]
+vad = ["onnxruntime>=1.19"]
+moonshine = ["moonshine>=0.1"]
+llm = ["llama-cpp-python>=0.3"]
+hotkey = ["evdev>=1.7"]
+tray = ["pystray>=0.19", "Pillow>=10.0"]
 whisper = ["whispercpp>=0.1"]
 rocm = ["onnxruntime-rocm>=1.19"]
+
+# Install everything for full functionality
+full = [
+    "linux-whisper[audio,vad,moonshine,llm,hotkey,tray]",
+]
+
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
