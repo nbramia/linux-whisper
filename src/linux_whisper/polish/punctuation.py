@@ -377,6 +377,7 @@ def _capitalise_sentence(text: str) -> str:
 
         if bare.lower() in _ALWAYS_UPPER:
             bare = bare.upper()
+            capitalise_next = False  # first-word cap consumed
         elif capitalise_next and bare:
             bare = bare[0].upper() + bare[1:]
             capitalise_next = False

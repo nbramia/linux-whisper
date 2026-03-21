@@ -8,6 +8,8 @@ import signal
 import time
 from typing import TYPE_CHECKING
 
+import numpy as np
+
 from linux_whisper.config import Config
 from linux_whisper.state import AppState, StateMachine
 
@@ -15,8 +17,8 @@ if TYPE_CHECKING:
     from linux_whisper.audio import AudioPipeline
     from linux_whisper.hotkey import HotkeyDaemon
     from linux_whisper.inject import TextInjector
-    from linux_whisper.polish import PolishPipeline
-    from linux_whisper.stt import STTEngine
+    from linux_whisper.polish.pipeline import PolishPipeline
+    from linux_whisper.stt.engine import STTEngine
     from linux_whisper.tray import SystemTray
 
 logger = logging.getLogger(__name__)
@@ -51,8 +53,6 @@ class App:
                 logger.error("Config error: %s", e)
             raise ValueError(f"Invalid configuration: {'; '.join(errors)}")
 
-        # Import and initialize components
-        # Each import is guarded so missing optional deps give clear errors
         await self._setup_audio()
         await self._setup_stt()
         await self._setup_polish()
@@ -73,7 +73,7 @@ class App:
         logger.info("Audio pipeline ready")
 
     async def _setup_stt(self) -> None:
-        from linux_whisper.stt import create_engine
+        from linux_whisper.stt.engine import create_engine
 
         self._stt = create_engine(self.config)
         logger.info("STT engine ready: %s", self.config.stt.backend)
@@ -85,11 +85,10 @@ class App:
         from linux_whisper.polish.pipeline import PolishPipeline
 
         self._polish = PolishPipeline(self.config.polish)
-        await asyncio.to_thread(self._polish.load)
         logger.info("Polish pipeline ready")
 
     async def _setup_injector(self) -> None:
-        from linux_whisper.inject import detect_injector
+        from linux_whisper.inject.injector import detect_injector
 
         self._injector = detect_injector(self.config.inject)
         logger.info("Text injector ready: %s", type(self._injector).__name__)
@@ -98,10 +97,10 @@ class App:
         from linux_whisper.hotkey import HotkeyDaemon
 
         self._hotkey = HotkeyDaemon(
-            hotkey=self.config.hotkey,
+            hotkey_str=self.config.hotkey,
             mode=self.config.mode,
-            on_start=self._on_recording_start,
-            on_stop=self._on_recording_stop,
+            on_start_recording=self._on_recording_start,
+            on_stop_recording=self._on_recording_stop,
         )
         logger.info("Hotkey daemon ready: %s (%s mode)", self.config.hotkey, self.config.mode)
 
@@ -114,7 +113,7 @@ class App:
 
             self._tray = SystemTray(
                 on_quit=self._request_shutdown,
-                on_mode_change=None,  # TODO: implement mode switching
+                on_mode_change=None,
                 on_open_settings=None,
             )
             logger.info("System tray ready")
@@ -129,7 +128,7 @@ class App:
         if self._hotkey:
             self._hotkey.start()
         if self._audio:
-            self._audio.start()
+            await self._audio.start()
         if self._tray:
             self._tray.start()
 
@@ -146,7 +145,7 @@ class App:
         if self._hotkey:
             self._hotkey.stop()
         if self._audio:
-            self._audio.stop()
+            await self._audio.stop()
         if self._tray:
             self._tray.stop()
         logger.info("Shutdown complete")
@@ -156,16 +155,14 @@ class App:
         self._shutdown_event.set()
 
     def _on_recording_start(self) -> None:
-        """Called by hotkey daemon when recording should begin."""
-        asyncio.get_event_loop().call_soon_threadsafe(
-            asyncio.ensure_future, self._handle_recording_start()
-        )
+        """Called by hotkey daemon (from its thread) when recording should begin."""
+        loop = asyncio.get_event_loop()
+        loop.call_soon_threadsafe(asyncio.ensure_future, self._handle_recording_start())
 
     def _on_recording_stop(self) -> None:
-        """Called by hotkey daemon when recording should end."""
-        asyncio.get_event_loop().call_soon_threadsafe(
-            asyncio.ensure_future, self._handle_recording_stop()
-        )
+        """Called by hotkey daemon (from its thread) when recording should end."""
+        loop = asyncio.get_event_loop()
+        loop.call_soon_threadsafe(asyncio.ensure_future, self._handle_recording_stop())
 
     async def _handle_recording_start(self) -> None:
         """Transition to RECORDING and start capturing audio."""
@@ -173,9 +170,6 @@ class App:
             return
 
         if self._audio:
-            # Play start feedback
-            if self.config.audio.feedback_sounds:
-                await asyncio.to_thread(self._audio.play_start_tone)
             self._audio.start_recording()
 
         if self._stt:
@@ -189,10 +183,6 @@ class App:
             return
 
         start_time = time.monotonic()
-
-        # Play stop feedback
-        if self._audio and self.config.audio.feedback_sounds:
-            await asyncio.to_thread(self._audio.play_stop_tone)
 
         if not await self.state.transition(AppState.PROCESSING):
             return
@@ -214,17 +204,35 @@ class App:
             await self.state.transition(AppState.IDLE)
 
     async def _process_pipeline(self) -> str | None:
-        """Run the full pipeline: audio → STT → polish → text."""
+        """Run the full pipeline: collect audio → STT → polish → text."""
         if not self._audio or not self._stt:
             return None
 
-        # Get recorded audio
-        audio_data = self._audio.stop_recording()
-        if audio_data is None or len(audio_data) == 0:
+        # Stop recording — this emits final audio chunks into the queue
+        self._audio.stop_recording()
+
+        # Collect all audio chunks from this recording session
+        audio_segments: list[np.ndarray] = []
+        async for chunk in self._audio.audio_chunks():
+            if chunk.samples is not None and len(chunk.samples) > 0:
+                audio_segments.append(chunk.samples)
+            if chunk.is_final:
+                break
+
+        if not audio_segments:
             return None
 
+        # Concatenate all audio and convert to 16-bit PCM bytes for the STT engine
+        audio_float = np.concatenate(audio_segments)
+        if len(audio_float) == 0:
+            return None
+
+        # Convert float32 [-1.0, 1.0] to int16 PCM bytes
+        audio_int16 = (audio_float * 32767).astype(np.int16)
+        audio_bytes = audio_int16.tobytes()
+
         # Feed audio to STT
-        self._stt.feed_audio(audio_data)
+        self._stt.feed_audio(audio_bytes)
         result = self._stt.finalize()
         self._stt.reset()
 
