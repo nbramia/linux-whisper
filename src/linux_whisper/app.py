@@ -281,7 +281,6 @@ class App:
         latency, then schedules the async state transition.
         """
         # Start capturing audio IMMEDIATELY — don't wait for asyncio scheduling.
-        # This shaves ~50-200ms off the perceived start latency.
         if self._audio:
             self._audio.start_recording()
         if self._stt:

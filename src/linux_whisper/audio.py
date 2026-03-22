@@ -534,8 +534,15 @@ class AudioPipeline:
             if self._vad is not None:
                 self._vad.reset_state()
 
+        # Play feedback tone in a background thread to avoid blocking recording start.
+        # sd.play() can take 500ms+ to open the output stream on PipeWire.
         if self._feedback_enabled:
-            play_tone(self._start_tone, self._sample_rate)
+            import threading
+            threading.Thread(
+                target=play_tone,
+                args=(self._start_tone, self._sample_rate),
+                daemon=True,
+            ).start()
 
         logger.debug("Recording started")
 
@@ -551,7 +558,12 @@ class AudioPipeline:
             self._recording = False
 
         if self._feedback_enabled:
-            play_tone(self._stop_tone, self._sample_rate)
+            import threading
+            threading.Thread(
+                target=play_tone,
+                args=(self._stop_tone, self._sample_rate),
+                daemon=True,
+            ).start()
 
         # Emit final chunk
         if self._mode == PipelineMode.BATCH and self._batch_accumulator:
