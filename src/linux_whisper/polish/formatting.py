@@ -129,13 +129,15 @@ def _ordinal_suffix(n: int) -> str:
 # ---------------------------------------------------------------------------
 
 
+_EMAIL_RE = re.compile(
+    r"\b(\w+)\s+at\s+(\w+)\s+dot\s+(com|org|net|edu|io|co|gov|info)\b",
+    re.IGNORECASE,
+)
+
+
 def _format_emails(text: str) -> str:
     """Convert 'user at domain dot tld' to 'user@domain.tld'."""
-    pattern = re.compile(
-        r"\b(\w+)\s+at\s+(\w+)\s+dot\s+(com|org|net|edu|io|co|gov|info)\b",
-        re.IGNORECASE,
-    )
-    return pattern.sub(lambda m: f"{m[1]}@{m[2]}.{m[3].lower()}", text)
+    return _EMAIL_RE.sub(lambda m: f"{m[1]}@{m[2]}.{m[3].lower()}", text)
 
 
 def _format_phone_numbers(text: str) -> str:
@@ -208,48 +210,46 @@ def _format_times(text: str) -> str:
 
     while i < len(words):
         matched = False
+        bare = words[i].lower().rstrip(".,?!;:")
 
-        if i < len(words):
-            bare = words[i].lower().rstrip(".,?!;:")
+        # Check if this word is a valid hour (1-12)
+        hour_val = hour_words.get(bare)
+        if hour_val is not None and 1 <= hour_val <= 12:
+            # Look ahead for minute words
+            j = i + 1
+            minute_words_found: list[str] = []
+            while j < len(words):
+                next_bare = words[j].lower().rstrip(".,?!;:")
+                if next_bare in hour_words and hour_words[next_bare] <= 59:
+                    minute_words_found.append(next_bare)
+                    j += 1
+                else:
+                    break
 
-            # Check if this word is a valid hour (1-12)
-            hour_val = hour_words.get(bare)
-            if hour_val is not None and 1 <= hour_val <= 12:
-                # Look ahead for minute words
-                j = i + 1
-                minute_words_found: list[str] = []
-                while j < len(words):
-                    next_bare = words[j].lower().rstrip(".,?!;:")
-                    if next_bare in hour_words and hour_words[next_bare] <= 59:
-                        minute_words_found.append(next_bare)
-                        j += 1
-                    else:
-                        break
+            if minute_words_found:
+                minute_val = _words_to_number(minute_words_found)
+                if minute_val is not None and 0 <= minute_val <= 59:
+                    # Check for AM/PM
+                    am_pm = ""
+                    trailing = ""
+                    if j < len(words):
+                        ampm_bare = words[j].upper().rstrip(".,?!;:")
+                        ampm_trailing = words[j][len(words[j].rstrip(".,?!;:")):]
+                        if ampm_bare in ("AM", "PM"):
+                            am_pm = f" {ampm_bare}"
+                            trailing = ampm_trailing
+                            j += 1
 
-                if minute_words_found:
-                    minute_val = _words_to_number(minute_words_found)
-                    if minute_val is not None and 0 <= minute_val <= 59:
-                        # Check for AM/PM
-                        am_pm = ""
-                        trailing = ""
-                        if j < len(words):
-                            ampm_bare = words[j].upper().rstrip(".,?!;:")
-                            ampm_trailing = words[j][len(words[j].rstrip(".,?!;:")):]
-                            if ampm_bare in ("AM", "PM"):
-                                am_pm = f" {ampm_bare}"
-                                trailing = ampm_trailing
-                                j += 1
+                    if not trailing:
+                        # Get trailing punct from last consumed word
+                        last = words[j - 1]
+                        bare_last = last.rstrip(".,?!;:")
+                        trailing = last[len(bare_last):]
 
-                        if not trailing:
-                            # Get trailing punct from last consumed word
-                            last = words[j - 1]
-                            bare_last = last.rstrip(".,?!;:")
-                            trailing = last[len(bare_last):]
-
-                        time_str = f"{hour_val}:{minute_val:02d}{am_pm}{trailing}"
-                        result.append(time_str)
-                        i = j
-                        matched = True
+                    time_str = f"{hour_val}:{minute_val:02d}{am_pm}{trailing}"
+                    result.append(time_str)
+                    i = j
+                    matched = True
 
         if not matched:
             result.append(words[i])
