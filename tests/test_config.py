@@ -32,8 +32,8 @@ class TestDefaults:
 
     def test_stt_defaults(self):
         stt = STTConfig()
-        assert stt.backend == "moonshine"
-        assert stt.model == "moonshine-medium"
+        assert stt.backend == "faster-whisper"
+        assert stt.model == "large-v3-turbo"
         assert stt.threads == 0
 
     def test_polish_defaults(self):
@@ -78,7 +78,7 @@ class TestFromDict:
         assert cfg.hotkey == "alt+d"
         assert cfg.mode == "toggle"
         # Nested defaults still hold
-        assert cfg.stt.backend == "moonshine"
+        assert cfg.stt.backend == "faster-whisper"
 
     def test_nested_override(self):
         cfg = Config.from_dict({
@@ -94,9 +94,9 @@ class TestFromDict:
         # Extra keys in a nested dict should not cause errors because
         # _merge_dataclass only looks at known fields.
         cfg = Config.from_dict({
-            "stt": {"backend": "moonshine", "nonexistent_key": 42},
+            "stt": {"backend": "faster-whisper", "nonexistent_key": 42},
         })
-        assert cfg.stt.backend == "moonshine"
+        assert cfg.stt.backend == "faster-whisper"
 
     def test_inject_method_override(self):
         cfg = Config.from_dict({"inject": {"method": "clipboard", "typing_delay": 10}})
@@ -187,7 +187,7 @@ class TestLoad:
         cfg = Config.load(tmp_config_file)
         assert cfg.hotkey == "fn"
         assert cfg.mode == "hold"
-        assert cfg.stt.backend == "moonshine"
+        assert cfg.stt.backend == "faster-whisper"
 
     def test_load_empty_file_gives_defaults(self, empty_config_file: Path):
         cfg = Config.load(empty_config_file)
@@ -251,13 +251,13 @@ class TestMergeDataclass:
     def test_partial_overrides(self):
         result = _merge_dataclass(STTConfig, {"backend": "whisper-cpp"})
         assert result.backend == "whisper-cpp"
-        assert result.model == "moonshine-medium"  # default
+        assert result.model == "large-v3-turbo"  # default
 
     def test_skips_VALID_constants(self):
         # VALID_BACKENDS is a class variable, not a constructor param.
         # _merge_dataclass must skip it.
         result = _merge_dataclass(STTConfig, {"VALID_BACKENDS": ("fake",)})
-        assert result.backend == "moonshine"
+        assert result.backend == "faster-whisper"
 
 
 # ── _dataclass_to_dict ──────────────────────────────────────────────────────
@@ -281,7 +281,7 @@ class TestDataclassToDict:
         assert "hotkey" in d
         assert "stt" in d
         assert isinstance(d["stt"], dict)
-        assert d["stt"]["backend"] == "moonshine"
+        assert d["stt"]["backend"] == "faster-whisper"
         # VALID_ keys should not appear
         assert "VALID_BACKENDS" not in d["stt"]
         assert "VALID_MODES" not in d

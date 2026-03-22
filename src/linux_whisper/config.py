@@ -19,11 +19,11 @@ MODELS_DIR = CACHE_DIR / "models"
 
 @dataclass(frozen=True)
 class STTConfig:
-    backend: str = "moonshine"
-    model: str = "moonshine-medium"
+    backend: str = "faster-whisper"
+    model: str = "large-v3-turbo"
     threads: int = 0  # 0 = auto
 
-    VALID_BACKENDS = ("moonshine", "whisper-cpp")
+    VALID_BACKENDS = ("faster-whisper", "moonshine", "whisper-cpp")
     VALID_MODELS = (
         "moonshine-tiny",
         "moonshine-medium",

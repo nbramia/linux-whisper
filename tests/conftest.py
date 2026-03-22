@@ -30,7 +30,7 @@ _OPTIONAL_DEPS = [
     "PIL",
     "PIL.Image",
     "PIL.ImageDraw",
-    "moonshine",
+    "faster-whisper",
     "llama_cpp",
     "whispercpp",
     # onnxruntime is used in disfluency/punctuation but we test regex fallback
@@ -95,7 +95,7 @@ def tmp_config_file(tmp_config_dir: Path) -> Path:
     cfg = {
         "hotkey": "fn",
         "mode": "hold",
-        "stt": {"backend": "moonshine", "model": "moonshine-medium"},
+        "stt": {"backend": "faster-whisper", "model": "large-v3-turbo"},
         "polish": {"enabled": True},
         "audio": {"sample_rate": 16000},
         "inject": {"method": "auto"},

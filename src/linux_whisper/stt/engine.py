@@ -104,6 +104,11 @@ def create_engine(config: Config) -> STTEngine:
 
         return MoonshineEngine(config)
 
+    if backend == "faster-whisper":
+        from linux_whisper.stt.faster_whisper import FasterWhisperEngine
+
+        return FasterWhisperEngine(config)
+
     if backend == "whisper-cpp":
         from linux_whisper.stt.whisper_cpp import WhisperCppEngine
 
