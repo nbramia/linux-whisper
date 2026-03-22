@@ -209,9 +209,8 @@ class SileroVAD:
             sess_options=self._make_session_options(),
         )
 
-        # RNN hidden states — reset between utterances
-        self._h = np.zeros(self._STATE_DIM, dtype=np.float32)
-        self._c = np.zeros(self._STATE_DIM, dtype=np.float32)
+        # RNN hidden state — shape [2, batch, 128] for this Silero version
+        self._state = np.zeros(self._STATE_DIM, dtype=np.float32)
         self._sr = np.array(SAMPLE_RATE, dtype=np.int64)
 
         logger.info("Silero VAD loaded from %s", model_path)
@@ -233,27 +232,22 @@ class SileroVAD:
                 f"Expected {VAD_WINDOW_SAMPLES} samples, got {len(audio)}"
             )
 
-        # Silero v5 input shapes: audio [1, N], sr scalar, h [2,1,128], c [2,1,128]
         input_data = audio.reshape(1, -1)
 
         ort_inputs = {
             "input": input_data,
             "sr": self._sr,
-            "h": self._h,
-            "c": self._c,
+            "state": self._state,
         }
 
-        output, h_out, c_out = self._session.run(None, ort_inputs)
-
-        self._h = h_out
-        self._c = c_out
+        output, state_out = self._session.run(None, ort_inputs)
+        self._state = state_out
 
         return float(output.squeeze())
 
     def reset_state(self) -> None:
         """Reset the RNN hidden state.  Call between utterances."""
-        self._h = np.zeros(self._STATE_DIM, dtype=np.float32)
-        self._c = np.zeros(self._STATE_DIM, dtype=np.float32)
+        self._state = np.zeros(self._STATE_DIM, dtype=np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -511,6 +505,13 @@ class AudioPipeline:
             self._batch_accumulator.clear()
             self._ring.clear()
             self._vad_accum = np.empty(0, dtype=np.float32)
+
+            # Drain any stale chunks from the queue (leftover from previous recording)
+            while not self._chunk_queue.empty():
+                try:
+                    self._chunk_queue.get_nowait()
+                except Exception:
+                    break
 
             if self._vad is not None:
                 self._vad.reset_state()
