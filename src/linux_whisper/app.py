@@ -120,7 +120,7 @@ class App:
             self._tray = SystemTray(
                 self.config,
                 on_quit=self._request_shutdown,
-                on_mode_change=None,
+                on_mode_change=self._on_mode_change,
                 on_model_change=self._on_model_change,
                 on_open_settings=None,
             )
@@ -178,6 +178,54 @@ class App:
     def _request_shutdown(self) -> None:
         """Signal the main loop to exit."""
         self._shutdown_event.set()
+
+    def _on_mode_change(self, mode: str) -> None:
+        """Called from tray thread when user selects a different mode."""
+        if self._loop is None or self._loop.is_closed():
+            return
+        self._loop.call_soon_threadsafe(
+            asyncio.ensure_future, self._handle_mode_change(mode)
+        )
+
+    async def _handle_mode_change(self, mode: str) -> None:
+        """Switch the hotkey mode and persist to config."""
+        from linux_whisper.config import Config, CONFIG_PATH, _dataclass_to_dict
+        import yaml
+
+        logger.info("Switching mode to %s", mode)
+
+        # Update in-memory config
+        self.config = Config(
+            hotkey=self.config.hotkey,
+            mode=mode,
+            stt=self.config.stt,
+            polish=self.config.polish,
+            audio=self.config.audio,
+            inject=self.config.inject,
+            tray=self.config.tray,
+        )
+
+        # Restart hotkey daemon with new mode
+        if self._hotkey:
+            self._hotkey.stop()
+        from linux_whisper.hotkey import HotkeyDaemon
+        self._hotkey = HotkeyDaemon(
+            hotkey_str=self.config.hotkey,
+            mode=mode,
+            on_start_recording=self._on_recording_start,
+            on_stop_recording=self._on_recording_stop,
+        )
+        self._hotkey.start()
+
+        # Save config
+        try:
+            CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            data = _dataclass_to_dict(self.config)
+            with open(CONFIG_PATH, "w") as f:
+                yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+            logger.info("Mode changed to %s, config saved", mode)
+        except Exception:
+            logger.warning("Failed to save config", exc_info=True)
 
     def _on_model_change(self, backend: str, model: str) -> None:
         """Called from tray thread when user selects a different model."""
