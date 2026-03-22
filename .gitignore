@@ -18,3 +18,4 @@ models/
 *.gguf
 *.bin
 .env
+.claude/

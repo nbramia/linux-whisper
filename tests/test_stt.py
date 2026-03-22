@@ -273,9 +273,9 @@ class TestWhisperCppEngine:
 class TestSTTDeviceConfig:
     """Test stt.device configuration field."""
 
-    def test_default_device_is_cpu(self):
+    def test_default_device_is_rocm(self):
         stt = STTConfig()
-        assert stt.device == "cpu"
+        assert stt.device == "rocm"
 
     def test_device_from_dict(self):
         cfg = Config.from_dict({"stt": {"device": "rocm"}})

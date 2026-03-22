@@ -13,9 +13,9 @@ The primary development target is an AMD-based Linux workstation:
 | NPU | XDNA2 (AMD Ryzen AI) — future acceleration target |
 | GPU Compute | ROCm recognized (rocminfo/rocm-smi work), but PyTorch ROCm for gfx1151 is experimental |
 
-**Key constraint:** No NVIDIA GPU. All CUDA-dependent tools (faster-whisper GPU mode, CTranslate2 CUDA, NeMo) are unavailable. The architecture is CPU-first, with ROCm and NPU as future acceleration paths.
+**Key constraint:** No NVIDIA GPU. All CUDA-dependent tools (faster-whisper GPU mode, CTranslate2 CUDA, NeMo) are unavailable.
 
-**Key advantage:** AVX-512 with VNNI (Vector Neural Network Instructions) and BF16 make quantized CPU inference unusually fast. 64GB unified RAM eliminates memory pressure entirely.
+**Key advantage:** ROCm 7.2 with gfx1151 support enables GPU-accelerated inference via ggml's HIP backend. Both whisper.cpp (STT) and llama.cpp (LLM) run on the Radeon 8060S iGPU. AVX-512 with VNNI and BF16 provide fast CPU fallback. 64GB unified RAM eliminates memory pressure.
 
 ## System Overview
 
@@ -25,7 +25,7 @@ The primary development target is an AMD-based Linux workstation:
 │                                                                       │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌─────────────────────┐   │
 │  │  Input    │→│  Audio    │→│   STT    │→│  Polish Pipeline    │   │
-│  │  Manager  │  │  Pipeline │  │  Engine  │  │  (hybrid 3-stage)  │   │
+│  │  Manager  │  │  Pipeline │  │  Engine  │  │  (hybrid 4-stage)  │   │
 │  └──────────┘  └──────────┘  └──────────┘  └─────────┬───────────┘   │
 │       ↑                                               │               │
 │  ┌──────────┐                                   ┌─────▼───────────┐   │
@@ -45,19 +45,21 @@ The primary development target is an AMD-based Linux workstation:
 
 The end-to-end pipeline has 6 stages. Each stage has a latency budget:
 
-| Stage | Component | Latency Budget | Runs On | Notes |
-|-------|-----------|---------------|---------|-------|
-| 1 | Hotkey detection | < 5ms | CPU (evdev) | Kernel-level input event |
-| 2 | Audio capture + VAD | < 10ms | CPU | PipeWire stream, Silero VAD |
-| 3 | Speech-to-text | < 300ms | CPU (AVX-512) | faster-whisper large-v3-turbo, INT8 batch |
-| 4a | Disfluency removal | < 15ms | CPU | BERT token classifier |
-| 4b | Punctuation + caps | < 15ms | CPU | ELECTRA-small classifier |
-| 4c | Self-correction + grammar | < 350ms | CPU (AVX-512) | Qwen3 4B Q4_K_M, only when needed |
-| 5 | Text injection | < 20ms | subprocess | ydotool/xdotool |
-| **Total (simple)** | | **< 365ms** | | **No self-corrections detected** |
-| **Total (complex)** | | **< 715ms** | | **Self-corrections present → LLM invoked** |
+| Stage | Component | Latency (GPU) | Latency (CPU) | Notes |
+|-------|-----------|--------------|---------------|-------|
+| 1 | Hotkey detection | < 5ms | < 5ms | Kernel-level evdev input event |
+| 2 | Audio capture + VAD + AGC | < 10ms | < 10ms | PipeWire stream, Silero VAD, auto gain control |
+| 3 | Speech-to-text | **~300ms** | ~2.5s | whisper.cpp large-v3-turbo (GPU via ROCm HIP) |
+| 4a | Disfluency removal | < 15ms | < 15ms | BERT token classifier / regex fallback |
+| 4b | Punctuation + caps | < 15ms | < 15ms | ELECTRA-small classifier / rule-based |
+| 4d | Number/date formatting | < 1ms | < 1ms | Rule-based spoken-form conversion |
+| 4c | Self-correction + grammar | **~200ms** | ~370ms | Qwen3 4B Q4_K_M (GPU), only when needed |
+| -- | Focused app detection | < 10ms | < 10ms | xdotool/swaymsg/hyprctl subprocess |
+| 5 | Text injection | < 20ms | < 20ms | ydotool/xdotool/wtype/clipboard |
+| **Total (simple)** | | **~350ms** | ~2.6s | **No self-corrections detected** |
+| **Total (complex)** | | **~550ms** | ~2.9s | **Self-corrections present → LLM invoked** |
 
-Stage 3 (STT) runs in batch mode after recording ends — faster-whisper processes the complete audio with INT8 quantization via CTranslate2. Stages 4a and 4b are fast encoder models that run in series on the final transcript. Stage 4c (generative LLM) is only invoked when the disfluency detector flags self-corrections in the transcript.
+Stage 3 (STT) runs in batch mode after recording ends. The default backend is whisper.cpp with ROCm GPU acceleration via ggml's HIP backend. On systems without ROCm, it falls back to CPU automatically. Stages 4a, 4b, and 4d are fast encoder/rule-based models. Stage 4c (generative LLM) is only invoked when the disfluency detector flags self-corrections. Voice snippet matches bypass the entire polish pipeline.
 
 ---
 

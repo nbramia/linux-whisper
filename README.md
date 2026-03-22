@@ -4,74 +4,79 @@ Local voice dictation for Linux. Press a hotkey, speak naturally with filler wor
 
 ## How It Works
 
-1. You press the hotkey (default: `Fn`). In **auto mode** (the default), the system detects your intent: hold the key for longer than 300ms and it's hold-to-talk (stops on release); double-tap quickly and it's toggle mode (stays recording until the next tap). A 750ms pre-roll buffer captures audio from *before* the keypress so the first syllable is never lost.
-2. You speak naturally. Silero VAD v5 monitors speech activity in real time. The system tray icon and a floating pill overlay show whether speech is detected.
-3. You release the hotkey (or tap again in toggle mode). The audio is fed through a 6-stage pipeline: STT transcription (faster-whisper with built-in VAD filtering), then a three-stage polish pipeline that removes filler words (BERT), adds punctuation (ELECTRA / rules), and conditionally invokes a local LLM to resolve self-corrections.
-4. Polished text is injected at the cursor position in whatever application is focused, via xdotool (X11), wtype (wlroots Wayland), ydotool (any Wayland), or clipboard fallback.
-
-The entire pipeline targets under 800ms end-to-end on a modern multi-core CPU.
+1. **Press the hotkey** (default: `Fn`). In auto mode, the system detects your intent: hold > 300ms for hold-to-talk, double-tap for toggle mode. A 750ms pre-roll buffer captures audio from *before* the keypress so the first syllable is never lost.
+2. **Speak naturally.** Say "um", repeat yourself, change your mind mid-sentence. Silero VAD v5 monitors speech in real time. The tray icon and floating overlay show when speech is detected.
+3. **Release the hotkey.** Audio goes through a 6-stage pipeline: STT transcription (whisper.cpp with GPU acceleration), then a four-stage polish pipeline that removes filler words, adds punctuation, formats numbers/dates, and conditionally invokes a local LLM to resolve self-corrections.
+4. **Text appears at the cursor** in whatever application is focused, via xdotool (X11), wtype (wlroots), ydotool (any Wayland), or clipboard fallback.
 
 ## Features
 
-- Auto mode (default): hold fn > 300ms for hold-to-talk, double-tap for toggle — plus explicit hold, toggle, and VAD-auto-stop modes via kernel-level evdev (works on X11 and Wayland)
-- Configurable hotkey with modifier support (`fn`, `ctrl+shift+e`, etc.)
-- Pre-roll buffer (750ms) captures audio before the hotkey press to avoid clipping first words
-- Silero VAD v5 voice activity detection with adaptive noise floor
-- Audio feedback tones (rising chirp on start, falling on stop) generated programmatically
-- Multiple STT backends: faster-whisper (CTranslate2, INT8), Moonshine v2 (ONNX), whisper.cpp
-- Hot-swappable models from the system tray menu with automatic config persistence
-- Three-stage polish pipeline: BERT disfluency removal, ELECTRA/rule-based punctuation, conditional LLM correction
-- LLM stage (Qwen3 4B via llama-cpp) lazy-loaded only when self-corrections are detected, with hallucination guard and timeout
-- Text injection auto-detects display server and compositor (xdotool, wtype, ydotool, clipboard)
-- Clipboard injection saves and restores original clipboard contents
-- System tray with state icons (idle/recording/speech/processing/error), model switcher, mode switcher, latency stats, copy-last-transcription
-- Floating GTK4 pill overlay with animated audio level bars
-- Full YAML configuration with validation
-- CLI for model management, config inspection, and key diagnostics
+- **Auto mode** (default): hold fn > 300ms for hold-to-talk, double-tap for toggle. Plus explicit hold, toggle, and VAD-auto-stop modes via kernel-level evdev (works on X11 and Wayland)
+- **GPU-accelerated STT**: whisper.cpp with ROCm HIP on AMD GPUs. ~5-10x faster than CPU (0.3s vs 2.5s for 5s audio). Automatic CPU fallback when GPU is unavailable
+- **GPU-accelerated LLM**: Qwen3 4B via llama-cpp with ROCm offload (~2x speedup)
+- **Automatic gain control**: normalizes quiet/whispered speech before STT for consistent transcription quality
+- **Voice snippets**: say a trigger phrase ("my email") to instantly expand configured text, bypassing the full pipeline
+- **Context-aware tone**: detects the focused application (Slack, email, terminal, etc.) and adjusts LLM output tone accordingly
+- **Number/date formatting**: spoken forms like "three hundred and fifty" or "march twenty second" are automatically converted to "350" and "March 22nd"
+- **Multiple STT backends**: whisper.cpp (default, GPU), faster-whisper (CTranslate2, CPU), Moonshine v2 (ONNX, streaming)
+- **Hot-swappable models** from the system tray menu with automatic config persistence
+- **Four-stage polish pipeline**: BERT disfluency removal, ELECTRA/rule-based punctuation, spoken-form formatting, conditional LLM correction
+- **Pre-roll buffer** (750ms) captures audio before the hotkey press
+- **Text injection** auto-detects display server and compositor
+- **System tray** with state icons, model/mode switcher, snippets menu, latency stats
+- **Floating GTK4 pill overlay** with animated audio level bars
+- **Full YAML configuration** with validation
 
 ## Architecture
 
 ```
-Press hotkey         Capture audio        Transcribe           Polish text           Inject
-   (evdev)          (sounddevice)      (faster-whisper)    (BERT+rules+LLM)     (xdotool/wtype)
-     |                   |                   |                   |                    |
-     v                   v                   v                   v                    v
- +--------+   +------------------+   +---------------+   +-----------------+   +------------+
- | Stage 1|-->| Stage 2          |-->| Stage 3       |-->| Stage 4a/4b/4c  |-->| Stage 5    |
- | Hotkey |   | Audio + VAD      |   | STT Engine    |   | Polish Pipeline |   | Text       |
- | <5ms   |   | Ring buf+preroll |   | <500ms batch  |   | 4a: <15ms BERT  |   | Injection  |
- |        |   | Silero VAD <1ms  |   | INT8 on CPU   |   | 4b: <15ms rules |   | <20ms      |
- +--------+   +------------------+   +---------------+   | 4c: <350ms LLM* |   +------------+
-                                                          +-----------------+
+Press hotkey         Capture audio        Transcribe            Polish text            Inject
+   (evdev)          (sounddevice)       (whisper.cpp)      (BERT+rules+fmt+LLM)    (xdotool/wtype)
+     |                   |                   |                    |                     |
+     v                   v                   v                    v                     v
+ +--------+   +------------------+   +---------------+   +------------------+   +------------+
+ | Stage 1|-->| Stage 2          |-->| Stage 3       |-->| Stage 4a/4b/4d/4c|-->| Stage 5    |
+ | Hotkey |   | Audio + VAD      |   | STT Engine    |   | Polish Pipeline  |   | Text       |
+ | <5ms   |   | Ring buf+preroll |   | ~300ms (GPU)  |   | 4a: <15ms BERT   |   | Injection  |
+ |        |   | Silero VAD <1ms  |   | ~2.5s  (CPU)  |   | 4b: <15ms rules  |   | <20ms      |
+ +--------+   +------------------+   | AGC applied   |   | 4d: <1ms format  |   +------------+
+                                     +---------------+   | 4c: ~200ms LLM*  |
+                                                         +------------------+
 
  * Stage 4c only runs when self-corrections are detected.
+ ** Snippet matches bypass the entire polish pipeline.
 
- Simple utterance (no self-corrections):  <365ms total
- Complex utterance (LLM invoked):         <715ms total
+ With GPU (default):  ~350ms total (simple) / ~550ms (with LLM)
+ CPU-only fallback:   ~2.6s total (simple) / ~2.9s (with LLM)
 ```
 
 The polish pipeline uses a hybrid approach:
 
-- **Stage 4a** -- BERT token classifier (or regex fallback) removes filler words ("um", "uh", "like"), repetitions, and false starts. Sequence labeling cannot hallucinate.
-- **Stage 4b** -- ELECTRA classifier (or rule-based fallback) adds punctuation and fixes capitalization. Also cannot hallucinate.
-- **Stage 4c** -- Qwen3 4B LLM via llama-cpp resolves self-corrections ("at 2, actually 4" becomes "at 4") and fixes grammar. Only invoked when Stage 4a flags self-correction patterns. Lazy-loaded to save ~2.5GB RAM when not needed. Has a 3-second timeout and a 2x length hallucination guard.
+- **Stage 4a** -- BERT token classifier (or regex fallback) removes filler words ("um", "uh", "like"), repetitions, and false starts. Cannot hallucinate.
+- **Stage 4b** -- ELECTRA classifier (or rule-based fallback) adds punctuation and fixes capitalization. Cannot hallucinate.
+- **Stage 4d** -- Rule-based formatter converts spoken numbers, dates, times, currency, emails, and phone numbers to their written forms.
+- **Stage 4c** -- Qwen3 4B LLM via llama-cpp resolves self-corrections ("at 2, actually 4" becomes "at 4"). Only invoked when Stage 4a flags self-correction patterns. Context-aware: adapts tone based on the focused application. Lazy-loaded to save ~2.5GB RAM when not needed. Has a 3-second timeout and a 2x length hallucination guard.
 
 This split means 80%+ of dictations never touch a generative model.
 
 ## STT Models
 
-| Model | Backend | Params | WER | Speed | RAM | Use Case |
-|-------|---------|--------|-----|-------|-----|----------|
-| **large-v3-turbo** | faster-whisper | 809M | 7.25% | Batch, INT8 on CPU | ~4GB (Q8) | **Default.** Best quality on CPU. |
-| distil-large-v3.5 | faster-whisper | 756M | 7.10% | Batch, INT8 on CPU | ~3.5GB (Q8) | English-only, slightly better WER. |
-| medium.en | faster-whisper | 769M | ~8% | Batch, INT8 on CPU | ~2GB | Faster, English-only. |
-| small.en | faster-whisper | 244M | ~10% | Batch, INT8 on CPU | ~1GB | Fastest Whisper variant. |
-| moonshine-medium | moonshine | 244.9M | 6.65% | ONNX, streaming | ~500MB | Low latency, streaming capable. |
-| moonshine-tiny | moonshine | 33.6M | 12.01% | ONNX, streaming | ~150MB | Instant inference, lower accuracy. |
+| Model | Backend | Params | WER | Speed (GPU) | Speed (CPU) | Use Case |
+|-------|---------|--------|-----|-------------|-------------|----------|
+| **large-v3-turbo** | whisper.cpp | 809M | 7.25% | **~300ms/5s** | ~2.5s/5s | **Default.** Best quality. |
+| distil-large-v3.5 | whisper.cpp / faster-whisper | 756M | 7.10% | ~250ms/5s | ~2s/5s | English-only, slightly better WER. |
+| moonshine-medium | moonshine | 244.9M | 6.65% | N/A | ONNX streaming | Low latency, streaming capable. |
+| moonshine-tiny | moonshine | 33.6M | 12.01% | N/A | ONNX streaming | Instant inference, lower accuracy. |
 
-The default is `faster-whisper` with `large-v3-turbo` (INT8 quantization via CTranslate2). Models are hot-swappable from the system tray menu at runtime without restarting the application. The selected model persists across restarts.
+The default is whisper.cpp with `large-v3-turbo` and ROCm GPU acceleration. On systems without a supported GPU, it falls back to CPU automatically. Models are hot-swappable from the system tray menu at runtime.
 
 ## Installation
+
+### Requirements
+
+- Linux with X11 or Wayland
+- Python >= 3.12
+- For GPU acceleration: AMD GPU with ROCm support (tested on Radeon 8060S / gfx1151 / RDNA 3.5)
 
 ### System dependencies
 
@@ -90,17 +95,29 @@ sudo systemctl enable --now ydotool
 ### Install from source
 
 ```bash
-git clone https://github.com/nathanramia/linux-whisper.git
+git clone https://github.com/nbramia/linux-whisper.git
 cd linux-whisper
 pip install -e ".[full]"
 ```
 
-The `[full]` extra installs all optional dependencies: sounddevice, onnxruntime, moonshine, llama-cpp-python, evdev, pystray, and Pillow. Install individual extras as needed:
+The `[full]` extra installs all optional dependencies. Install individual extras as needed:
 
 ```bash
-pip install -e ".[audio,vad,hotkey,tray]"       # Core without ML backends
-pip install -e ".[audio,vad,hotkey,tray,llm]"    # Add LLM polish stage
+pip install -e ".[audio,vad,hotkey,tray]"                # Core without ML backends
+pip install -e ".[audio,vad,hotkey,tray,whisper]"         # Add whisper.cpp STT
+pip install -e ".[audio,vad,hotkey,tray,whisper,llm]"     # Add LLM polish stage
 ```
+
+### GPU acceleration (AMD ROCm)
+
+The default `pywhispercpp` and `llama-cpp-python` packages include ROCm support. For optimal LLM performance, rebuild llama-cpp-python with HIP:
+
+```bash
+CMAKE_ARGS="-DGGML_HIP=ON -DAMDGPU_TARGETS=gfx1151" \
+  pip install llama-cpp-python --force-reinstall --no-cache-dir
+```
+
+Replace `gfx1151` with your GPU's architecture (check with `rocminfo`).
 
 ### Input group setup
 
@@ -155,7 +172,6 @@ Config file: `~/.config/linux-whisper/config.yaml`
 
 ```yaml
 # Hotkey — any key name recognized by evdev, with optional modifiers.
-# Examples: "fn", "ctrl+shift+e", "super+grave"
 hotkey: "fn"
 
 # Mode: how the hotkey triggers recording.
@@ -167,38 +183,50 @@ mode: "auto"
 
 # Speech-to-text engine
 stt:
-  backend: "faster-whisper"   # faster-whisper | moonshine | whisper-cpp
-  model: "large-v3-turbo"     # see model table above
-  threads: 0                  # CPU threads for inference (0 = auto-detect)
+  backend: "whisper-cpp"       # whisper-cpp | faster-whisper | moonshine
+  model: "whisper-large-v3-turbo"
+  device: "rocm"               # rocm (GPU) | cpu — auto-falls back to CPU
+  threads: 0                   # CPU threads (0 = auto-detect)
 
 # Polish pipeline — cleans up raw transcripts
 polish:
-  enabled: true               # false to get raw STT output
-  disfluency: true            # Stage 4a: remove fillers and repetitions
-  punctuation: true           # Stage 4b: add punctuation and capitalization
-  llm: true                   # Stage 4c: resolve self-corrections via LLM
-  llm_always: false           # true = run LLM on every utterance, not just self-corrections
-  llm_backend: "llama-cpp"    # LLM inference backend
-  llm_model: "Qwen3-4B-Q4_K_M"  # GGUF model filename (in ~/.cache/linux-whisper/models/llm/)
-  llm_threads: 0              # CPU threads for LLM inference (0 = auto-detect)
+  enabled: true                # false to get raw STT output
+  disfluency: true             # Stage 4a: remove fillers and repetitions
+  punctuation: true            # Stage 4b: add punctuation and capitalization
+  formatting: true             # Stage 4d: format numbers, dates, times, currency
+  llm: true                    # Stage 4c: resolve self-corrections via LLM
+  llm_always: false            # true = run LLM on every utterance
+  context_awareness: true      # detect focused app, adjust LLM tone
+  llm_backend: "llama-cpp"
+  llm_model: "Qwen3-4B-Q4_K_M"
+  llm_device: "rocm"           # rocm (GPU) | cpu
+  llm_threads: 0
 
 # Audio capture
 audio:
-  sample_rate: 16000           # 16kHz required by all STT models
-  vad_threshold: 0.6           # Silero VAD speech probability threshold (0.0-1.0)
-  silence_timeout: 0.5         # Seconds of silence before VAD auto-stop
-  feedback_sounds: true        # Play start/stop audio cues
-  buffer_size: 512             # Samples per audio callback (32ms at 16kHz)
+  sample_rate: 16000
+  vad_threshold: 0.6
+  silence_timeout: 0.5
+  feedback_sounds: true
+  buffer_size: 512
+  auto_gain: true              # AGC for quiet/whispered speech
 
 # Text injection
 inject:
   method: "auto"               # auto | xdotool | ydotool | wtype | clipboard
-  typing_delay: 0              # Milliseconds between injected keystrokes (0 = instant)
+  typing_delay: 0
 
 # System tray
 tray:
-  enabled: true                # false to run headless
-  show_preview: false          # Floating overlay with streaming transcript (future)
+  enabled: true
+  show_preview: false
+
+# Voice snippets — trigger phrases that expand to saved text
+snippets:
+  # "my email": "nathan@example.com"
+  # "meeting followup": |
+  #   Hi team,
+  #   Following up on our meeting...
 ```
 
 ## CLI Reference
@@ -211,13 +239,13 @@ linux-whisper [--version] [--config PATH] [-v|-vv] COMMAND
 |---------|-------------|
 | `run` | Start the dictation service (default if no command given) |
 | `run --no-tray` | Start without system tray icon |
-| `models list` | List available models with download status, params, WER, RAM |
-| `models download MODEL_ID` | Download a model (models also auto-download on first use) |
+| `models list` | List available models with download status |
+| `models download MODEL_ID` | Download a model |
 | `models default MODEL_ID` | Set the default STT model |
-| `config init` | Create default config file at `~/.config/linux-whisper/config.yaml` |
-| `config show` | Print current resolved configuration as YAML |
+| `config init` | Create default config file |
+| `config show` | Print current resolved configuration |
 | `config path` | Print config file path |
-| `config validate` | Validate current config and report errors |
+| `config validate` | Validate config and report errors |
 | `listen-keys` | Show live key events from all input devices (diagnostic) |
 
 Verbosity: `-v` for INFO, `-vv` for DEBUG.
@@ -236,36 +264,12 @@ The tray icon reflects application state:
 
 Right-click context menu:
 
-- **Copy Last** -- copies the most recent transcription to the clipboard (via wl-copy or xclip)
+- **Copy Last** -- copies the most recent transcription to the clipboard
 - **Model** -- submenu to hot-swap STT model at runtime (persists to config)
-- **Mode** -- submenu to switch between auto (default — hold vs double-tap detection), hold, toggle, and VAD-auto modes (persists to config)
+- **Mode** -- submenu to switch between auto, hold, toggle, and VAD-auto modes
+- **Snippets** -- shows configured voice snippet triggers
 - **Latency** -- displays last and rolling-average end-to-end latency
 - **Quit** -- clean shutdown
-
-## Memory Footprint
-
-| Configuration | Idle RAM | Notes |
-|---------------|----------|-------|
-| faster-whisper large-v3-turbo + polish (no LLM loaded) | ~1.5 GB | LLM lazy-loads only when self-corrections detected |
-| faster-whisper large-v3-turbo + polish (LLM warm) | ~4 GB | After first self-correction triggers LLM load |
-| Moonshine medium + polish (no LLM) | ~870 MB | Lighter STT model |
-| Moonshine tiny + no polish | ~350 MB | Minimal configuration |
-
-The LLM (Qwen3 4B Q4_K_M, ~2.5 GB) is intentionally lazy-loaded. It stays unloaded until the disfluency detector first flags a self-correction, keeping idle memory at ~1.5 GB for the default configuration. Once loaded, it remains warm in RAM for subsequent use.
-
-## Technical Decisions
-
-**Why CPU-first.** The primary target is AMD CPUs with AVX-512 (specifically Ryzen AI MAX+ 395). CTranslate2 and llama.cpp both have explicit AVX-512 code paths. No NVIDIA GPU is assumed. ROCm for RDNA 3.5 iGPUs is experimental and deferred to a future release.
-
-**Why hybrid polish instead of a single LLM.** A single generative LLM would pay 300-500ms latency on every utterance, even trivial ones. Filler removal and punctuation are sequence-labeling tasks where encoder models are faster, deterministic, and cannot hallucinate. The LLM only activates for the ~20% of utterances containing self-corrections, saving latency and RAM for the common case.
-
-**Why pre-roll buffer.** Users often start speaking the instant they press the hotkey, or even slightly before. The ring buffer continuously captures audio, and the 750ms pre-roll is fed into the STT engine at recording start. Without this, the first word is consistently clipped.
-
-**Why faster-whisper over Moonshine as default.** Despite Moonshine's streaming capability and smaller footprint, faster-whisper with large-v3-turbo produces noticeably better transcription quality in practice. The built-in Silero VAD filter in faster-whisper also handles silence trimming well. Moonshine remains available as an alternative for users who prefer lower latency or lower memory usage.
-
-**Why evdev for hotkeys.** Alternatives like pynput are X11-only. The keyboard library requires root. D-Bus global shortcut portals are desktop-specific. evdev reads directly from `/dev/input/event*` and works universally on X11 and Wayland with only `input` group membership.
-
-**Why no PyTorch.** All inference runs through ONNX Runtime or llama.cpp. PyTorch would add ~1.2 GB of framework overhead and CUDA dependencies for no benefit on a CPU-first architecture.
 
 ## Development
 
@@ -275,33 +279,39 @@ The LLM (Qwen3 4B Q4_K_M, ~2.5 GB) is intentionally lazy-loaded. It stays unload
 src/linux_whisper/
     __init__.py
     app.py              # Main orchestrator, wires all stages
-    audio.py            # Ring buffer, Silero VAD, audio capture, feedback tones
+    audio.py            # Ring buffer, Silero VAD, audio capture, AGC, feedback tones
     cli.py              # CLI entry point and subcommands
     config.py           # YAML config loading, validation, dataclasses
+    focus.py            # Focused app detection (X11/Sway/Hyprland), context-aware prompts
     hotkey.py           # evdev global hotkey daemon
+    snippets.py         # Voice snippet matching (fuzzy, case-insensitive)
     state.py            # Async state machine (IDLE/RECORDING/PROCESSING/ERROR)
     overlay.py          # GTK4 floating pill with audio level bars
     tray.py             # pystray system tray with icon generation
     stt/
         engine.py       # STTEngine protocol and factory
-        faster_whisper.py  # CTranslate2 INT8 backend
-        moonshine.py    # ONNX Runtime backend
+        whisper_cpp.py  # whisper.cpp backend (default, GPU-accelerated via ROCm)
+        faster_whisper.py  # CTranslate2 INT8 backend (CPU-only)
+        moonshine.py    # ONNX Runtime backend (streaming)
     polish/
-        pipeline.py     # Three-stage orchestrator
+        pipeline.py     # Four-stage orchestrator
         disfluency.py   # BERT ONNX / regex filler removal
         punctuation.py  # ELECTRA ONNX / rule-based punctuation
-        llm.py          # Qwen3 4B via llama-cpp-python
+        formatting.py   # Rule-based number/date/time/currency/email formatting
+        llm.py          # Qwen3 4B via llama-cpp-python (ROCm GPU offload)
     inject/
         injector.py     # Display server detection, xdotool/wtype/ydotool/clipboard
 tests/
-    conftest.py
-    test_audio.py
+    conftest.py         # Shared fixtures, optional dependency stubs
+    test_audio.py       # Ring buffer, tones, AGC
     test_cli.py
     test_config.py
+    test_focus.py       # Focused app detection
     test_inject.py
-    test_polish.py
+    test_polish.py      # All polish stages + pipeline integration
+    test_snippets.py    # Snippet matching
     test_state.py
-    test_stt.py
+    test_stt.py         # STT engine protocol + device config
 ```
 
 ### Running tests
@@ -326,6 +336,18 @@ ruff check src tests
 ruff format src tests
 ```
 
+## Technical Decisions
+
+**Why GPU-first with CPU fallback.** The primary target is AMD systems with ROCm-capable GPUs. whisper.cpp and llama.cpp both support HIP via ggml. GPU STT brings latency from ~2.5s to ~300ms for a 5-second recording. On systems without ROCm, the same code paths fall back to CPU automatically.
+
+**Why hybrid polish instead of a single LLM.** A single generative LLM would pay 300-500ms latency on every utterance, even trivial ones. Filler removal and punctuation are sequence-labeling tasks where encoder models are faster, deterministic, and cannot hallucinate. The LLM only activates for the ~20% of utterances containing self-corrections, saving latency and RAM for the common case.
+
+**Why pre-roll buffer.** Users often start speaking the instant they press the hotkey, or even slightly before. The ring buffer continuously captures audio, and the 750ms pre-roll is fed into the STT engine at recording start. Without this, the first word is consistently clipped.
+
+**Why evdev for hotkeys.** Alternatives like pynput are X11-only. The keyboard library requires root. D-Bus global shortcut portals are desktop-specific. evdev reads directly from `/dev/input/event*` and works universally on X11 and Wayland with only `input` group membership.
+
+**Why no PyTorch.** All inference runs through ONNX Runtime, whisper.cpp, or llama.cpp. PyTorch would add ~1.2 GB of framework overhead and CUDA dependencies for no benefit.
+
 ## License
 
-MIT
+MIT License. See [LICENSE](LICENSE) for details.

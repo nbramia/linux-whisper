@@ -2,7 +2,7 @@
 name = "linux-whisper"
 version = "0.1.0"
 description = "Wispr Flow-quality voice dictation, running entirely locally on Linux"
-readme = "vision.md"
+readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "Nathan Ramia" }]
@@ -26,7 +26,7 @@ rocm = ["onnxruntime-rocm>=1.19"]
 
 # Install everything for full functionality
 full = [
-    "linux-whisper[audio,vad,moonshine,llm,hotkey,tray]",
+    "linux-whisper[audio,vad,whisper,moonshine,llm,hotkey,tray]",
 ]
 
 dev = [

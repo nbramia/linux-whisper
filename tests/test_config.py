@@ -33,9 +33,9 @@ class TestDefaults:
 
     def test_stt_defaults(self):
         stt = STTConfig()
-        assert stt.backend == "faster-whisper"
-        assert stt.model == "large-v3-turbo"
-        assert stt.device == "cpu"
+        assert stt.backend == "whisper-cpp"
+        assert stt.model == "whisper-large-v3-turbo"
+        assert stt.device == "rocm"
         assert stt.threads == 0
 
     def test_polish_defaults(self):
@@ -47,7 +47,7 @@ class TestDefaults:
         assert p.llm is True
         assert p.llm_always is False
         assert p.context_awareness is True
-        assert p.llm_device == "cpu"
+        assert p.llm_device == "rocm"
 
     def test_audio_defaults(self):
         a = AudioConfig()
@@ -84,7 +84,7 @@ class TestFromDict:
         assert cfg.hotkey == "alt+d"
         assert cfg.mode == "toggle"
         # Nested defaults still hold
-        assert cfg.stt.backend == "faster-whisper"
+        assert cfg.stt.backend == "whisper-cpp"
 
     def test_nested_override(self):
         cfg = Config.from_dict({
@@ -207,7 +207,7 @@ class TestLoad:
         cfg = Config.load(tmp_config_file)
         assert cfg.hotkey == "fn"
         assert cfg.mode == "auto"
-        assert cfg.stt.backend == "faster-whisper"
+        assert cfg.stt.backend == "whisper-cpp"
 
     def test_load_empty_file_gives_defaults(self, empty_config_file: Path):
         cfg = Config.load(empty_config_file)
@@ -271,13 +271,13 @@ class TestMergeDataclass:
     def test_partial_overrides(self):
         result = _merge_dataclass(STTConfig, {"backend": "whisper-cpp"})
         assert result.backend == "whisper-cpp"
-        assert result.model == "large-v3-turbo"  # default
+        assert result.model == "whisper-large-v3-turbo"  # default
 
     def test_skips_VALID_constants(self):
         # VALID_BACKENDS is a class variable, not a constructor param.
         # _merge_dataclass must skip it.
         result = _merge_dataclass(STTConfig, {"VALID_BACKENDS": ("fake",)})
-        assert result.backend == "faster-whisper"
+        assert result.backend == "whisper-cpp"
 
 
 # ── _dataclass_to_dict ──────────────────────────────────────────────────────
@@ -302,7 +302,7 @@ class TestDataclassToDict:
         assert "hotkey" in d
         assert "stt" in d
         assert isinstance(d["stt"], dict)
-        assert d["stt"]["backend"] == "faster-whisper"
+        assert d["stt"]["backend"] == "whisper-cpp"
         # VALID_ keys should not appear
         assert "VALID_BACKENDS" not in d["stt"]
         assert "VALID_MODES" not in d
