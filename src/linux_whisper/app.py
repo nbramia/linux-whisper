@@ -281,12 +281,11 @@ class App:
         latency, then schedules the async state transition.
         """
         # Start capturing audio IMMEDIATELY — don't wait for asyncio scheduling.
+        # Tray icon update is deferred to asyncio (it's slow — PIL image gen + disk write).
         if self._audio:
             self._audio.start_recording()
         if self._stt:
             self._stt.start_stream()
-        if self._tray:
-            self._tray.update_state(AppState.RECORDING)
 
         if self._loop is None or self._loop.is_closed():
             return

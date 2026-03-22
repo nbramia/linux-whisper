@@ -282,6 +282,11 @@ class SystemTray:
             logger.debug("Tray thread already running")
             return
 
+        # Pre-cache all icons so state transitions don't pay PIL generation cost
+        for state, factory in _ICON_FACTORIES.items():
+            _get_cached_icon(f"state_{state.value}", factory)
+        _get_cached_icon("rec_speech", _make_recording_speech_icon)
+
         self._thread = threading.Thread(
             target=self._run,
             name="linux-whisper-tray",
@@ -324,7 +329,7 @@ class SystemTray:
             return
 
         try:
-            icon.icon = _ICON_FACTORIES[state]()
+            icon.icon = _get_cached_icon(f"state_{state.value}", _ICON_FACTORIES[state])
             icon.title = _TOOLTIPS.get(state, "Linux Whisper")
         except Exception:
             logger.debug("Failed to update tray icon", exc_info=True)

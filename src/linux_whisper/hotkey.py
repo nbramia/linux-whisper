@@ -34,7 +34,8 @@ logger = logging.getLogger(__name__)
 _DEVICE_POLL_INTERVAL: Final[float] = 3.0
 
 # How long select() blocks before checking the stop flag.
-_SELECT_TIMEOUT: Final[float] = 0.25
+# Lower = faster hotkey response, slightly more CPU wake-ups when idle.
+_SELECT_TIMEOUT: Final[float] = 0.05  # 50ms max key detection latency
 
 
 # ---------------------------------------------------------------------------
