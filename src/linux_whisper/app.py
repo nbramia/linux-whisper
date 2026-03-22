@@ -259,7 +259,7 @@ class App:
                     noise_floor = noise_floor * 0.995 + rms * 0.005
                     # Speech = RMS is significantly above noise floor
                     speech = rms > noise_floor * 3.0 and rms > 0.008
-                    logger.info(
+                    logger.debug(
                         "audio: rms=%.5f peak=%.5f floor=%.5f speech=%s",
                         rms, peak, noise_floor, speech,
                     )
@@ -293,10 +293,20 @@ class App:
         if not audio_segments:
             return None
 
-        # Concatenate all audio and convert to 16-bit PCM bytes for the STT engine
+        # Concatenate all audio
         audio_float = np.concatenate(audio_segments)
         if len(audio_float) == 0:
             return None
+
+        # Trim silence — Moonshine struggles with long silence segments.
+        # Use energy-based trimming: keep only regions above a threshold,
+        # with padding to avoid cutting speech edges.
+        audio_float = self._trim_silence(audio_float)
+        if len(audio_float) == 0:
+            return None
+
+        duration = len(audio_float) / 16000
+        logger.debug("Audio after silence trim: %.1fs (%d samples)", duration, len(audio_float))
 
         # Convert float32 [-1.0, 1.0] to int16 PCM bytes
         audio_int16 = (audio_float * 32767).astype(np.int16)
@@ -319,6 +329,65 @@ class App:
             logger.debug("Polished: %s", text[:100])
 
         return text
+
+    @staticmethod
+    def _trim_silence(audio: np.ndarray, frame_ms: int = 30, threshold_factor: float = 3.0, pad_frames: int = 5) -> np.ndarray:
+        """Remove leading/trailing/internal silence from audio.
+
+        Splits audio into frames, computes RMS per frame, identifies speech
+        frames (those above threshold_factor * median RMS), and keeps only
+        speech regions with padding. Multiple speech regions separated by
+        silence are concatenated with a short silence gap to preserve
+        natural pacing for the STT model.
+        """
+        sample_rate = 16000
+        frame_size = int(sample_rate * frame_ms / 1000)
+
+        if len(audio) < frame_size:
+            return audio
+
+        # Compute per-frame RMS
+        n_frames = len(audio) // frame_size
+        frames = audio[: n_frames * frame_size].reshape(n_frames, frame_size)
+        rms = np.sqrt(np.mean(frames ** 2, axis=1))
+
+        # Adaptive threshold: median RMS * factor, with a minimum floor
+        median_rms = float(np.median(rms))
+        threshold = max(median_rms * threshold_factor, 0.005)
+
+        # Find speech frames
+        is_speech = rms > threshold
+
+        if not np.any(is_speech):
+            # No speech detected at all — return the original (let STT decide)
+            return audio
+
+        # Expand speech regions by pad_frames on each side
+        padded = np.copy(is_speech)
+        for i in range(n_frames):
+            if is_speech[i]:
+                start = max(0, i - pad_frames)
+                end = min(n_frames, i + pad_frames + 1)
+                padded[start:end] = True
+
+        # Extract speech regions and join with a small silence gap
+        gap = np.zeros(int(sample_rate * 0.15), dtype=np.float32)  # 150ms gap
+        regions: list[np.ndarray] = []
+        in_region = False
+
+        for i in range(n_frames):
+            if padded[i]:
+                if not in_region and regions:
+                    regions.append(gap)
+                in_region = True
+                regions.append(frames[i])
+            else:
+                in_region = False
+
+        if not regions:
+            return audio
+
+        return np.concatenate(regions)
 
     async def _inject_text(self, text: str) -> None:
         """Inject text at the cursor position."""
