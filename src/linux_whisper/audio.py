@@ -670,20 +670,21 @@ class AudioPipeline:
         is_speech: bool,
         timestamp: float,
     ) -> None:
-        """Dispatch a VAD-processed audio window to consumers."""
+        """Dispatch a VAD-processed audio window to consumers.
+
+        ALL audio is forwarded during recording regardless of VAD state.
+        VAD is used only for the speech_active indicator (visual feedback).
+        This ensures the STT engine receives complete audio without gaps.
+        """
         if self._mode == PipelineMode.STREAMING:
-            # In streaming mode, forward every chunk that is speech
-            # (or all chunks if VAD is disabled)
-            if is_speech:
-                self._enqueue_chunk(AudioChunk(
-                    samples=window.copy(),
-                    timestamp=timestamp,
-                    is_speech=True,
-                ))
+            self._enqueue_chunk(AudioChunk(
+                samples=window.copy(),
+                timestamp=timestamp,
+                is_speech=is_speech,
+            ))
         else:
-            # Batch mode: accumulate speech frames
-            if is_speech:
-                self._batch_accumulator.append(window.copy())
+            # Batch mode: accumulate all frames
+            self._batch_accumulator.append(window.copy())
 
     def _enqueue_chunk(self, chunk: AudioChunk) -> None:
         """Thread-safe enqueue of a chunk to the async consumer queue."""

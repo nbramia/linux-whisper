@@ -47,8 +47,8 @@ class PolishConfig:
 @dataclass(frozen=True)
 class AudioConfig:
     sample_rate: int = 16000
-    vad_threshold: float = 0.5
-    silence_timeout: float = 2.0
+    vad_threshold: float = 0.6
+    silence_timeout: float = 0.5
     feedback_sounds: bool = True
     buffer_size: int = 512  # samples per chunk
 

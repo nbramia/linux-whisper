@@ -47,8 +47,8 @@ class TestDefaults:
     def test_audio_defaults(self):
         a = AudioConfig()
         assert a.sample_rate == 16000
-        assert a.vad_threshold == 0.5
-        assert a.silence_timeout == 2.0
+        assert a.vad_threshold == 0.6
+        assert a.silence_timeout == 0.5
         assert a.feedback_sounds is True
         assert a.buffer_size == 512
 
@@ -270,8 +270,8 @@ class TestDataclassToDict:
         d = _dataclass_to_dict(AudioConfig())
         assert d == {
             "sample_rate": 16000,
-            "vad_threshold": 0.5,
-            "silence_timeout": 2.0,
+            "vad_threshold": 0.6,
+            "silence_timeout": 0.5,
             "feedback_sounds": True,
             "buffer_size": 512,
         }
