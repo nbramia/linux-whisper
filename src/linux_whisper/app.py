@@ -238,30 +238,36 @@ class App:
             await self.state.transition(AppState.IDLE)
 
     async def _feed_audio_levels(self) -> None:
-        """Monitor VAD speech state and update tray/overlay accordingly."""
+        """Monitor audio levels and update tray/overlay accordingly.
+
+        Uses RMS energy for speech detection rather than Silero VAD,
+        since VAD threshold calibration varies by mic gain. A simple
+        RMS threshold is more robust for visual indication.
+        """
         if not self._audio:
             return
         last_speech = False
+        # Track a rolling baseline of ambient noise
+        noise_floor = 0.003  # initial estimate
         while self.state.is_recording:
             try:
-                speech = self._audio.speech_active if self._audio.vad_enabled else False
-                # Only update on state change to avoid hammering the tray
-                if speech != last_speech:
-                    last_speech = speech
-                    if self._tray:
-                        self._tray.set_speech_active(speech)
-                    if self._overlay:
-                        self._overlay.set_speech_active(speech)
+                recent = self._audio.get_pre_roll(0.1)  # last 100ms
+                if len(recent) > 0:
+                    rms = float(np.sqrt(np.mean(recent ** 2)))
+                    # Slowly adapt noise floor
+                    noise_floor = noise_floor * 0.995 + rms * 0.005
+                    # Speech = RMS is significantly above noise floor
+                    speech = rms > noise_floor * 3.0 and rms > 0.008
 
-                # Still feed level data to overlay if active
-                if self._overlay:
-                    recent = self._audio.get_pre_roll(0.05)
-                    if len(recent) > 0:
-                        rms = float(np.sqrt(np.mean(recent ** 2)))
-                        self._overlay.push_audio_level(min(1.0, rms * 5.0))
+                    if speech != last_speech:
+                        last_speech = speech
+                        if self._tray:
+                            self._tray.set_speech_active(speech)
+                        if self._overlay:
+                            self._overlay.set_speech_active(speech)
             except Exception:
                 pass
-            await asyncio.sleep(0.1)  # 10Hz polling
+            await asyncio.sleep(0.1)
 
     async def _process_pipeline(self) -> str | None:
         """Run the full pipeline: collect audio → STT → polish → text."""
