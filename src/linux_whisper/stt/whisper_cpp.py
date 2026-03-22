@@ -1,12 +1,19 @@
-"""whisper.cpp STT backend — non-streaming, buffer-and-process inference."""
+"""whisper.cpp STT backend via pywhispercpp — non-streaming, buffer-and-process.
+
+Uses pywhispercpp which bundles whisper.cpp with ggml backends.  When compiled
+with HIP support (the default pre-built wheel includes ``libggml-hip.so``),
+GPU acceleration is used automatically on AMD ROCm devices.
+"""
 
 from __future__ import annotations
 
-import array
 import logging
 import os
 import time
 from pathlib import Path
+from typing import Any
+
+import numpy as np
 
 from linux_whisper.config import MODELS_DIR, Config
 from linux_whisper.stt.engine import TranscriptResult, TranscriptSegment
@@ -14,14 +21,22 @@ from linux_whisper.stt.engine import TranscriptResult, TranscriptSegment
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Optional dependency guard
+# Optional dependency guard (lazy — avoids loading the C extension at import time)
 # ---------------------------------------------------------------------------
-try:
-    from whispercpp import Whisper  # type: ignore[import-untyped]
+_HAS_WHISPERCPP: bool | None = None  # resolved on first check
 
-    _HAS_WHISPERCPP = True
-except ImportError:
-    _HAS_WHISPERCPP = False
+
+def _check_whispercpp() -> bool:
+    """Check if pywhispercpp is available (cached)."""
+    global _HAS_WHISPERCPP  # noqa: PLW0603
+    if _HAS_WHISPERCPP is None:
+        try:
+            from pywhispercpp.model import Model as _  # noqa: F401
+
+            _HAS_WHISPERCPP = True
+        except ImportError:
+            _HAS_WHISPERCPP = False
+    return _HAS_WHISPERCPP
 
 # Model name → expected GGML filename in the cache directory
 _WHISPER_CPP_MODELS: dict[str, str] = {
@@ -35,13 +50,13 @@ _SAMPLE_WIDTH = 2  # 16-bit PCM → 2 bytes per sample
 
 
 def _require_whispercpp() -> None:
-    if not _HAS_WHISPERCPP:
+    if not _check_whispercpp():
         raise ImportError(
-            "The 'whispercpp' package is required for the whisper-cpp backend "
+            "The 'pywhispercpp' package is required for the whisper-cpp backend "
             "but is not installed.  Install it with:\n"
-            "    pip install whispercpp\n"
-            "or install linux-whisper with the whisper-cpp extra:\n"
-            "    pip install linux-whisper[whisper-cpp]"
+            "    pip install pywhispercpp\n"
+            "or install linux-whisper with the whisper extra:\n"
+            "    pip install linux-whisper[whisper]"
         )
 
 
@@ -64,12 +79,26 @@ def _resolve_model_path(model_name: str) -> Path:
     return model_file
 
 
+def _detect_gpu_available() -> bool:
+    """Check if the ggml HIP backend can see a ROCm GPU."""
+    if not _check_whispercpp():
+        return False
+    try:
+        import _pywhispercpp as pw
+
+        info = pw.whisper_print_system_info()
+        return isinstance(info, str) and "ROCm" in info
+    except Exception:
+        return False
+
+
 class WhisperCppEngine:
     """whisper.cpp speech-to-text engine (non-streaming).
 
     This backend buffers all audio fed via ``feed_audio`` and performs a
-    single inference pass in ``finalize()``.  It is better suited for
-    shorter utterances or when streaming latency is not critical.
+    single inference pass in ``finalize()``.  When pywhispercpp is built
+    with HIP support and ``config.stt.device`` is ``"rocm"``, inference
+    runs on the GPU automatically via ggml's HIP backend.
     """
 
     def __init__(self, config: Config) -> None:
@@ -77,16 +106,30 @@ class WhisperCppEngine:
 
         self._model_name = config.stt.model
         self._threads = config.stt.threads or os.cpu_count() or 4
+        self._device = config.stt.device
         self._model_path = _resolve_model_path(self._model_name)
 
-        self._whisper: Whisper | None = None
+        self._whisper: Any | None = None  # WhisperModel instance
         self._stream_started = False
         self._audio_buffer = bytearray()
         self._stream_start_time: float = 0.0
 
+        # Check GPU availability upfront
+        self._use_gpu = False
+        if self._device == "rocm":
+            if _detect_gpu_available():
+                self._use_gpu = True
+                logger.info("ROCm GPU detected — whisper.cpp will use GPU acceleration")
+            else:
+                logger.warning(
+                    "stt.device='rocm' but no ROCm GPU available — falling back to CPU"
+                )
+
+        device_label = "ROCm GPU" if self._use_gpu else "CPU"
         logger.info(
-            "WhisperCppEngine created: model=%s, threads=%d, path=%s",
+            "WhisperCppEngine created: model=%s, device=%s, threads=%d, path=%s",
             self._model_name,
+            device_label,
             self._threads,
             self._model_path,
         )
@@ -104,17 +147,26 @@ class WhisperCppEngine:
             "Loading whisper.cpp model from '%s' ...", self._model_path
         )
 
-        self._whisper = Whisper.from_pretrained(
+        from pywhispercpp.model import Model as WhisperModel
+
+        # pywhispercpp auto-detects GPU via ggml when HIP is compiled in.
+        # When device is "cpu", we disable GPU by setting the env var before init.
+        if not self._use_gpu:
+            os.environ["GGML_CUDA_NO_PINNED"] = "1"
+
+        self._whisper = WhisperModel(
             str(self._model_path),
             n_threads=self._threads,
+            redirect_whispercpp_logs_to=False,
         )
 
-        logger.info("whisper.cpp model loaded successfully")
+        device_label = "ROCm GPU" if self._use_gpu else "CPU"
+        logger.info("whisper.cpp model loaded successfully (device=%s)", device_label)
 
-    def _pcm_bytes_to_float_list(self, pcm: bytes | bytearray) -> list[float]:
-        """Convert raw 16-bit signed PCM bytes to a list of floats in [-1, 1]."""
-        samples = array.array("h", pcm)
-        return [s / 32768.0 for s in samples]
+    def _pcm_bytes_to_float_array(self, pcm: bytes | bytearray) -> np.ndarray:
+        """Convert raw 16-bit signed PCM bytes to a float32 numpy array in [-1, 1]."""
+        samples = np.frombuffer(pcm, dtype=np.int16)
+        return samples.astype(np.float32) / 32768.0
 
     def _audio_duration(self) -> float:
         """Duration of buffered audio in seconds."""
@@ -158,7 +210,7 @@ class WhisperCppEngine:
             logger.debug("whisper.cpp finalize called with empty buffer")
             return TranscriptResult(duration=0.0)
 
-        audio_float = self._pcm_bytes_to_float_list(self._audio_buffer)
+        audio_float = self._pcm_bytes_to_float_array(self._audio_buffer)
 
         logger.debug(
             "Running whisper.cpp inference on %.1fs of audio ...", duration
@@ -170,7 +222,7 @@ class WhisperCppEngine:
             logger.exception("whisper.cpp inference failed")
             return TranscriptResult(duration=duration)
 
-        # Parse whisper.cpp result into segments
+        # Parse pywhispercpp Segment objects into our TranscriptSegments
         segments: list[TranscriptSegment] = []
         full_parts: list[str] = []
 
@@ -188,22 +240,7 @@ class WhisperCppEngine:
             )
             full_parts.append(text)
 
-        # If whisper.cpp returned a flat string instead of segments, handle that
-        if not segments and hasattr(result, "strip"):
-            text = result.strip()  # type: ignore[union-attr]
-            if text:
-                segments.append(
-                    TranscriptSegment(
-                        text=text,
-                        start_time=0.0,
-                        end_time=duration,
-                        is_partial=False,
-                    )
-                )
-                full_parts.append(text)
-
         full_text = " ".join(full_parts)
-        detected_lang = getattr(result, "lang", None)
 
         logger.debug(
             "whisper.cpp finalized: %.1fs audio, %d segments, %d chars",
@@ -215,7 +252,6 @@ class WhisperCppEngine:
         return TranscriptResult(
             segments=segments,
             full_text=full_text,
-            language=detected_lang,
             duration=duration,
         )
 

@@ -93,9 +93,10 @@ def create_engine(config: Config) -> STTEngine:
     backend = stt.backend
 
     logger.info(
-        "Creating STT engine: backend=%s, model=%s, threads=%s",
+        "Creating STT engine: backend=%s, model=%s, device=%s, threads=%s",
         backend,
         stt.model,
+        stt.device,
         stt.threads,
     )
 

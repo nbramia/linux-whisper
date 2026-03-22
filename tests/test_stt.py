@@ -117,16 +117,16 @@ class TestCreateEngine:
         assert engine is mock_engine
 
     def test_whisper_cpp_backend_import(self):
-        """Test that create_engine attempts to import WhisperCppEngine for whisper-cpp backend."""
+        """Test that create_engine selects whisper-cpp backend."""
         cfg = Config.from_dict({
             "stt": {"backend": "whisper-cpp", "model": "whisper-large-v3-turbo"},
         })
 
         mock_engine = MagicMock()
-        with patch(
-            "linux_whisper.stt.whisper_cpp.WhisperCppEngine",
-            return_value=mock_engine,
-        ):
+        mock_cls = MagicMock(return_value=mock_engine)
+        mock_module = MagicMock()
+        mock_module.WhisperCppEngine = mock_cls
+        with patch.dict("sys.modules", {"linux_whisper.stt.whisper_cpp": mock_module}):
             engine = create_engine(cfg)
         assert engine is mock_engine
 
@@ -203,62 +203,51 @@ class TestMoonshineEngine:
 
 class TestWhisperCppEngine:
 
-    def test_invalid_model_raises_value_error(self):
-        from linux_whisper.stt.whisper_cpp import WhisperCppEngine
+    def test_invalid_model_raises_value_error(self, monkeypatch):
+        import linux_whisper.stt.whisper_cpp as wcpp_module
 
+        monkeypatch.setattr(wcpp_module, "_check_whispercpp", lambda: True)
         cfg = Config.from_dict({
             "stt": {"backend": "whisper-cpp", "model": "nonexistent-model"},
         })
         with pytest.raises(ValueError, match="Unknown whisper.cpp model"):
-            WhisperCppEngine(cfg)
+            wcpp_module.WhisperCppEngine(cfg)
 
-    def test_missing_package_raises_import_error(self):
+    def test_missing_package_raises_import_error(self, monkeypatch):
         import linux_whisper.stt.whisper_cpp as wcpp_module
 
-        original = wcpp_module._HAS_WHISPERCPP
-        try:
-            wcpp_module._HAS_WHISPERCPP = False
-            cfg = Config.from_dict({
-                "stt": {"backend": "whisper-cpp", "model": "whisper-large-v3-turbo"},
-            })
-            with pytest.raises(ImportError, match="whispercpp"):
-                wcpp_module.WhisperCppEngine(cfg)
-        finally:
-            wcpp_module._HAS_WHISPERCPP = original
-
-    def test_model_file_not_found(self):
-        """If the model file does not exist on disk, FileNotFoundError is raised."""
-        import linux_whisper.stt.whisper_cpp as wcpp_module
-
-        original = wcpp_module._HAS_WHISPERCPP
-        try:
-            wcpp_module._HAS_WHISPERCPP = True
-            cfg = Config.from_dict({
-                "stt": {"backend": "whisper-cpp", "model": "whisper-large-v3-turbo"},
-            })
-            with pytest.raises(FileNotFoundError, match="Model file not found"):
-                wcpp_module.WhisperCppEngine(cfg)
-        finally:
-            wcpp_module._HAS_WHISPERCPP = original
-
-    def test_feed_audio_without_start_raises(self):
-        """feed_audio before start_stream should raise RuntimeError."""
-        from linux_whisper.stt.whisper_cpp import WhisperCppEngine
-
+        monkeypatch.setattr(wcpp_module, "_check_whispercpp", lambda: False)
         cfg = Config.from_dict({
             "stt": {"backend": "whisper-cpp", "model": "whisper-large-v3-turbo"},
         })
-        # Need to bypass the model-file check by creating with mocked init
-        engine = object.__new__(WhisperCppEngine)
+        with pytest.raises(ImportError, match="whispercpp"):
+            wcpp_module.WhisperCppEngine(cfg)
+
+    def test_model_file_not_found(self, monkeypatch):
+        """If the model file does not exist on disk, FileNotFoundError is raised."""
+        import linux_whisper.stt.whisper_cpp as wcpp_module
+
+        monkeypatch.setattr(wcpp_module, "_check_whispercpp", lambda: True)
+        cfg = Config.from_dict({
+            "stt": {"backend": "whisper-cpp", "model": "whisper-large-v3-turbo"},
+        })
+        with pytest.raises(FileNotFoundError, match="Model file not found"):
+            wcpp_module.WhisperCppEngine(cfg)
+
+    def test_feed_audio_without_start_raises(self):
+        """feed_audio before start_stream should raise RuntimeError."""
+        import linux_whisper.stt.whisper_cpp as wcpp_module
+
+        engine = object.__new__(wcpp_module.WhisperCppEngine)
         engine._stream_started = False
         engine._audio_buffer = bytearray()
         with pytest.raises(RuntimeError, match="start_stream"):
             engine.feed_audio(b"\x00" * 100)
 
     def test_reset_clears_state(self):
-        from linux_whisper.stt.whisper_cpp import WhisperCppEngine
+        import linux_whisper.stt.whisper_cpp as wcpp_module
 
-        engine = object.__new__(WhisperCppEngine)
+        engine = object.__new__(wcpp_module.WhisperCppEngine)
         engine._audio_buffer = bytearray(b"\x00" * 100)
         engine._stream_started = True
 
@@ -267,12 +256,71 @@ class TestWhisperCppEngine:
         assert engine._stream_started is False
 
     def test_finalize_without_start_returns_empty(self):
-        from linux_whisper.stt.whisper_cpp import WhisperCppEngine
+        import linux_whisper.stt.whisper_cpp as wcpp_module
 
-        engine = object.__new__(WhisperCppEngine)
+        engine = object.__new__(wcpp_module.WhisperCppEngine)
         engine._stream_started = False
         engine._audio_buffer = bytearray()
 
         result = engine.finalize()
         assert result.full_text == ""
         assert result.segments == []
+
+
+# ── STT Device Config ─────────────────────────────────────────────────────
+
+
+class TestSTTDeviceConfig:
+    """Test stt.device configuration field."""
+
+    def test_default_device_is_cpu(self):
+        stt = STTConfig()
+        assert stt.device == "cpu"
+
+    def test_device_from_dict(self):
+        cfg = Config.from_dict({"stt": {"device": "rocm"}})
+        assert cfg.stt.device == "rocm"
+
+    def test_device_preserved_with_other_overrides(self):
+        cfg = Config.from_dict({
+            "stt": {"backend": "whisper-cpp", "device": "rocm", "model": "whisper-large-v3-turbo"}
+        })
+        assert cfg.stt.backend == "whisper-cpp"
+        assert cfg.stt.device == "rocm"
+        assert cfg.stt.model == "whisper-large-v3-turbo"
+
+
+class TestWhisperCppGPUDetection:
+    """Test GPU detection and fallback in WhisperCppEngine."""
+
+    def test_detect_gpu_available_with_rocm(self, monkeypatch):
+        import linux_whisper.stt.whisper_cpp as wcpp
+
+        monkeypatch.setattr(wcpp, "_check_whispercpp", lambda: True)
+
+        mock_pw = MagicMock()
+        mock_pw.whisper_print_system_info.return_value = (
+            "WHISPER : ROCm : NO_VMM = 1 | CPU : SSE3 = 1"
+        )
+        monkeypatch.setitem(sys.modules, "_pywhispercpp", mock_pw)
+
+        assert wcpp._detect_gpu_available() is True
+
+    def test_detect_gpu_available_without_rocm(self, monkeypatch):
+        import linux_whisper.stt.whisper_cpp as wcpp
+
+        monkeypatch.setattr(wcpp, "_check_whispercpp", lambda: True)
+
+        mock_pw = MagicMock()
+        mock_pw.whisper_print_system_info.return_value = (
+            "WHISPER : CPU : SSE3 = 1 | AVX = 1"
+        )
+        monkeypatch.setitem(sys.modules, "_pywhispercpp", mock_pw)
+
+        assert wcpp._detect_gpu_available() is False
+
+    def test_detect_gpu_unavailable_when_not_installed(self, monkeypatch):
+        import linux_whisper.stt.whisper_cpp as wcpp
+
+        monkeypatch.setattr(wcpp, "_check_whispercpp", lambda: False)
+        assert wcpp._detect_gpu_available() is False

@@ -35,6 +35,7 @@ class TestDefaults:
         stt = STTConfig()
         assert stt.backend == "faster-whisper"
         assert stt.model == "large-v3-turbo"
+        assert stt.device == "cpu"
         assert stt.threads == 0
 
     def test_polish_defaults(self):
