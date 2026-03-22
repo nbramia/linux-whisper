@@ -94,7 +94,7 @@ def tmp_config_file(tmp_config_dir: Path) -> Path:
     """Write a minimal YAML config and return its path."""
     cfg = {
         "hotkey": "fn",
-        "mode": "hold",
+        "mode": "auto",
         "stt": {"backend": "faster-whisper", "model": "large-v3-turbo"},
         "polish": {"enabled": True},
         "audio": {"sample_rate": 16000},

@@ -70,14 +70,14 @@ class TrayConfig:
 @dataclass(frozen=True)
 class Config:
     hotkey: str = "fn"
-    mode: str = "hold"  # hold | toggle | vad-auto
+    mode: str = "auto"  # auto | hold | toggle | vad-auto
     stt: STTConfig = field(default_factory=STTConfig)
     polish: PolishConfig = field(default_factory=PolishConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
     inject: InjectConfig = field(default_factory=InjectConfig)
     tray: TrayConfig = field(default_factory=TrayConfig)
 
-    VALID_MODES = ("hold", "toggle", "vad-auto")
+    VALID_MODES = ("auto", "hold", "toggle", "vad-auto")
 
     @classmethod
     def from_dict(cls, data: dict) -> Self:

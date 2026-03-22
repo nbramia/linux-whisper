@@ -219,7 +219,7 @@ class HotkeyDaemon:
       it down cleanly.
     """
 
-    VALID_MODES: Final = ("hold", "toggle", "vad-auto")
+    VALID_MODES: Final = ("auto", "hold", "toggle", "vad-auto")
 
     def __init__(
         self,
@@ -243,10 +243,19 @@ class HotkeyDaemon:
         self._held_modifiers: set[int] = set()
         # Whether the principal key is physically down right now.
         self._principal_held: bool = False
-        # Toggle bookkeeping.
-        self._toggle_active: bool = False
         # Track whether we are in a recording started by this daemon.
         self._recording: bool = False
+
+        # Auto-mode state: detects hold vs double-tap automatically.
+        # - Hold: press and hold > _HOLD_THRESHOLD_S → stop on key-up
+        # - Double-tap: two quick taps within _DOUBLE_TAP_WINDOW_S → toggle on, next tap toggles off
+        self._key_down_time: float = 0.0  # monotonic time of last key-down
+        self._last_tap_up_time: float = 0.0  # monotonic time of last quick tap key-up
+        self._in_toggle_mode: bool = False  # currently in double-tap toggle recording
+        _HOLD_THRESHOLD_S = 0.3  # seconds: hold longer than this = hold mode
+        _DOUBLE_TAP_WINDOW_S = 0.4  # seconds: second tap within this = double-tap
+        self._HOLD_THRESHOLD = _HOLD_THRESHOLD_S
+        self._DOUBLE_TAP_WINDOW = _DOUBLE_TAP_WINDOW_S
 
         logger.info(
             "HotkeyDaemon configured: combo=%s  mode=%s",
@@ -407,8 +416,9 @@ class HotkeyDaemon:
                 # In hold mode, releasing a modifier while principal key is
                 # held should also stop recording.
                 if (
-                    self._mode == "hold"
+                    self._mode in ("hold", "auto")
                     and self._recording
+                    and not self._in_toggle_mode
                     and normalized in self._combo.modifiers
                 ):
                     self._fire_stop()
@@ -416,35 +426,85 @@ class HotkeyDaemon:
 
         # Non-modifier key.
         if code == self._combo.key:
-            if value == 1:  # key down (ignore repeats for combo triggering)
+            if value == 1:  # key down
                 self._principal_held = True
                 if self._modifiers_satisfied():
-                    self._on_combo_press()
+                    self._on_key_down()
             elif value == 0:  # key up
                 self._principal_held = False
-                if self._mode == "hold" and self._recording:
-                    self._fire_stop()
+                if self._modifiers_satisfied() or self._recording:
+                    self._on_key_up()
 
     def _modifiers_satisfied(self) -> bool:
         """Return True when all required modifier keys are currently held."""
         return self._combo.modifiers.issubset(self._held_modifiers)
 
-    def _on_combo_press(self) -> None:
-        """Dispatch based on the active mode."""
-        match self._mode:
-            case "hold":
+    def _on_key_down(self) -> None:
+        """Handle hotkey press — dispatches based on mode."""
+        now = time.monotonic()
+
+        if self._mode in ("auto", "hold"):
+            # Auto mode: detect hold vs double-tap
+            if self._in_toggle_mode and self._recording:
+                # Currently in double-tap recording — this tap ends it
+                self._in_toggle_mode = False
+                self._fire_stop()
+                return
+            # Start recording immediately (hold-mode assumption)
+            self._key_down_time = now
+            self._fire_start()
+
+        elif self._mode == "toggle":
+            if self._recording:
+                self._fire_stop()
+            else:
                 self._fire_start()
-            case "toggle":
-                if self._toggle_active:
-                    self._fire_stop()
-                    self._toggle_active = False
-                else:
-                    self._fire_start()
-                    self._toggle_active = True
-            case "vad-auto":
-                # Only fires start; stop is handled externally by VAD.
-                if not self._recording:
-                    self._fire_start()
+
+        elif self._mode == "vad-auto":
+            if not self._recording:
+                self._fire_start()
+
+    def _on_key_up(self) -> None:
+        """Handle hotkey release."""
+        now = time.monotonic()
+
+        if self._mode == "hold":
+            # Pure hold mode — always stop on key-up
+            if self._recording:
+                self._fire_stop()
+            return
+
+        if self._mode not in ("auto",):
+            # Toggle and vad-auto don't care about key-up
+            return
+
+        # Auto mode: determine if this was a hold or a tap
+        held_duration = now - self._key_down_time
+
+        if self._in_toggle_mode:
+            # In toggle mode, key-up is ignored (stop happens on next key-down)
+            return
+
+        if not self._recording:
+            return
+
+        if held_duration >= self._HOLD_THRESHOLD:
+            # Long hold — stop recording (normal hold-to-talk)
+            self._fire_stop()
+            self._last_tap_up_time = 0.0
+        else:
+            # Quick tap — check for double-tap
+            time_since_last_tap = now - self._last_tap_up_time
+
+            if self._last_tap_up_time > 0 and time_since_last_tap < self._DOUBLE_TAP_WINDOW:
+                # Double-tap detected — enter toggle mode, stay recording
+                self._in_toggle_mode = True
+                self._last_tap_up_time = 0.0
+                logger.info("Double-tap detected — toggle mode, recording until next tap")
+            else:
+                # Single tap — stop recording, remember tap time
+                self._fire_stop()
+                self._last_tap_up_time = now
 
     def _fire_start(self) -> None:
         if self._recording:

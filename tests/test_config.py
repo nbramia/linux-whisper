@@ -28,7 +28,7 @@ class TestDefaults:
     def test_config_defaults(self):
         cfg = Config()
         assert cfg.hotkey == "fn"
-        assert cfg.mode == "hold"
+        assert cfg.mode == "auto"
 
     def test_stt_defaults(self):
         stt = STTConfig()
@@ -186,7 +186,7 @@ class TestLoad:
     def test_load_from_yaml(self, tmp_config_file: Path):
         cfg = Config.load(tmp_config_file)
         assert cfg.hotkey == "fn"
-        assert cfg.mode == "hold"
+        assert cfg.mode == "auto"
         assert cfg.stt.backend == "faster-whisper"
 
     def test_load_empty_file_gives_defaults(self, empty_config_file: Path):
@@ -223,7 +223,7 @@ class TestSaveDefault:
         with open(path) as f:
             data = yaml.safe_load(f)
         assert data["hotkey"] == "fn"
-        assert data["mode"] == "hold"
+        assert data["mode"] == "auto"
 
     def test_does_not_overwrite_existing(self, tmp_config_file: Path):
         # Modify the file
