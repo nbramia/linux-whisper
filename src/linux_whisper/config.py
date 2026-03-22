@@ -52,6 +52,7 @@ class AudioConfig:
     silence_timeout: float = 0.5
     feedback_sounds: bool = True
     buffer_size: int = 512  # samples per chunk
+    auto_gain: bool = True  # AGC for quiet/whispered speech
 
 
 @dataclass(frozen=True)

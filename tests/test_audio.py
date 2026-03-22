@@ -21,6 +21,7 @@ from linux_whisper.audio import (
     PipelineMode,
     RingBuffer,
     _generate_sweep,
+    apply_agc,
     generate_start_tone,
     generate_stop_tone,
 )
@@ -358,3 +359,71 @@ class TestSileroVADFallback:
 
 # Need to import Path for the tests above
 from pathlib import Path
+
+
+# ── Automatic Gain Control ─────────────────────────────────────────────────
+
+
+class TestApplyAGC:
+    """Test the apply_agc function."""
+
+    def test_boosts_quiet_audio(self):
+        # Peak of 0.1 should be boosted to ~0.7
+        audio = np.array([0.1, -0.05, 0.08, -0.1, 0.03], dtype=np.float32)
+        result = apply_agc(audio, target_peak=0.7)
+        assert np.isclose(np.max(np.abs(result)), 0.7, atol=1e-6)
+
+    def test_no_change_loud_audio(self):
+        # Peak of 0.8 is above 0.7 target — should return unchanged
+        audio = np.array([0.8, -0.5, 0.3, -0.8, 0.1], dtype=np.float32)
+        result = apply_agc(audio, target_peak=0.7)
+        np.testing.assert_array_equal(result, audio)
+
+    def test_exactly_at_target(self):
+        # Peak of exactly 0.7 — should return unchanged
+        audio = np.array([0.7, -0.3, 0.5, -0.7, 0.2], dtype=np.float32)
+        result = apply_agc(audio, target_peak=0.7)
+        np.testing.assert_array_equal(result, audio)
+
+    def test_silent_audio(self):
+        # All zeros — should return unchanged (no division by zero)
+        audio = np.zeros(100, dtype=np.float32)
+        result = apply_agc(audio)
+        np.testing.assert_array_equal(result, audio)
+
+    def test_clips_to_bounds(self):
+        # After gain, all values should be in [-1.0, 1.0]
+        audio = np.array([0.1, -0.1, 0.05, -0.05], dtype=np.float32)
+        result = apply_agc(audio, target_peak=0.7)
+        assert np.all(result >= -1.0)
+        assert np.all(result <= 1.0)
+
+    def test_preserves_dtype(self):
+        audio = np.array([0.1, -0.05], dtype=np.float32)
+        result = apply_agc(audio)
+        assert result.dtype == np.float32
+
+    def test_custom_target(self):
+        audio = np.array([0.2, -0.1, 0.15], dtype=np.float32)
+        result = apply_agc(audio, target_peak=0.5)
+        assert np.isclose(np.max(np.abs(result)), 0.5, atol=1e-6)
+
+    def test_single_sample(self):
+        audio = np.array([0.1], dtype=np.float32)
+        result = apply_agc(audio, target_peak=0.7)
+        assert np.isclose(result[0], 0.7, atol=1e-6)
+
+    def test_realistic_whispered_audio(self):
+        # Simulate whispered speech: low peak ~0.05
+        np.random.seed(42)
+        audio = (np.random.randn(16000).astype(np.float32) * 0.02)  # very quiet
+        peak_before = np.max(np.abs(audio))
+        result = apply_agc(audio, target_peak=0.7)
+        peak_after = np.max(np.abs(result))
+        assert peak_before < 0.1
+        assert np.isclose(peak_after, 0.7, atol=1e-6)
+
+    def test_default_target_is_0_7(self):
+        audio = np.array([0.1, -0.1], dtype=np.float32)
+        result = apply_agc(audio)
+        assert np.isclose(np.max(np.abs(result)), 0.7, atol=1e-6)
