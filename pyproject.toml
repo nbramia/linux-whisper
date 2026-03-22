@@ -21,7 +21,7 @@ moonshine = ["moonshine>=0.1"]
 llm = ["llama-cpp-python>=0.3"]
 hotkey = ["evdev>=1.7"]
 tray = ["pystray>=0.19", "Pillow>=10.0"]
-whisper = ["whispercpp>=0.1"]
+whisper = ["pywhispercpp>=1.4"]
 rocm = ["onnxruntime-rocm>=1.19"]
 
 # Install everything for full functionality
