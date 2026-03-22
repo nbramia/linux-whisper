@@ -142,59 +142,25 @@ def _make_recording_icon() -> Any:
     return img
 
 
-# Audio level bar colors for recording icon
 _GREEN = (80, 200, 120, 255)
-_GREEN_BRIGHT = (100, 240, 140, 255)
 
 
-def _make_recording_level_icon(level: float, speech: bool) -> Any:
-    """Recording icon with audio level bars around the mic.
-
-    *level* is 0.0-1.0 representing current audio amplitude.
-    *speech* indicates whether VAD detects speech.
-    """
+def _make_recording_speech_icon() -> Any:
+    """Green circle with mic and sound arcs - speech detected."""
     img, draw = _new_image()
-
-    if speech:
-        # Blend from red (silent) to green (loud) based on level
-        t = min(1.0, level * 2)
-        bg_r = int(_RED[0] + t * (_GREEN[0] - _RED[0]))
-        bg_g = int(_RED[1] + t * (_GREEN[1] - _RED[1]))
-        bg_b = int(_RED[2] + t * (_GREEN[2] - _RED[2]))
-        bg = (bg_r, bg_g, bg_b, 255)
-    else:
-        bg = _RED
-
-    _draw_circle(draw, bg)
+    _draw_circle(draw, _GREEN)
     _draw_mic(draw)
-
-    if speech and level > 0.01:
-        # Draw level arcs on left and right sides of the mic
-        n_arcs = min(3, max(1, int(level * 3 + 0.5)))
-        for i in range(n_arcs):
-            inset = 6 + i * 5
-            alpha = int(255 * (1.0 - i * 0.25))
-            arc_color = (_GREEN_BRIGHT[0], _GREEN_BRIGHT[1], _GREEN_BRIGHT[2], alpha)
-            # Left arc
-            draw.arc(
-                [inset, inset, _ICON_SIZE - inset, _ICON_SIZE - inset],
-                start=150, end=210,
-                fill=arc_color, width=2,
-            )
-            # Right arc
-            draw.arc(
-                [inset, inset, _ICON_SIZE - inset, _ICON_SIZE - inset],
-                start=-30, end=30,
-                fill=arc_color, width=2,
-            )
-    else:
-        # Subtle ring when recording but no speech
-        draw.ellipse(
-            [1, 1, _ICON_SIZE - 2, _ICON_SIZE - 2],
-            outline=_RED,
-            width=2,
+    # Sound wave arcs
+    for i in range(3):
+        inset = 6 + i * 5
+        draw.arc(
+            [inset, inset, _ICON_SIZE - inset, _ICON_SIZE - inset],
+            start=150, end=210, fill=_WHITE, width=2,
         )
-
+        draw.arc(
+            [inset, inset, _ICON_SIZE - inset, _ICON_SIZE - inset],
+            start=-30, end=30, fill=_WHITE, width=2,
+        )
     return img
 
 
@@ -221,6 +187,15 @@ _ICON_FACTORIES: dict[AppState, Callable[[], Any]] = {
     AppState.PROCESSING: _make_processing_icon,
     AppState.ERROR: _make_error_icon,
 }
+
+# Pre-built icons for audio level states (avoid regenerating on every update)
+_CACHED_ICONS: dict[str, Any] = {}
+
+
+def _get_cached_icon(key: str, factory: Callable[[], Any]) -> Any:
+    if key not in _CACHED_ICONS:
+        _CACHED_ICONS[key] = factory()
+    return _CACHED_ICONS[key]
 
 _TOOLTIPS: dict[AppState, str] = {
     AppState.IDLE: "Linux Whisper - idle",
@@ -344,11 +319,10 @@ class SystemTray:
             self._current_mode = mode
         self._refresh_menu()
 
-    def push_audio_level(self, level: float, speech: bool) -> None:
-        """Update the tray icon with a live audio level during recording.
+    def set_speech_active(self, speech: bool) -> None:
+        """Switch the tray icon between recording-silent and recording-speech.
 
-        Call at ~10-15fps during recording. The icon changes color and shows
-        arcs to reflect voice activity.
+        Call when VAD speech state changes (not every frame).
         """
         with self._lock:
             if self._current_state != AppState.RECORDING:
@@ -359,9 +333,14 @@ class SystemTray:
             return
 
         try:
-            icon.icon = _make_recording_level_icon(level, speech)
+            if speech:
+                icon.icon = _get_cached_icon("rec_speech", _make_recording_speech_icon)
+                icon.title = "Linux Whisper - listening (speech)"
+            else:
+                icon.icon = _get_cached_icon("rec_silent", _make_recording_icon)
+                icon.title = "Linux Whisper - listening"
         except Exception:
-            logger.debug("Failed to update audio level icon", exc_info=True)
+            logger.debug("Failed to update speech icon", exc_info=True)
 
     def update_stats(self, last_latency: float, avg_latency: float) -> None:
         """Push new latency numbers into the tray menu.

@@ -238,25 +238,30 @@ class App:
             await self.state.transition(AppState.IDLE)
 
     async def _feed_audio_levels(self) -> None:
-        """Feed real-time audio levels to tray/overlay while recording."""
+        """Monitor VAD speech state and update tray/overlay accordingly."""
         if not self._audio:
             return
+        last_speech = False
         while self.state.is_recording:
             try:
-                recent = self._audio.get_pre_roll(0.05)  # last 50ms
-                if len(recent) > 0:
-                    rms = float(np.sqrt(np.mean(recent ** 2)))
-                    level = min(1.0, rms * 5.0)
-                    speech = self._audio.speech_active if self._audio.vad_enabled else (level > 0.05)
-
+                speech = self._audio.speech_active if self._audio.vad_enabled else False
+                # Only update on state change to avoid hammering the tray
+                if speech != last_speech:
+                    last_speech = speech
                     if self._tray:
-                        self._tray.push_audio_level(level, speech)
+                        self._tray.set_speech_active(speech)
                     if self._overlay:
                         self._overlay.set_speech_active(speech)
-                        self._overlay.push_audio_level(level)
+
+                # Still feed level data to overlay if active
+                if self._overlay:
+                    recent = self._audio.get_pre_roll(0.05)
+                    if len(recent) > 0:
+                        rms = float(np.sqrt(np.mean(recent ** 2)))
+                        self._overlay.push_audio_level(min(1.0, rms * 5.0))
             except Exception:
                 pass
-            await asyncio.sleep(1.0 / 15)  # ~15fps for tray icon updates
+            await asyncio.sleep(0.1)  # 10Hz polling
 
     async def _process_pipeline(self) -> str | None:
         """Run the full pipeline: collect audio → STT → polish → text."""
