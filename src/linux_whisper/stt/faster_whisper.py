@@ -75,6 +75,7 @@ class FasterWhisperEngine:
 
         # Eagerly load the model at init so first recording has zero delay
         self._ensure_model()
+        self._warmup()
 
         logger.info(
             "FasterWhisperEngine ready: model=%s, threads=%d",
@@ -98,6 +99,25 @@ class FasterWhisperEngine:
             "faster-whisper model loaded in %.1fs",
             time.perf_counter() - t0,
         )
+
+    def _warmup(self) -> None:
+        """Run a dummy transcription to warm CTranslate2 caches.
+
+        Without this, the first real transcription pays a ~500ms penalty
+        for JIT compilation and memory allocation inside CTranslate2.
+        """
+        if self._model is None:
+            return
+        t0 = time.perf_counter()
+        dummy = np.zeros(int(_SAMPLE_RATE * 0.5), dtype=np.float32)
+        try:
+            segments, _ = self._model.transcribe(dummy, language="en", beam_size=1)
+            # Consume the generator to actually run inference
+            for _ in segments:
+                pass
+        except Exception:
+            pass
+        logger.info("faster-whisper warmup: %.0fms", (time.perf_counter() - t0) * 1000)
 
     def start_stream(self) -> None:
         self._ensure_model()
