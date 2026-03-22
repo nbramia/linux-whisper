@@ -203,8 +203,9 @@ class App:
 
         if self._overlay:
             self._overlay.show()
-            # Start feeding audio levels to overlay
-            asyncio.ensure_future(self._feed_overlay_levels())
+
+        # Start feeding audio levels to tray icon and overlay
+        asyncio.ensure_future(self._feed_audio_levels())
 
         logger.debug("Recording started")
 
@@ -236,24 +237,26 @@ class App:
                 self._overlay.hide()
             await self.state.transition(AppState.IDLE)
 
-    async def _feed_overlay_levels(self) -> None:
-        """Feed real-time audio levels to the overlay while recording."""
-        if not self._audio or not self._overlay:
+    async def _feed_audio_levels(self) -> None:
+        """Feed real-time audio levels to tray/overlay while recording."""
+        if not self._audio:
             return
         while self.state.is_recording:
-            if self._audio.vad_enabled:
-                self._overlay.set_speech_active(self._audio.speech_active)
-            # Compute RMS level from the ring buffer's recent samples
             try:
                 recent = self._audio.get_pre_roll(0.05)  # last 50ms
                 if len(recent) > 0:
                     rms = float(np.sqrt(np.mean(recent ** 2)))
-                    # Scale to 0-1 range (typical speech RMS is 0.01-0.3)
                     level = min(1.0, rms * 5.0)
-                    self._overlay.push_audio_level(level)
+                    speech = self._audio.speech_active if self._audio.vad_enabled else (level > 0.05)
+
+                    if self._tray:
+                        self._tray.push_audio_level(level, speech)
+                    if self._overlay:
+                        self._overlay.set_speech_active(speech)
+                        self._overlay.push_audio_level(level)
             except Exception:
                 pass
-            await asyncio.sleep(1.0 / 30)  # ~30fps
+            await asyncio.sleep(1.0 / 15)  # ~15fps for tray icon updates
 
     async def _process_pipeline(self) -> str | None:
         """Run the full pipeline: collect audio → STT → polish → text."""

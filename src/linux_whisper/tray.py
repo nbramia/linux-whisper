@@ -130,16 +130,71 @@ def _make_idle_icon() -> Any:
 
 
 def _make_recording_icon() -> Any:
-    """Bright red circle with a mic — actively recording."""
+    """Bright red circle with a mic — actively recording (no speech)."""
     img, draw = _new_image()
     _draw_circle(draw, _RED)
     _draw_mic(draw)
-    # Add a subtle outer glow ring to convey "active"
     draw.ellipse(
         [1, 1, _ICON_SIZE - 2, _ICON_SIZE - 2],
         outline=_RED,
         width=2,
     )
+    return img
+
+
+# Audio level bar colors for recording icon
+_GREEN = (80, 200, 120, 255)
+_GREEN_BRIGHT = (100, 240, 140, 255)
+
+
+def _make_recording_level_icon(level: float, speech: bool) -> Any:
+    """Recording icon with audio level bars around the mic.
+
+    *level* is 0.0-1.0 representing current audio amplitude.
+    *speech* indicates whether VAD detects speech.
+    """
+    img, draw = _new_image()
+
+    if speech:
+        # Blend from red (silent) to green (loud) based on level
+        t = min(1.0, level * 2)
+        bg_r = int(_RED[0] + t * (_GREEN[0] - _RED[0]))
+        bg_g = int(_RED[1] + t * (_GREEN[1] - _RED[1]))
+        bg_b = int(_RED[2] + t * (_GREEN[2] - _RED[2]))
+        bg = (bg_r, bg_g, bg_b, 255)
+    else:
+        bg = _RED
+
+    _draw_circle(draw, bg)
+    _draw_mic(draw)
+
+    if speech and level > 0.01:
+        # Draw level arcs on left and right sides of the mic
+        n_arcs = min(3, max(1, int(level * 3 + 0.5)))
+        for i in range(n_arcs):
+            inset = 6 + i * 5
+            alpha = int(255 * (1.0 - i * 0.25))
+            arc_color = (_GREEN_BRIGHT[0], _GREEN_BRIGHT[1], _GREEN_BRIGHT[2], alpha)
+            # Left arc
+            draw.arc(
+                [inset, inset, _ICON_SIZE - inset, _ICON_SIZE - inset],
+                start=150, end=210,
+                fill=arc_color, width=2,
+            )
+            # Right arc
+            draw.arc(
+                [inset, inset, _ICON_SIZE - inset, _ICON_SIZE - inset],
+                start=-30, end=30,
+                fill=arc_color, width=2,
+            )
+    else:
+        # Subtle ring when recording but no speech
+        draw.ellipse(
+            [1, 1, _ICON_SIZE - 2, _ICON_SIZE - 2],
+            outline=_RED,
+            width=2,
+        )
+
     return img
 
 
@@ -288,6 +343,25 @@ class SystemTray:
         with self._lock:
             self._current_mode = mode
         self._refresh_menu()
+
+    def push_audio_level(self, level: float, speech: bool) -> None:
+        """Update the tray icon with a live audio level during recording.
+
+        Call at ~10-15fps during recording. The icon changes color and shows
+        arcs to reflect voice activity.
+        """
+        with self._lock:
+            if self._current_state != AppState.RECORDING:
+                return
+
+        icon = self._icon
+        if icon is None:
+            return
+
+        try:
+            icon.icon = _make_recording_level_icon(level, speech)
+        except Exception:
+            logger.debug("Failed to update audio level icon", exc_info=True)
 
     def update_stats(self, last_latency: float, avg_latency: float) -> None:
         """Push new latency numbers into the tray menu.
