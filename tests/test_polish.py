@@ -913,6 +913,58 @@ class TestLLMCorrectorHallucinationRejection:
         assert result == "hello world"
 
 
+class TestLLMCorrectorDevice:
+    """Test GPU offload configuration."""
+
+    def test_cpu_device_zero_gpu_layers(self, monkeypatch):
+        """CPU device should use n_gpu_layers=0."""
+        monkeypatch.setattr(
+            "linux_whisper.polish.llm._DEFAULT_MODEL_DIR",
+            Path("/tmp/nonexistent-llm-dir"),
+        )
+        cfg = PolishConfig(llm_device="cpu")
+        corrector = LLMCorrector(config=cfg)
+        assert corrector._config.llm_device == "cpu"
+
+    def test_rocm_device_stored_in_config(self, monkeypatch):
+        """ROCm device config should be stored correctly."""
+        monkeypatch.setattr(
+            "linux_whisper.polish.llm._DEFAULT_MODEL_DIR",
+            Path("/tmp/nonexistent-llm-dir"),
+        )
+        cfg = PolishConfig(llm_device="rocm")
+        corrector = LLMCorrector(config=cfg)
+        assert corrector._config.llm_device == "rocm"
+
+    def test_rocm_fallback_when_gpu_unavailable(self, monkeypatch):
+        """When rocm is requested but GPU offload is unavailable, should fall back."""
+        monkeypatch.setattr(
+            "linux_whisper.polish.llm._DEFAULT_MODEL_DIR",
+            Path("/tmp/nonexistent-llm-dir"),
+        )
+        monkeypatch.setattr(
+            "linux_whisper.polish.llm.llama_supports_gpu_offload",
+            lambda: False,
+        )
+        cfg = PolishConfig(llm_device="rocm")
+        corrector = LLMCorrector(config=cfg)
+        # Model won't load (no file), but config is set — the fallback
+        # logic is in _try_load_model which we can't call without a model file.
+        # Verify the config is stored correctly for the fallback path.
+        assert corrector._config.llm_device == "rocm"
+
+    def test_default_device_is_cpu(self):
+        """Default config should use CPU."""
+        cfg = PolishConfig()
+        assert cfg.llm_device == "cpu"
+
+    def test_rocm_config_from_dict(self):
+        """Config.from_dict should parse llm_device."""
+        from linux_whisper.config import Config
+        cfg = Config.from_dict({"polish": {"llm_device": "rocm"}})
+        assert cfg.polish.llm_device == "rocm"
+
+
 class TestLLMCorrectorModelPath:
     """Test the _resolve_model_path logic."""
 

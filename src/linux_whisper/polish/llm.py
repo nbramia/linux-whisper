@@ -25,12 +25,13 @@ logger = logging.getLogger(__name__)
 # Optional llama-cpp-python import
 # ---------------------------------------------------------------------------
 try:
-    from llama_cpp import Llama
+    from llama_cpp import Llama, llama_supports_gpu_offload
 
     _LLAMA_AVAILABLE = True
 except ImportError:
     _LLAMA_AVAILABLE = False
     Llama = None  # type: ignore[assignment,misc]
+    llama_supports_gpu_offload = None  # type: ignore[assignment]
     logger.debug(
         "llama-cpp-python not installed; LLMCorrector will pass text through unchanged"
     )
@@ -108,19 +109,34 @@ class LLMCorrector:
 
         n_threads = self._config.llm_threads if self._config.llm_threads > 0 else max(1, os.cpu_count() or 4)
 
+        # Determine GPU offload based on config
+        n_gpu_layers = 0
+        device_label = "CPU"
+        if self._config.llm_device == "rocm":
+            if llama_supports_gpu_offload and llama_supports_gpu_offload():
+                n_gpu_layers = -1  # offload all layers
+                device_label = "ROCm GPU"
+            else:
+                logger.warning(
+                    "llm_device='rocm' but GPU offload not available — falling back to CPU"
+                )
+
         try:
             self._model = Llama(
                 model_path=str(model_path),
                 n_ctx=2048,
                 n_threads=n_threads,
                 n_threads_batch=n_threads,
+                n_gpu_layers=n_gpu_layers,
                 verbose=False,
             )
             self._loaded = True
             logger.info(
-                "Loaded LLM model from %s (threads=%d)",
+                "Loaded LLM model from %s (device=%s, threads=%d, gpu_layers=%d)",
                 model_path,
+                device_label,
                 n_threads,
+                n_gpu_layers,
             )
         except Exception:
             logger.exception("Failed to load LLM GGUF model")
