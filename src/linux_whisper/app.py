@@ -121,6 +121,7 @@ class App:
                 self.config,
                 on_quit=self._request_shutdown,
                 on_mode_change=None,
+                on_model_change=self._on_model_change,
                 on_open_settings=None,
             )
             logger.info("System tray ready")
@@ -177,6 +178,53 @@ class App:
     def _request_shutdown(self) -> None:
         """Signal the main loop to exit."""
         self._shutdown_event.set()
+
+    def _on_model_change(self, backend: str, model: str) -> None:
+        """Called from tray thread when user selects a different model."""
+        if self._loop is None or self._loop.is_closed():
+            return
+        self._loop.call_soon_threadsafe(
+            asyncio.ensure_future, self._handle_model_change(backend, model)
+        )
+
+    async def _handle_model_change(self, backend: str, model: str) -> None:
+        """Hot-swap the STT engine to a different model."""
+        from linux_whisper.config import STTConfig, Config, CONFIG_PATH, _dataclass_to_dict
+        import yaml
+
+        logger.info("Switching STT engine to %s/%s...", backend, model)
+
+        # Update in-memory config
+        new_stt = STTConfig(backend=backend, model=model, threads=self.config.stt.threads)
+        self.config = Config(
+            hotkey=self.config.hotkey,
+            mode=self.config.mode,
+            stt=new_stt,
+            polish=self.config.polish,
+            audio=self.config.audio,
+            inject=self.config.inject,
+            tray=self.config.tray,
+        )
+
+        # Save to config file so it persists across restarts
+        try:
+            CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            data = _dataclass_to_dict(self.config)
+            with open(CONFIG_PATH, "w") as f:
+                yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+            logger.info("Config saved to %s", CONFIG_PATH)
+        except Exception:
+            logger.warning("Failed to save config", exc_info=True)
+
+        # Reload STT engine
+        try:
+            from linux_whisper.stt.engine import create_engine
+            self._stt = create_engine(self.config)
+            logger.info("STT engine switched to %s/%s", backend, model)
+        except Exception:
+            logger.exception("Failed to load new STT engine")
+            if self._tray:
+                self._tray.update_state(AppState.ERROR)
 
     def _on_recording_start(self) -> None:
         """Called by hotkey daemon (from its thread) when recording should begin."""

@@ -225,23 +225,38 @@ class SystemTray:
         Callback invoked when the user chooses *Settings*.
     """
 
+    # Available models shown in the tray menu, grouped by backend
+    _MODEL_OPTIONS: list[tuple[str, str, str]] = [
+        # (display_name, backend, model)
+        ("Large V3 Turbo (best quality)", "faster-whisper", "large-v3-turbo"),
+        ("Distil Large V3 (fast, English)", "faster-whisper", "distil-large-v3"),
+        ("Medium English (faster)", "faster-whisper", "medium.en"),
+        ("Small English (fastest)", "faster-whisper", "small.en"),
+        ("Moonshine Medium (low latency)", "moonshine", "moonshine-medium"),
+        ("Moonshine Tiny (instant)", "moonshine", "moonshine-tiny"),
+    ]
+
     def __init__(
         self,
         config: Config,
         *,
         on_quit: Callable[[], None] | None = None,
         on_mode_change: Callable[[str], None] | None = None,
+        on_model_change: Callable[[str, str], None] | None = None,
         on_open_settings: Callable[[], None] | None = None,
     ) -> None:
         self._config = config
         self._on_quit = on_quit
         self._on_mode_change = on_mode_change
+        self._on_model_change = on_model_change
         self._on_open_settings = on_open_settings
 
         # Mutable state guarded by ``_lock``
         self._lock = threading.Lock()
         self._current_state: AppState = AppState.IDLE
         self._current_mode: str = config.mode
+        self._current_backend: str = config.stt.backend
+        self._current_model: str = config.stt.model
         self._last_latency: float | None = None
         self._avg_latency: float | None = None
 
@@ -391,6 +406,8 @@ class SystemTray:
         """Construct the right-click context menu."""
         with self._lock:
             current_mode = self._current_mode
+            current_backend = self._current_backend
+            current_model = self._current_model
             last_lat = self._last_latency
             avg_lat = self._avg_latency
 
@@ -402,8 +419,13 @@ class SystemTray:
             for m in Config.VALID_MODES
         ]
 
-        model_label = f"Model: {self._config.stt.model}"
-        backend_label = f"Backend: {self._config.stt.backend}"
+        model_items = [
+            pystray.MenuItem(
+                f"{'● ' if (current_backend == backend and current_model == model) else '  '}{name}",
+                self._make_model_handler(backend, model),
+            )
+            for name, backend, model in self._MODEL_OPTIONS
+        ]
 
         if last_lat is not None and avg_lat is not None:
             latency_label = f"Latency: {_fmt_ms(last_lat)} (avg {_fmt_ms(avg_lat)})"
@@ -411,13 +433,11 @@ class SystemTray:
             latency_label = "Latency: -"
 
         return pystray.Menu(
+            pystray.MenuItem("Model", pystray.Menu(*model_items)),
             pystray.MenuItem("Mode", pystray.Menu(*mode_items)),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem(model_label, None, enabled=False),
-            pystray.MenuItem(backend_label, None, enabled=False),
             pystray.MenuItem(latency_label, None, enabled=False),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Settings…", self._handle_settings),
             pystray.MenuItem("Quit", self._handle_quit),
         )
 
@@ -435,6 +455,25 @@ class SystemTray:
                     self._on_mode_change(mode)
                 except Exception:
                     logger.exception("on_mode_change callback failed")
+            self._refresh_menu()
+
+        return handler
+
+    def _make_model_handler(self, backend: str, model: str) -> Callable[..., None]:
+        """Return a click handler that switches to *backend*/*model*."""
+
+        def handler(icon: Any, item: Any) -> None:
+            with self._lock:
+                if self._current_backend == backend and self._current_model == model:
+                    return  # already selected
+                self._current_backend = backend
+                self._current_model = model
+            logger.info("Tray: model changed to %s/%s", backend, model)
+            if self._on_model_change is not None:
+                try:
+                    self._on_model_change(backend, model)
+                except Exception:
+                    logger.exception("on_model_change callback failed")
             self._refresh_menu()
 
         return handler
