@@ -234,6 +234,7 @@ def _cmd_config(args: argparse.Namespace) -> int:
 def _cmd_listen_keys() -> int:
     """Listen for key events and print them — helps identify key codes."""
     import select
+    import time
 
     from evdev import InputDevice, ecodes, list_devices
 
@@ -263,7 +264,9 @@ def _cmd_listen_keys() -> int:
                         if event.type == ecodes.EV_KEY and event.value in (1, 0):
                             name = ecodes.KEY.get(event.code, f"UNKNOWN_{event.code}")
                             action = "DOWN" if event.value == 1 else "UP  "
-                            print(f"  {action}  {name:<30} code={event.code:<5}  device={dev.name}")
+                            kernel_ts = event.timestamp()
+                            delivery_ms = (time.time() - kernel_ts) * 1000
+                            print(f"  {action}  {name:<30} code={event.code:<5}  +{delivery_ms:5.1f}ms  device={dev.name}")
                 except OSError:
                     pass
     except KeyboardInterrupt:
