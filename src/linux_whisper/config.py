@@ -40,7 +40,7 @@ class PolishConfig:
     llm: bool = True
     llm_always: bool = False
     llm_backend: str = "llama-cpp"
-    llm_model: str = "Qwen3-4B-Instruct-Q4_K_M"
+    llm_model: str = "Qwen3-4B-Q4_K_M"
     llm_threads: int = 0  # 0 = auto
 
 

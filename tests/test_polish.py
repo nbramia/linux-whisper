@@ -465,12 +465,20 @@ from linux_whisper.polish.llm import LLMCorrector
 class TestLLMCorrectorUnavailable:
     """Test LLMCorrector when the model is not available."""
 
-    def test_not_available_by_default(self):
-        # With no model file, the corrector should be unavailable
+    def test_not_available_by_default(self, monkeypatch):
+        # With a non-existent model file, the corrector should be unavailable
+        monkeypatch.setattr(
+            "linux_whisper.polish.llm._DEFAULT_MODEL_DIR",
+            Path("/tmp/nonexistent-llm-dir"),
+        )
         corrector = LLMCorrector(config=PolishConfig())
         assert corrector.available is False
 
-    def test_process_returns_unchanged_when_unavailable(self):
+    def test_process_returns_unchanged_when_unavailable(self, monkeypatch):
+        monkeypatch.setattr(
+            "linux_whisper.polish.llm._DEFAULT_MODEL_DIR",
+            Path("/tmp/nonexistent-llm-dir"),
+        )
         corrector = LLMCorrector(config=PolishConfig())
         text = "at 2 actually at 4"
         result = corrector.process(text)
@@ -582,7 +590,7 @@ class TestLLMCorrectorModelPath:
         corrector = LLMCorrector(config=PolishConfig())
         path = corrector._resolve_model_path()
         assert path is not None
-        assert path.name == "Qwen3-4B-Instruct-Q4_K_M.gguf"
+        assert path.name == "Qwen3-4B-Q4_K_M.gguf"
 
     def test_resolve_gguf_suffix(self):
         cfg = PolishConfig(llm_model="custom-model.gguf")

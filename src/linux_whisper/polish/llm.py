@@ -40,8 +40,8 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 _DEFAULT_MODEL_DIR = MODELS_DIR / "llm"
-_DEFAULT_MODEL_FILENAME = "Qwen3-4B-Instruct-Q4_K_M.gguf"
-_DEFAULT_TIMEOUT_MS = 500
+_DEFAULT_MODEL_FILENAME = "Qwen3-4B-Q4_K_M.gguf"
+_DEFAULT_TIMEOUT_MS = 3000  # generous for cold start; warm inference is ~300ms
 _DEFAULT_TEMPERATURE = 0.0
 _DEFAULT_MAX_TOKENS = 256
 
@@ -49,17 +49,15 @@ _DEFAULT_MAX_TOKENS = 256
 # are already handled by stages 4a / 4b; the LLM only resolves semantic
 # self-corrections and grammar.
 _SYSTEM_PROMPT = """\
-You clean up dictated text. Preserve the speaker's exact words and meaning.
+You resolve self-corrections in dictated text. When someone changes their mind mid-sentence, keep ONLY the final version. Fix grammar. Output ONLY the result.
 
-Rules:
-- Resolve self-corrections: keep only the speaker's final intent
-  Example: "at 2 no actually at 4" → "at 4"
-- Fix grammar: subject-verb agreement, articles, tense
-- Do NOT remove filler words (already handled)
-- Do NOT add punctuation (already handled)
-- Do NOT paraphrase, rephrase, or add content
-- Do NOT add greetings, sign-offs, or pleasantries
-- Output ONLY the cleaned text, nothing else"""
+Examples:
+"meet at 2, actually no at 4 on Friday" → "Meet at 4 on Friday."
+"send to John, no wait send to Sarah instead" → "Send to Sarah."
+"go with option A, actually option B is better" → "Go with option B."
+"the deadline is Monday, I mean Tuesday" → "The deadline is Tuesday."
+"move it to friday, actually no lets do it on monday" → "Let's do it on Monday."
+/no_think"""
 
 
 # ---------------------------------------------------------------------------
@@ -229,4 +227,9 @@ class LLMCorrector:
 
         message = choices[0].get("message", {})
         content = message.get("content", "")
-        return content if isinstance(content, str) else None
+        if not isinstance(content, str):
+            return None
+        # Strip Qwen3 <think>...</think> reasoning tags if present
+        if "</think>" in content:
+            content = content.split("</think>")[-1]
+        return content.strip() or None
