@@ -42,7 +42,7 @@ DTYPE = "float32"
 VAD_WINDOW_SAMPLES = 512
 
 # Ring buffer holds 30 seconds of audio by default
-DEFAULT_RING_BUFFER_SECONDS = 30
+DEFAULT_RING_BUFFER_SECONDS = 120  # 2 minutes max recording
 
 # Feedback tone parameters
 FEEDBACK_DURATION_S = 0.05  # 50ms

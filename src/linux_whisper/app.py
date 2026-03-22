@@ -298,15 +298,8 @@ class App:
         if len(audio_float) == 0:
             return None
 
-        # Trim silence — Moonshine struggles with long silence segments.
-        # Use energy-based trimming: keep only regions above a threshold,
-        # with padding to avoid cutting speech edges.
-        audio_float = self._trim_silence(audio_float)
-        if len(audio_float) == 0:
-            return None
-
         duration = len(audio_float) / 16000
-        logger.debug("Audio after silence trim: %.1fs (%d samples)", duration, len(audio_float))
+        logger.info("Recording: %.1fs audio (%d samples)", duration, len(audio_float))
 
         # Convert float32 [-1.0, 1.0] to int16 PCM bytes
         audio_int16 = (audio_float * 32767).astype(np.int16)
