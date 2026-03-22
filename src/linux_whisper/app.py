@@ -36,6 +36,9 @@ class App:
         self._latencies: list[float] = []
         self._max_latency_history = 100
 
+        # Event loop reference for thread-safe callbacks
+        self._loop: asyncio.AbstractEventLoop | None = None
+
         # Components initialized in setup()
         self._audio: AudioPipeline | None = None
         self._hotkey: HotkeyDaemon | None = None
@@ -124,6 +127,7 @@ class App:
     async def run(self) -> None:
         """Run the application until shutdown is requested."""
         logger.info("Starting Linux Whisper")
+        self._loop = asyncio.get_running_loop()
 
         # Start background components
         if self._hotkey:
@@ -157,13 +161,15 @@ class App:
 
     def _on_recording_start(self) -> None:
         """Called by hotkey daemon (from its thread) when recording should begin."""
-        loop = asyncio.get_event_loop()
-        loop.call_soon_threadsafe(asyncio.ensure_future, self._handle_recording_start())
+        if self._loop is None or self._loop.is_closed():
+            return
+        self._loop.call_soon_threadsafe(asyncio.ensure_future, self._handle_recording_start())
 
     def _on_recording_stop(self) -> None:
         """Called by hotkey daemon (from its thread) when recording should end."""
-        loop = asyncio.get_event_loop()
-        loop.call_soon_threadsafe(asyncio.ensure_future, self._handle_recording_stop())
+        if self._loop is None or self._loop.is_closed():
+            return
+        self._loop.call_soon_threadsafe(asyncio.ensure_future, self._handle_recording_stop())
 
     async def _handle_recording_start(self) -> None:
         """Transition to RECORDING and start capturing audio."""
