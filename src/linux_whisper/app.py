@@ -112,6 +112,7 @@ class App:
             from linux_whisper.tray import SystemTray
 
             self._tray = SystemTray(
+                self.config,
                 on_quit=self._request_shutdown,
                 on_mode_change=None,
                 on_open_settings=None,

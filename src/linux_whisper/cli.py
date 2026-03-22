@@ -37,6 +37,12 @@ def main(argv: list[str] | None = None) -> int:
     # `linux-whisper run` (default)
     run_parser = subparsers.add_parser("run", help="Start the dictation service")
     run_parser.add_argument("--no-tray", action="store_true", help="Disable system tray")
+    run_parser.add_argument(
+        "--verbose", "-v",
+        action="count",
+        default=0,
+        help="Increase log verbosity (-v=INFO, -vv=DEBUG)",
+    )
 
     # `linux-whisper models`
     models_parser = subparsers.add_parser("models", help="Manage models")

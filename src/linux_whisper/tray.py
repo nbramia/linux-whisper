@@ -168,10 +168,10 @@ _ICON_FACTORIES: dict[AppState, Callable[[], Any]] = {
 }
 
 _TOOLTIPS: dict[AppState, str] = {
-    AppState.IDLE: "Linux Whisper — idle",
-    AppState.RECORDING: "Linux Whisper — recording…",
-    AppState.PROCESSING: "Linux Whisper — processing…",
-    AppState.ERROR: "Linux Whisper — error",
+    AppState.IDLE: "Linux Whisper - idle",
+    AppState.RECORDING: "Linux Whisper - recording",
+    AppState.PROCESSING: "Linux Whisper - processing",
+    AppState.ERROR: "Linux Whisper - error",
 }
 
 # ---------------------------------------------------------------------------
@@ -355,7 +355,7 @@ class SystemTray:
         if last_lat is not None and avg_lat is not None:
             latency_label = f"Latency: {_fmt_ms(last_lat)} (avg {_fmt_ms(avg_lat)})"
         else:
-            latency_label = "Latency: —"
+            latency_label = "Latency: -"
 
         return pystray.Menu(
             pystray.MenuItem("Mode", pystray.Menu(*mode_items)),
