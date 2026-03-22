@@ -456,6 +456,336 @@ class TestPunctuationRestorer:
 
 
 # =====================================================================
+# Stage 4d: SpokenFormFormatter
+# =====================================================================
+
+from linux_whisper.polish.formatting import (
+    SpokenFormFormatter,
+    _format_cardinal_numbers,
+    _format_currency,
+    _format_dates,
+    _format_emails,
+    _format_phone_numbers,
+    _format_times,
+    _words_to_number,
+)
+
+
+class TestWordsToNumber:
+    """Test the internal _words_to_number helper."""
+
+    def test_simple_ones(self):
+        assert _words_to_number(["five"]) == 5
+
+    def test_teens(self):
+        assert _words_to_number(["thirteen"]) == 13
+
+    def test_tens(self):
+        assert _words_to_number(["twenty"]) == 20
+
+    def test_compound(self):
+        assert _words_to_number(["twenty", "five"]) == 25
+
+    def test_hundred(self):
+        assert _words_to_number(["three", "hundred"]) == 300
+
+    def test_hundred_and_ones(self):
+        assert _words_to_number(["three", "hundred", "and", "fifty"]) == 350
+
+    def test_thousand(self):
+        assert _words_to_number(["one", "thousand"]) == 1000
+
+    def test_thousand_and_hundreds(self):
+        assert _words_to_number(["one", "thousand", "two", "hundred"]) == 1200
+
+    def test_million(self):
+        assert _words_to_number(["one", "million"]) == 1_000_000
+
+    def test_a_hundred(self):
+        assert _words_to_number(["a", "hundred"]) == 100
+
+    def test_empty(self):
+        assert _words_to_number([]) is None
+
+    def test_invalid_words(self):
+        assert _words_to_number(["hello"]) is None
+
+
+class TestFormatEmails:
+    """Test email address formatting."""
+
+    def test_basic_email(self):
+        assert _format_emails("john at gmail dot com") == "john@gmail.com"
+
+    def test_org_email(self):
+        assert _format_emails("info at company dot org") == "info@company.org"
+
+    def test_edu_email(self):
+        assert _format_emails("student at school dot edu") == "student@school.edu"
+
+    def test_io_email(self):
+        assert _format_emails("dev at startup dot io") == "dev@startup.io"
+
+    def test_preserves_surrounding_text(self):
+        result = _format_emails("Send it to john at gmail dot com please")
+        assert result == "Send it to john@gmail.com please"
+
+    def test_already_formatted(self):
+        assert _format_emails("john@gmail.com") == "john@gmail.com"
+
+    def test_no_email(self):
+        text = "the cat sat on the mat"
+        assert _format_emails(text) == text
+
+    def test_case_insensitive_tld(self):
+        assert _format_emails("user at site dot COM") == "user@site.com"
+
+
+class TestFormatPhoneNumbers:
+    """Test phone number formatting."""
+
+    def test_ten_digits(self):
+        text = "one two three four five six seven eight nine zero"
+        assert _format_phone_numbers(text) == "123-456-7890"
+
+    def test_seven_digits(self):
+        text = "five five five one two three four"
+        assert _format_phone_numbers(text) == "555-1234"
+
+    def test_preserves_non_phone_digits(self):
+        # Three digit words don't form a phone number
+        text = "one two three"
+        assert _format_phone_numbers(text) == "one two three"
+
+    def test_preserves_surrounding(self):
+        text = "call me at one two three four five six seven eight nine zero please"
+        result = _format_phone_numbers(text)
+        assert "123-456-7890" in result
+        assert result.startswith("call me at")
+        assert result.endswith("please")
+
+    def test_preserves_trailing_punctuation(self):
+        text = "one two three four five six seven eight nine zero."
+        result = _format_phone_numbers(text)
+        assert result == "123-456-7890."
+
+
+class TestFormatTimes:
+    """Test time formatting."""
+
+    def test_four_thirty_pm(self):
+        assert _format_times("four thirty PM") == "4:30 PM"
+
+    def test_twelve_fifteen_am(self):
+        assert _format_times("twelve fifteen AM") == "12:15 AM"
+
+    def test_three_forty_five(self):
+        assert _format_times("three forty five") == "3:45"
+
+    def test_nine_fifteen(self):
+        assert _format_times("nine fifteen") == "9:15"
+
+    def test_preserves_surrounding_text(self):
+        result = _format_times("The meeting is at four thirty PM today")
+        assert "4:30 PM" in result
+        assert result.startswith("The meeting")
+
+    def test_no_time_pattern(self):
+        text = "the weather is nice"
+        assert _format_times(text) == text
+
+    def test_already_formatted(self):
+        text = "4:30 PM"
+        assert _format_times(text) == text
+
+    def test_two_thirty(self):
+        assert _format_times("two thirty") == "2:30"
+
+    def test_one_fifteen_pm(self):
+        assert _format_times("one fifteen PM") == "1:15 PM"
+
+    def test_ten_twenty(self):
+        assert _format_times("ten twenty") == "10:20"
+
+
+class TestFormatDates:
+    """Test date formatting."""
+
+    def test_march_twenty_second(self):
+        assert _format_dates("march twenty second") == "March 22nd"
+
+    def test_january_first(self):
+        assert _format_dates("january first") == "January 1st"
+
+    def test_december_thirty_first(self):
+        assert _format_dates("december thirty first") == "December 31st"
+
+    def test_april_third(self):
+        assert _format_dates("april third") == "April 3rd"
+
+    def test_june_fifteenth(self):
+        assert _format_dates("june fifteenth") == "June 15th"
+
+    def test_november_twentieth(self):
+        assert _format_dates("november twentieth") == "November 20th"
+
+    def test_february_fourteenth(self):
+        assert _format_dates("february fourteenth") == "February 14th"
+
+    def test_preserves_surrounding_text(self):
+        result = _format_dates("The party is on march twenty second this year")
+        assert "March 22nd" in result
+
+    def test_no_date(self):
+        text = "the cat sat on the mat"
+        assert _format_dates(text) == text
+
+    def test_preserves_trailing_punctuation(self):
+        result = _format_dates("march twenty second.")
+        assert result == "March 22nd."
+
+    def test_month_without_ordinal(self):
+        # "march" alone should not be converted
+        result = _format_dates("we march forward")
+        assert result == "we march forward"
+
+
+class TestFormatCurrency:
+    """Test currency formatting."""
+
+    def test_eight_hundred_dollars(self):
+        assert _format_currency("eight hundred dollars") == "$800"
+
+    def test_fifty_cents(self):
+        assert _format_currency("fifty cents") == "$0.50"
+
+    def test_twenty_five_dollars(self):
+        assert _format_currency("twenty five dollars") == "$25"
+
+    def test_dollars_and_cents(self):
+        assert _format_currency("twenty five dollars and fifty cents") == "$25.50"
+
+    def test_one_hundred_dollars(self):
+        assert _format_currency("one hundred dollars") == "$100"
+
+    def test_five_dollars(self):
+        assert _format_currency("five dollars") == "$5"
+
+    def test_preserves_surrounding_text(self):
+        result = _format_currency("It costs eight hundred dollars total")
+        assert "$800" in result
+        assert result.endswith("total")
+
+    def test_no_currency(self):
+        text = "the cat sat on the mat"
+        assert _format_currency(text) == text
+
+    def test_preserves_trailing_punctuation(self):
+        result = _format_currency("eight hundred dollars.")
+        assert result == "$800."
+
+    def test_three_hundred_and_fifty_dollars(self):
+        assert _format_currency("three hundred and fifty dollars") == "$350"
+
+
+class TestFormatCardinalNumbers:
+    """Test cardinal number formatting."""
+
+    def test_three_hundred_and_fifty(self):
+        assert _format_cardinal_numbers("three hundred and fifty") == "350"
+
+    def test_twenty_five(self):
+        assert _format_cardinal_numbers("twenty five") == "25"
+
+    def test_one_thousand(self):
+        assert _format_cardinal_numbers("one thousand") == "1000"
+
+    def test_one_thousand_two_hundred(self):
+        assert _format_cardinal_numbers("one thousand two hundred") == "1200"
+
+    def test_single_word_preserved(self):
+        # Single number words in prose should NOT be converted
+        text = "one of the reasons"
+        assert _format_cardinal_numbers(text) == text
+
+    def test_single_number_word_alone(self):
+        text = "five"
+        assert _format_cardinal_numbers(text) == text
+
+    def test_preserves_surrounding_text(self):
+        result = _format_cardinal_numbers("about three hundred and fifty items")
+        assert "350" in result
+        assert result.startswith("about")
+        assert result.endswith("items")
+
+    def test_already_numeric(self):
+        text = "350 items"
+        assert _format_cardinal_numbers(text) == text
+
+    def test_preserves_trailing_punctuation(self):
+        result = _format_cardinal_numbers("three hundred and fifty.")
+        assert result == "350."
+
+    def test_a_hundred(self):
+        assert _format_cardinal_numbers("about a hundred items") == "about 100 items"
+
+
+class TestSpokenFormFormatter:
+    """Test the SpokenFormFormatter class."""
+
+    @pytest.fixture()
+    def formatter(self):
+        return SpokenFormFormatter()
+
+    def test_empty_input(self, formatter):
+        assert formatter.process("") == ""
+
+    def test_whitespace_only(self, formatter):
+        assert formatter.process("   ") == "   "
+
+    def test_clean_text_unchanged(self, formatter):
+        text = "The cat sat on the mat."
+        assert formatter.process(text) == text
+
+    def test_already_formatted_number(self, formatter):
+        assert formatter.process("350") == "350"
+
+    def test_already_formatted_currency(self, formatter):
+        assert formatter.process("$800") == "$800"
+
+    def test_email_conversion(self, formatter):
+        result = formatter.process("Send to john at gmail dot com")
+        assert "john@gmail.com" in result
+
+    def test_phone_number_conversion(self, formatter):
+        text = "Call one two three four five six seven eight nine zero"
+        result = formatter.process(text)
+        assert "123-456-7890" in result
+
+    def test_time_conversion(self, formatter):
+        result = formatter.process("Meeting at four thirty PM")
+        assert "4:30 PM" in result
+
+    def test_date_conversion(self, formatter):
+        result = formatter.process("Due on march twenty second")
+        assert "March 22nd" in result
+
+    def test_currency_conversion(self, formatter):
+        result = formatter.process("It costs eight hundred dollars")
+        assert "$800" in result
+
+    def test_cardinal_number_conversion(self, formatter):
+        result = formatter.process("There are three hundred and fifty items")
+        assert "350" in result
+
+    def test_multiple_formats_in_one_text(self, formatter):
+        text = "Email john at gmail dot com about the march twenty second meeting"
+        result = formatter.process(text)
+        assert "john@gmail.com" in result
+        assert "March 22nd" in result
+
+
+# =====================================================================
 # Stage 4c: LLMCorrector
 # =====================================================================
 
@@ -630,6 +960,7 @@ class TestPolishPipelineDisabled:
         pipeline = PolishPipeline(PolishConfig(enabled=False))
         assert pipeline._disfluency is None
         assert pipeline._punctuation is None
+        assert pipeline._formatting is None
         assert pipeline._llm is None
 
 
@@ -637,31 +968,43 @@ class TestPolishPipelineStageToggling:
     """Test enabling/disabling individual stages."""
 
     def test_disfluency_only(self):
-        cfg = PolishConfig(enabled=True, disfluency=True, punctuation=False, llm=False)
+        cfg = PolishConfig(enabled=True, disfluency=True, punctuation=False, formatting=False, llm=False)
         pipeline = PolishPipeline(cfg)
         assert pipeline._disfluency is not None
         assert pipeline._punctuation is None
+        assert pipeline._formatting is None
         assert pipeline._llm is None
 
     def test_punctuation_only(self):
-        cfg = PolishConfig(enabled=True, disfluency=False, punctuation=True, llm=False)
+        cfg = PolishConfig(enabled=True, disfluency=False, punctuation=True, formatting=False, llm=False)
         pipeline = PolishPipeline(cfg)
         assert pipeline._disfluency is None
         assert pipeline._punctuation is not None
+        assert pipeline._formatting is None
         assert pipeline._llm is None
 
-    def test_llm_only(self):
-        cfg = PolishConfig(enabled=True, disfluency=False, punctuation=False, llm=True)
+    def test_formatting_only(self):
+        cfg = PolishConfig(enabled=True, disfluency=False, punctuation=False, formatting=True, llm=False)
         pipeline = PolishPipeline(cfg)
         assert pipeline._disfluency is None
         assert pipeline._punctuation is None
+        assert pipeline._formatting is not None
+        assert pipeline._llm is None
+
+    def test_llm_only(self):
+        cfg = PolishConfig(enabled=True, disfluency=False, punctuation=False, formatting=False, llm=True)
+        pipeline = PolishPipeline(cfg)
+        assert pipeline._disfluency is None
+        assert pipeline._punctuation is None
+        assert pipeline._formatting is None
         assert pipeline._llm is not None
 
     def test_all_stages_enabled(self):
-        cfg = PolishConfig(enabled=True, disfluency=True, punctuation=True, llm=True)
+        cfg = PolishConfig(enabled=True, disfluency=True, punctuation=True, formatting=True, llm=True)
         pipeline = PolishPipeline(cfg)
         assert pipeline._disfluency is not None
         assert pipeline._punctuation is not None
+        assert pipeline._formatting is not None
         assert pipeline._llm is not None
 
 

@@ -1,6 +1,6 @@
-"""Polish pipeline orchestrator — chains disfluency, punctuation, and LLM stages.
+"""Polish pipeline orchestrator — chains disfluency, punctuation, formatting, and LLM stages.
 
-The :class:`PolishPipeline` runs stages 4a → 4b → (conditional) 4c on each
+The :class:`PolishPipeline` runs stages 4a → 4b → 4d → (conditional) 4c on each
 transcript, respecting the user's :class:`PolishConfig` to enable or disable
 individual stages.  Stage 4c (LLM) is only invoked when:
 
@@ -16,6 +16,7 @@ import time
 
 from linux_whisper.config import PolishConfig
 from linux_whisper.polish.disfluency import DisfluencyRemover, DisfluencyResult
+from linux_whisper.polish.formatting import SpokenFormFormatter
 from linux_whisper.polish.llm import LLMCorrector
 from linux_whisper.polish.punctuation import PunctuationRestorer
 
@@ -23,13 +24,14 @@ logger = logging.getLogger(__name__)
 
 
 class PolishPipeline:
-    """Orchestrates the three-stage text polish pipeline.
+    """Orchestrates the four-stage text polish pipeline.
 
     Stages
     ------
     1. **Disfluency removal** (4a) — BERT token classifier / regex fallback.
     2. **Punctuation + capitalisation** (4b) — ELECTRA classifier / rules.
-    3. **LLM self-correction resolution** (4c) — Qwen3 4B via llama.cpp,
+    3. **Spoken-form formatting** (4d) — regex/dict number, date, time, etc.
+    4. **LLM self-correction resolution** (4c) — Qwen3 4B via llama.cpp,
        conditionally invoked.
 
     Each stage can be individually disabled via :class:`PolishConfig`.  When
@@ -43,6 +45,7 @@ class PolishPipeline:
         # Lazy-initialise stage components only if enabled.
         self._disfluency: DisfluencyRemover | None = None
         self._punctuation: PunctuationRestorer | None = None
+        self._formatting: SpokenFormFormatter | None = None
         self._llm: LLMCorrector | None = None
 
         if self._config.enabled:
@@ -61,6 +64,10 @@ class PolishPipeline:
         if self._config.punctuation:
             logger.debug("Initialising punctuation restorer (stage 4b)")
             self._punctuation = PunctuationRestorer()
+
+        if self._config.formatting:
+            logger.debug("Initialising spoken-form formatter (stage 4d)")
+            self._formatting = SpokenFormFormatter()
 
         if self._config.llm:
             logger.debug("Initialising LLM corrector (stage 4c)")
@@ -108,6 +115,13 @@ class PolishPipeline:
             current = self._punctuation.process(current)
             dt = (time.perf_counter() - t_stage) * 1000
             logger.debug("Stage 4b (punctuation): %.1f ms", dt)
+
+        # ── Stage 4d: Spoken-form formatting ──────────────────────────
+        if self._formatting is not None:
+            t_stage = time.perf_counter()
+            current = self._formatting.process(current)
+            dt = (time.perf_counter() - t_stage) * 1000
+            logger.debug("Stage 4d (formatting): %.1f ms", dt)
 
         # ── Stage 4c: LLM correction (conditional) ───────────────────
         should_run_llm = (

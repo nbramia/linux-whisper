@@ -37,6 +37,7 @@ class PolishConfig:
     enabled: bool = True
     disfluency: bool = True
     punctuation: bool = True
+    formatting: bool = True
     llm: bool = True
     llm_always: bool = False
     llm_backend: str = "llama-cpp"

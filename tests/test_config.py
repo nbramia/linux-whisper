@@ -41,6 +41,7 @@ class TestDefaults:
         assert p.enabled is True
         assert p.disfluency is True
         assert p.punctuation is True
+        assert p.formatting is True
         assert p.llm is True
         assert p.llm_always is False
 
