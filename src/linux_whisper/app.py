@@ -254,10 +254,15 @@ class App:
                 recent = self._audio.get_pre_roll(0.1)  # last 100ms
                 if len(recent) > 0:
                     rms = float(np.sqrt(np.mean(recent ** 2)))
+                    peak = float(np.max(np.abs(recent)))
                     # Slowly adapt noise floor
                     noise_floor = noise_floor * 0.995 + rms * 0.005
                     # Speech = RMS is significantly above noise floor
                     speech = rms > noise_floor * 3.0 and rms > 0.008
+                    logger.info(
+                        "audio: rms=%.5f peak=%.5f floor=%.5f speech=%s",
+                        rms, peak, noise_floor, speech,
+                    )
 
                     if speech != last_speech:
                         last_speech = speech

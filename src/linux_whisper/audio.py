@@ -171,6 +171,24 @@ class RingBuffer:
         first = self._capacity - tail
         return np.concatenate([self._buf[tail:], self._buf[: n - first]])
 
+    def peek_recent(self, count: int) -> npt.NDArray[np.float32]:
+        """Read the most recent *count* samples without advancing the tail.
+
+        Unlike ``peek`` which reads from the oldest data, this reads the
+        *count* samples immediately before the write head (newest data).
+        """
+        avail = self.available()
+        n = min(count, avail)
+        if n == 0:
+            return np.empty(0, dtype=np.float32)
+
+        head = self._head
+        start = head - n
+        if start >= 0:
+            return self._buf[start:head].copy()
+        # Wraps around
+        return np.concatenate([self._buf[start:], self._buf[:head]])
+
     def clear(self) -> None:
         """Discard all unread data."""
         self._tail = self._head
@@ -714,7 +732,7 @@ class AudioPipeline:
         n = min(n_samples, available)
         if n == 0:
             return np.empty(0, dtype=np.float32)
-        return self._ring.peek(n)
+        return self._ring.peek_recent(n)
 
     def play_start_tone(self) -> None:
         """Manually trigger the recording-start feedback tone."""
