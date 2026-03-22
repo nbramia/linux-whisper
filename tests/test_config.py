@@ -53,6 +53,7 @@ class TestDefaults:
         assert a.silence_timeout == 0.5
         assert a.feedback_sounds is True
         assert a.buffer_size == 512
+        assert a.auto_gain is True
 
     def test_inject_defaults(self):
         inj = InjectConfig()
@@ -290,6 +291,7 @@ class TestDataclassToDict:
             "silence_timeout": 0.5,
             "feedback_sounds": True,
             "buffer_size": 512,
+            "auto_gain": True,
         }
 
     def test_nested_config(self):

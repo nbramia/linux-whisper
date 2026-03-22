@@ -325,6 +325,27 @@ def play_tone(tone: npt.NDArray[np.float32], sample_rate: int = SAMPLE_RATE) -> 
 
 
 # ---------------------------------------------------------------------------
+# Automatic Gain Control
+# ---------------------------------------------------------------------------
+
+
+def apply_agc(audio: np.ndarray, target_peak: float = 0.7) -> np.ndarray:
+    """Normalize quiet audio to a target peak amplitude.
+
+    Computes the peak absolute value of the audio.  If it is below
+    *target_peak*, applies a linear gain to bring the peak up to the
+    target and clips to [-1.0, 1.0].  Audio that is already loud enough
+    (peak >= target_peak) is returned unchanged.  Silent audio (peak == 0)
+    is returned unchanged to avoid division by zero.
+    """
+    peak = float(np.max(np.abs(audio)))
+    if peak == 0.0 or peak >= target_peak:
+        return audio
+    gain = target_peak / peak
+    return np.clip(audio * gain, -1.0, 1.0).astype(audio.dtype)
+
+
+# ---------------------------------------------------------------------------
 # Pipeline Mode
 # ---------------------------------------------------------------------------
 

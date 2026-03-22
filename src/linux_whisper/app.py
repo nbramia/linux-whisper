@@ -424,6 +424,12 @@ class App:
         duration = len(audio_float) / 16000
         logger.info("Recording: %.1fs audio (%d samples)", duration, len(audio_float))
 
+        # Apply automatic gain control for quiet/whispered speech
+        if self.config.audio.auto_gain:
+            from linux_whisper.audio import apply_agc
+
+            audio_float = apply_agc(audio_float)
+
         # Convert float32 [-1.0, 1.0] to int16 PCM bytes
         audio_int16 = (audio_float * 32767).astype(np.int16)
         audio_bytes = audio_int16.tobytes()
