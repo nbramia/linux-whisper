@@ -77,6 +77,7 @@ class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
     inject: InjectConfig = field(default_factory=InjectConfig)
     tray: TrayConfig = field(default_factory=TrayConfig)
+    snippets: dict[str, str] = field(default_factory=dict)
 
     VALID_MODES = ("auto", "hold", "toggle", "vad-auto")
 
@@ -91,6 +92,7 @@ class Config:
             audio=_merge_dataclass(AudioConfig, data.get("audio", {})),
             inject=_merge_dataclass(InjectConfig, data.get("inject", {})),
             tray=_merge_dataclass(TrayConfig, data.get("tray", {})),
+            snippets=data.get("snippets") or {},
         )
 
     @classmethod

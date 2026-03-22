@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from linux_whisper.inject import TextInjector
     from linux_whisper.overlay import Overlay
     from linux_whisper.polish.pipeline import PolishPipeline
+    from linux_whisper.snippets import SnippetMatcher
     from linux_whisper.stt.engine import STTEngine
     from linux_whisper.tray import SystemTray
 
@@ -45,6 +46,7 @@ class App:
         self._hotkey: HotkeyDaemon | None = None
         self._stt: STTEngine | None = None
         self._polish: PolishPipeline | None = None
+        self._snippets: SnippetMatcher | None = None
         self._injector: TextInjector | None = None
         self._tray: SystemTray | None = None
         self._overlay: Overlay | None = None
@@ -61,6 +63,7 @@ class App:
         await self._setup_audio()
         await self._setup_stt()
         await self._setup_polish()
+        await self._setup_snippets()
         await self._setup_injector()
         await self._setup_hotkey()
         await self._setup_tray()
@@ -92,6 +95,15 @@ class App:
 
         self._polish = PolishPipeline(self.config.polish)
         logger.info("Polish pipeline ready")
+
+    async def _setup_snippets(self) -> None:
+        if not self.config.snippets:
+            logger.info("No snippets configured")
+            return
+        from linux_whisper.snippets import SnippetMatcher
+
+        self._snippets = SnippetMatcher(self.config.snippets)
+        logger.info("Snippet matcher ready: %d triggers", len(self.config.snippets))
 
     async def _setup_injector(self) -> None:
         from linux_whisper.inject.injector import detect_injector
@@ -203,6 +215,7 @@ class App:
             audio=self.config.audio,
             inject=self.config.inject,
             tray=self.config.tray,
+            snippets=self.config.snippets,
         )
 
         # Restart hotkey daemon with new mode
@@ -252,6 +265,7 @@ class App:
             audio=self.config.audio,
             inject=self.config.inject,
             tray=self.config.tray,
+            snippets=self.config.snippets,
         )
 
         # Save to config file so it persists across restarts
@@ -424,6 +438,16 @@ class App:
 
         text = result.full_text.strip()
         logger.debug("STT result: %s", text[:100])
+
+        # Check snippets before polish — if a trigger matches, return the
+        # snippet text directly, bypassing the entire polish pipeline.
+        if self._snippets:
+            snippet_text = self._snippets.match(text)
+            if snippet_text is not None:
+                logger.info(
+                    "Snippet matched: '%s' -> %d chars", text[:50], len(snippet_text)
+                )
+                return snippet_text
 
         # Polish
         if self._polish:

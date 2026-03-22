@@ -452,11 +452,23 @@ class SystemTray:
         else:
             copy_label = "Copy Last (none yet)"
 
+        snippet_items = []
+        if self._config.snippets:
+            for trigger in sorted(self._config.snippets):
+                snippet_items.append(
+                    pystray.MenuItem(f'"{trigger}"', None, enabled=False)
+                )
+        else:
+            snippet_items.append(
+                pystray.MenuItem("(none configured)", None, enabled=False)
+            )
+
         return pystray.Menu(
             pystray.MenuItem(copy_label, self._handle_copy_last, enabled=bool(last_text)),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Model", pystray.Menu(*model_items)),
             pystray.MenuItem("Mode", pystray.Menu(*mode_items)),
+            pystray.MenuItem("Snippets", pystray.Menu(*snippet_items)),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(latency_label, None, enabled=False),
             pystray.Menu.SEPARATOR,

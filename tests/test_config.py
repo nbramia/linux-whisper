@@ -29,6 +29,7 @@ class TestDefaults:
         cfg = Config()
         assert cfg.hotkey == "fn"
         assert cfg.mode == "auto"
+        assert cfg.snippets == {}
 
     def test_stt_defaults(self):
         stt = STTConfig()
@@ -103,6 +104,20 @@ class TestFromDict:
         cfg = Config.from_dict({"inject": {"method": "clipboard", "typing_delay": 10}})
         assert cfg.inject.method == "clipboard"
         assert cfg.inject.typing_delay == 10
+
+    def test_snippets_from_dict(self):
+        cfg = Config.from_dict({
+            "snippets": {"my email": "test@example.com", "hi": "hello"}
+        })
+        assert cfg.snippets == {"my email": "test@example.com", "hi": "hello"}
+
+    def test_snippets_none_treated_as_empty(self):
+        cfg = Config.from_dict({"snippets": None})
+        assert cfg.snippets == {}
+
+    def test_snippets_missing_defaults_to_empty(self):
+        cfg = Config.from_dict({})
+        assert cfg.snippets == {}
 
     def test_polish_all_disabled(self):
         cfg = Config.from_dict({
@@ -286,6 +301,12 @@ class TestDataclassToDict:
         # VALID_ keys should not appear
         assert "VALID_BACKENDS" not in d["stt"]
         assert "VALID_MODES" not in d
+
+    def test_snippets_round_trip(self):
+        snippets = {"my email": "test@example.com", "hi": "hello"}
+        cfg = Config.from_dict({"snippets": snippets})
+        d = _dataclass_to_dict(cfg)
+        assert d["snippets"] == snippets
 
     def test_non_dataclass_passthrough(self):
         assert _dataclass_to_dict(42) == 42
