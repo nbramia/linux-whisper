@@ -69,7 +69,7 @@ class TrayConfig:
 
 @dataclass(frozen=True)
 class Config:
-    hotkey: str = "`"
+    hotkey: str = "fn"
     mode: str = "hold"  # hold | toggle | vad-auto
     stt: STTConfig = field(default_factory=STTConfig)
     polish: PolishConfig = field(default_factory=PolishConfig)

@@ -89,6 +89,7 @@ def _key_name_to_code(name: str) -> int:
         "backtick": "GRAVE",
         "grave": "GRAVE",
         "~": "GRAVE",
+        "fn": "FN",
         "-": "MINUS",
         "=": "EQUAL",
         "[": "LEFTBRACE",

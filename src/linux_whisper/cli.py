@@ -61,6 +61,9 @@ def main(argv: list[str] | None = None) -> int:
     config_sub.add_parser("path", help="Show config file path")
     config_sub.add_parser("validate", help="Validate current config")
 
+    # `linux-whisper listen-keys` — diagnostic tool
+    subparsers.add_parser("listen-keys", help="Show key events from all input devices (diagnostic)")
+
     args = parser.parse_args(argv)
 
     # Setup logging
@@ -84,6 +87,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_models(args)
     elif command == "config":
         return _cmd_config(args)
+    elif command == "listen-keys":
+        return _cmd_listen_keys()
     else:
         parser.print_help()
         return 1
@@ -224,6 +229,46 @@ def _cmd_config(args: argparse.Namespace) -> int:
     else:
         print("Usage: linux-whisper config {init|show|path|validate}", file=sys.stderr)
         return 1
+
+
+def _cmd_listen_keys() -> int:
+    """Listen for key events and print them — helps identify key codes."""
+    import select
+
+    from evdev import InputDevice, ecodes, list_devices
+
+    devices = []
+    for path in list_devices():
+        try:
+            dev = InputDevice(path)
+            caps = dev.capabilities(verbose=False)
+            if ecodes.EV_KEY in caps:
+                devices.append(dev)
+        except (PermissionError, OSError):
+            pass
+
+    if not devices:
+        print("No input devices found. Are you in the 'input' group?", file=sys.stderr)
+        return 1
+
+    print(f"Listening on {len(devices)} input devices. Press keys to see their codes.")
+    print("Press Ctrl+C to stop.\n")
+
+    try:
+        while True:
+            r, _, _ = select.select(devices, [], [], 1.0)
+            for dev in r:
+                try:
+                    for event in dev.read():
+                        if event.type == ecodes.EV_KEY and event.value in (1, 0):
+                            name = ecodes.KEY.get(event.code, f"UNKNOWN_{event.code}")
+                            action = "DOWN" if event.value == 1 else "UP  "
+                            print(f"  {action}  {name:<30} code={event.code:<5}  device={dev.name}")
+                except OSError:
+                    pass
+    except KeyboardInterrupt:
+        print("\nDone.")
+    return 0
 
 
 if __name__ == "__main__":

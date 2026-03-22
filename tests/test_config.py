@@ -27,7 +27,7 @@ class TestDefaults:
 
     def test_config_defaults(self):
         cfg = Config()
-        assert cfg.hotkey == "`"
+        assert cfg.hotkey == "fn"
         assert cfg.mode == "hold"
 
     def test_stt_defaults(self):
@@ -185,7 +185,7 @@ class TestLoad:
 
     def test_load_from_yaml(self, tmp_config_file: Path):
         cfg = Config.load(tmp_config_file)
-        assert cfg.hotkey == "`"
+        assert cfg.hotkey == "fn"
         assert cfg.mode == "hold"
         assert cfg.stt.backend == "moonshine"
 
@@ -204,7 +204,7 @@ class TestLoad:
             yaml.dump({"mode": "vad-auto"}, f)
         cfg = Config.load(path)
         assert cfg.mode == "vad-auto"
-        assert cfg.hotkey == "`"  # default
+        assert cfg.hotkey == "fn"  # default
 
 
 # ── save_default ────────────────────────────────────────────────────────────
@@ -222,7 +222,7 @@ class TestSaveDefault:
         # Read back and verify
         with open(path) as f:
             data = yaml.safe_load(f)
-        assert data["hotkey"] == "`"
+        assert data["hotkey"] == "fn"
         assert data["mode"] == "hold"
 
     def test_does_not_overwrite_existing(self, tmp_config_file: Path):
