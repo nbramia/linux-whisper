@@ -280,12 +280,19 @@ class App:
         Starts audio capture immediately from the hotkey thread to minimize
         latency, then schedules the async state transition.
         """
-        # Start capturing audio IMMEDIATELY — don't wait for asyncio scheduling.
-        # Tray icon update is deferred to asyncio (it's slow — PIL image gen + disk write).
+        # Grab pre-roll audio BEFORE starting recording (which clears the ring buffer).
+        # This captures ~0.75s of audio from before fn was pressed, ensuring
+        # we don't lose the first words if the user starts speaking immediately.
+        pre_roll = None
         if self._audio:
+            pre_roll = self._audio.get_pre_roll(0.75)
             self._audio.start_recording()
         if self._stt:
             self._stt.start_stream()
+            # Feed pre-roll into the STT engine immediately
+            if pre_roll is not None and len(pre_roll) > 0:
+                pre_roll_int16 = (pre_roll * 32767).astype(np.int16)
+                self._stt.feed_audio(pre_roll_int16.tobytes())
 
         if self._loop is None or self._loop.is_closed():
             return
