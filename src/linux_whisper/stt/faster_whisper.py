@@ -73,8 +73,11 @@ class FasterWhisperEngine:
         self._stream_started = False
         self._audio_buffer = bytearray()
 
+        # Eagerly load the model at init so first recording has zero delay
+        self._ensure_model()
+
         logger.info(
-            "FasterWhisperEngine created: model=%s, threads=%d",
+            "FasterWhisperEngine ready: model=%s, threads=%d",
             self._model_name,
             self._threads,
         )

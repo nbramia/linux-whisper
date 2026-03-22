@@ -275,7 +275,20 @@ class App:
                 self._tray.update_state(AppState.ERROR)
 
     def _on_recording_start(self) -> None:
-        """Called by hotkey daemon (from its thread) when recording should begin."""
+        """Called by hotkey daemon (from its thread) when recording should begin.
+
+        Starts audio capture immediately from the hotkey thread to minimize
+        latency, then schedules the async state transition.
+        """
+        # Start capturing audio IMMEDIATELY — don't wait for asyncio scheduling.
+        # This shaves ~50-200ms off the perceived start latency.
+        if self._audio:
+            self._audio.start_recording()
+        if self._stt:
+            self._stt.start_stream()
+        if self._tray:
+            self._tray.update_state(AppState.RECORDING)
+
         if self._loop is None or self._loop.is_closed():
             return
         self._loop.call_soon_threadsafe(asyncio.ensure_future, self._handle_recording_start())
@@ -287,22 +300,15 @@ class App:
         self._loop.call_soon_threadsafe(asyncio.ensure_future, self._handle_recording_stop())
 
     async def _handle_recording_start(self) -> None:
-        """Transition to RECORDING and start capturing audio."""
-        if not await self.state.transition(AppState.RECORDING):
-            return
-
-        if self._audio:
-            self._audio.start_recording()
-
-        if self._stt:
-            self._stt.start_stream()
+        """Async follow-up after recording already started in _on_recording_start."""
+        # Audio capture and STT stream already started synchronously in the
+        # hotkey thread for minimum latency. Just update async state here.
+        await self.state.transition(AppState.RECORDING)
 
         if self._overlay:
             self._overlay.show()
 
-        # Start feeding audio levels to tray icon and overlay
         asyncio.ensure_future(self._feed_audio_levels())
-
         logger.debug("Recording started")
 
     async def _handle_recording_stop(self) -> None:
