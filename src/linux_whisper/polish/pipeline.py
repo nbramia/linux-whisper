@@ -77,11 +77,17 @@ class PolishPipeline:
     # Public API
     # ------------------------------------------------------------------
 
-    def process(self, text: str) -> str:
+    def process(self, text: str, app_context: str | None = None) -> str:
         """Run the full polish pipeline on *text* and return cleaned output.
 
         The method is synchronous and intended to be called from an async
         context via ``asyncio.to_thread`` or an executor.
+
+        Parameters
+        ----------
+        app_context:
+            Optional focused-app context string passed to the LLM stage
+            for tone adaptation.
         """
         if not self._config.enabled:
             logger.debug("Polish pipeline disabled — returning text unchanged")
@@ -133,7 +139,7 @@ class PolishPipeline:
         if should_run_llm:
             assert self._llm is not None  # for type narrowing
             t_stage = time.perf_counter()
-            corrected = self._llm.process(current)
+            corrected = self._llm.process(current, app_context=app_context)
             dt = (time.perf_counter() - t_stage) * 1000
             logger.debug("Stage 4c (LLM): %.1f ms", dt)
 

@@ -160,11 +160,17 @@ class LLMCorrector:
         self._try_load_model()
         return self._loaded
 
-    def process(self, text: str) -> str:
+    def process(self, text: str, app_context: str | None = None) -> str:
         """Run LLM correction on *text*.
 
         Lazy-loads the model on first call (~1s). Returns the original
         text unchanged if the model can't load, times out, or hallucinates.
+
+        Parameters
+        ----------
+        app_context:
+            Optional context string describing the focused application,
+            injected into the system prompt for tone adaptation.
         """
         if not text or not text.strip():
             return text
@@ -178,7 +184,7 @@ class LLMCorrector:
         def _infer() -> None:
             nonlocal result
             try:
-                result = self._run_inference(text)
+                result = self._run_inference(text, app_context=app_context)
             except Exception:
                 logger.exception("LLM inference failed")
                 result = None
@@ -214,12 +220,18 @@ class LLMCorrector:
     # Inference
     # ------------------------------------------------------------------
 
-    def _run_inference(self, text: str) -> str | None:
+    def _run_inference(
+        self, text: str, app_context: str | None = None
+    ) -> str | None:
         """Build the prompt and call the model."""
         assert self._model is not None
 
+        system_content = _SYSTEM_PROMPT
+        if app_context:
+            system_content = f"{_SYSTEM_PROMPT}\n\nContext: {app_context}"
+
         messages = [
-            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "system", "content": system_content},
             {"role": "user", "content": text},
         ]
 
