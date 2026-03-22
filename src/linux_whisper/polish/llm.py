@@ -82,8 +82,10 @@ class LLMCorrector:
         self._model: Any | None = None  # Llama instance
         self._loaded = False
         self._timeout_s = _DEFAULT_TIMEOUT_MS / 1000.0
+        self._model_path: Path | None = self._resolve_model_path()
 
-        self._try_load_model()
+        # Don't load model at init — lazy-load on first use to save ~2.5GB RAM.
+        # The model is only needed when self-corrections are detected.
 
     # ------------------------------------------------------------------
     # Model loading
@@ -144,21 +146,30 @@ class LLMCorrector:
 
     @property
     def available(self) -> bool:
-        """True if the LLM model is loaded and ready."""
-        return self._loaded and self._model is not None
+        """True if the LLM can be loaded (package installed, model file exists)."""
+        if not _LLAMA_AVAILABLE:
+            return False
+        return self._model_path is not None and self._model_path.exists()
+
+    def _ensure_loaded(self) -> bool:
+        """Lazy-load the model on first use. Returns True if ready."""
+        if self._loaded and self._model is not None:
+            return True
+        if not self.available:
+            return False
+        self._try_load_model()
+        return self._loaded
 
     def process(self, text: str) -> str:
         """Run LLM correction on *text*.
 
-        Returns the corrected text, or the original *text* unchanged if:
-        - The model is not loaded.
-        - Inference exceeds the timeout.
-        - The model returns empty or clearly degenerate output.
+        Lazy-loads the model on first call (~1s). Returns the original
+        text unchanged if the model can't load, times out, or hallucinates.
         """
         if not text or not text.strip():
             return text
 
-        if not self.available:
+        if not self._ensure_loaded():
             logger.debug("LLM not available — returning text unchanged")
             return text
 
