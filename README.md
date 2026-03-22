@@ -4,16 +4,16 @@ Local voice dictation for Linux. Press a hotkey, speak naturally with filler wor
 
 ## How It Works
 
-1. You hold a hotkey (default: `Fn`). A 750ms pre-roll buffer captures audio from *before* the keypress so the first syllable is never lost.
+1. You press the hotkey (default: `Fn`). In **auto mode** (the default), the system detects your intent: hold the key for longer than 300ms and it's hold-to-talk (stops on release); double-tap quickly and it's toggle mode (stays recording until the next tap). A 750ms pre-roll buffer captures audio from *before* the keypress so the first syllable is never lost.
 2. You speak naturally. Silero VAD v5 monitors speech activity in real time. The system tray icon and a floating pill overlay show whether speech is detected.
-3. You release the hotkey. The audio is fed through a 6-stage pipeline: STT transcription (faster-whisper with built-in VAD filtering), then a three-stage polish pipeline that removes filler words (BERT), adds punctuation (ELECTRA / rules), and conditionally invokes a local LLM to resolve self-corrections.
+3. You release the hotkey (or tap again in toggle mode). The audio is fed through a 6-stage pipeline: STT transcription (faster-whisper with built-in VAD filtering), then a three-stage polish pipeline that removes filler words (BERT), adds punctuation (ELECTRA / rules), and conditionally invokes a local LLM to resolve self-corrections.
 4. Polished text is injected at the cursor position in whatever application is focused, via xdotool (X11), wtype (wlroots Wayland), ydotool (any Wayland), or clipboard fallback.
 
 The entire pipeline targets under 800ms end-to-end on a modern multi-core CPU.
 
 ## Features
 
-- Hold-to-talk, toggle, and VAD-auto-stop hotkey modes via kernel-level evdev (works on X11 and Wayland)
+- Auto mode (default): hold fn > 300ms for hold-to-talk, double-tap for toggle — plus explicit hold, toggle, and VAD-auto-stop modes via kernel-level evdev (works on X11 and Wayland)
 - Configurable hotkey with modifier support (`fn`, `ctrl+shift+e`, etc.)
 - Pre-roll buffer (750ms) captures audio before the hotkey press to avoid clipping first words
 - Silero VAD v5 voice activity detection with adaptive noise floor
@@ -159,10 +159,11 @@ Config file: `~/.config/linux-whisper/config.yaml`
 hotkey: "fn"
 
 # Mode: how the hotkey triggers recording.
-#   hold     — hold to record, release to stop (default)
+#   auto     — hold > 300ms = hold-to-talk, double-tap = toggle (default)
+#   hold     — hold to record, release to stop
 #   toggle   — press once to start, press again to stop
 #   vad-auto — press to start, silence auto-stops
-mode: "hold"
+mode: "auto"
 
 # Speech-to-text engine
 stt:
@@ -237,7 +238,7 @@ Right-click context menu:
 
 - **Copy Last** -- copies the most recent transcription to the clipboard (via wl-copy or xclip)
 - **Model** -- submenu to hot-swap STT model at runtime (persists to config)
-- **Mode** -- submenu to switch between hold, toggle, and VAD-auto modes (persists to config)
+- **Mode** -- submenu to switch between auto (default — hold vs double-tap detection), hold, toggle, and VAD-auto modes (persists to config)
 - **Latency** -- displays last and rolling-average end-to-end latency
 - **Quit** -- clean shutdown
 

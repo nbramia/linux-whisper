@@ -20,7 +20,7 @@ There is no Linux equivalent. We're building it.
 
 A system tray application that:
 
-1. **Listens for a global hotkey** (hold-to-talk or toggle mode)
+1. **Listens for a global hotkey** (auto mode by default: hold > 300ms for hold-to-talk, double-tap for toggle — or explicit hold/toggle/VAD-auto modes)
 2. **Captures audio** from any input device via PipeWire/PulseAudio
 3. **Streams transcription in real-time** using state-of-the-art local models on CPU
 4. **Cleans and formats the transcript** using a hybrid pipeline — deterministic encoder models handle filler removal and punctuation, a local LLM resolves self-corrections and polishes grammar
@@ -45,7 +45,7 @@ We ship fewer features, but each one is polished. The core loop — speak, relea
 Text injection works in any application that accepts keyboard input: terminals, browsers, IDEs, Slack, email clients, LibreOffice. X11 and Wayland. GNOME, KDE, Hyprland, Sway.
 
 ### 5. Invisible When Not in Use
-Minimal resource consumption when idle. No background CPU burn. The tray icon is the only visible footprint. Models stay warm in RAM (~3.4GB of 64GB) for instant response with negligible system impact.
+Minimal resource consumption when idle. No background CPU burn. The tray icon is the only visible footprint. STT and encoder models stay warm in RAM (~1.5GB idle); the LLM is lazy-loaded only when needed, saving ~2.5GB.
 
 ### 6. CPU-Native by Design
 Architected for high-core-count AMD CPUs with AVX-512, not as a GPU fallback. Every model chosen runs best on CPU. GPU acceleration (ROCm, NPU) is a future bonus, not a requirement.
@@ -55,9 +55,10 @@ Architected for high-core-count AMD CPUs with AVX-512, not as a GPU fallback. Ev
 ### Core Flow
 
 ```
-[User holds hotkey] → Tray icon changes to "recording" + subtle audio cue
+[User presses hotkey] → Auto mode detects: hold > 300ms = hold-to-talk, double-tap = toggle
+[Tray icon changes to "recording" + subtle audio cue]
 [User speaks naturally] → Streaming transcription preview appears (optional overlay)
-[User releases hotkey] → Audio cue, brief pause (~500ms)
+[User releases hotkey (hold) or taps again (toggle)] → Audio cue, brief pause (~500ms)
 [Polished text appears at cursor]
 ```
 
@@ -109,22 +110,23 @@ After dictating, hold the hotkey again and speak an editing command:
 - 8GB RAM
 - No GPU required
 
-### With NVIDIA GPU (alternative path)
-- Any NVIDIA GPU with 4GB+ VRAM enables faster-whisper GPU acceleration
-- Not the primary target but supported via backend selection
+### With NVIDIA GPU (optional)
+- Any NVIDIA GPU with 4GB+ VRAM can enable faster-whisper GPU acceleration
+- Not a target platform — CPU-first by design, but supported via backend selection
 
-### Memory Budget (Always-On)
+### Memory Budget
 
-| Component | RAM |
-|-----------|-----|
-| Moonshine v2 Medium (ONNX) | ~500MB |
-| BERT disfluency classifier | ~110MB |
-| ELECTRA punctuation model | ~60MB |
-| Qwen3 4B Instruct (Q4_K_M) | ~2.5GB |
-| Python runtime + overhead | ~200MB |
-| **Total** | **~3.4GB** |
+| Component | RAM | Notes |
+|-----------|-----|-------|
+| faster-whisper large-v3-turbo (INT8) | ~4GB | Default STT model |
+| BERT disfluency classifier | ~110MB | |
+| ELECTRA punctuation model | ~60MB | |
+| Qwen3 4B Instruct (Q4_K_M) | ~2.5GB | **Lazy-loaded** — only when self-corrections detected |
+| Python runtime + overhead | ~200MB | |
+| **Total (idle)** | **~1.5GB** | LLM not loaded |
+| **Total (LLM warm)** | **~4GB** | After first self-correction triggers LLM load |
 
-~5% of 64GB. Comfortable for continuous background operation alongside any workload.
+Idle footprint is ~2.3% of 64GB. Even with the LLM warm, comfortable for continuous background operation alongside any workload.
 
 ## Non-Goals (For Now)
 
@@ -138,19 +140,19 @@ After dictating, hold the hotkey again and speak an editing command:
 ## Success Metrics
 
 - End-to-end latency p95 < 800ms on target hardware (Ryzen AI MAX+ 395)
-- Word error rate < 7% on native English dictation (Moonshine v2 Medium baseline: 6.65%)
+- Word error rate < 8% on native English dictation (faster-whisper large-v3-turbo baseline: 7.25%)
 - Filler word removal accuracy > 95% (BERT classifier)
 - Self-correction resolution accuracy > 90% (LLM)
 - Zero network calls during operation (verified by audit)
-- Idle CPU usage < 0.5%, idle RAM ~3.4GB (models warm)
+- Idle CPU usage < 0.5%, idle RAM ~1.5GB (LLM lazy-loaded, saves ~2.5GB)
 - Works on X11 and Wayland without user configuration
 
 ## Roadmap
 
 ### v0.1 — Core Loop
-- Hold-to-talk hotkey via evdev
+- Auto mode hotkey via evdev (hold-to-talk or double-tap toggle)
 - Audio capture via PipeWire
-- Transcription via Moonshine v2 (streaming)
+- Transcription via faster-whisper large-v3-turbo (INT8 batch)
 - Raw text injection at cursor (no cleanup yet)
 - System tray icon with recording state
 

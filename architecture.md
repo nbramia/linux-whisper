@@ -49,7 +49,7 @@ The end-to-end pipeline has 6 stages. Each stage has a latency budget:
 |-------|-----------|---------------|---------|-------|
 | 1 | Hotkey detection | < 5ms | CPU (evdev) | Kernel-level input event |
 | 2 | Audio capture + VAD | < 10ms | CPU | PipeWire stream, Silero VAD |
-| 3 | Speech-to-text | < 300ms | CPU (AVX-512) | Moonshine v2 streaming |
+| 3 | Speech-to-text | < 300ms | CPU (AVX-512) | faster-whisper large-v3-turbo, INT8 batch |
 | 4a | Disfluency removal | < 15ms | CPU | BERT token classifier |
 | 4b | Punctuation + caps | < 15ms | CPU | ELECTRA-small classifier |
 | 4c | Self-correction + grammar | < 350ms | CPU (AVX-512) | Qwen3 4B Q4_K_M, only when needed |
@@ -57,7 +57,7 @@ The end-to-end pipeline has 6 stages. Each stage has a latency budget:
 | **Total (simple)** | | **< 365ms** | | **No self-corrections detected** |
 | **Total (complex)** | | **< 715ms** | | **Self-corrections present → LLM invoked** |
 
-Stage 3 (STT) begins while the user is still speaking — Moonshine v2 is natively streaming. Stages 4a and 4b are fast encoder models that run in series on the final transcript. Stage 4c (generative LLM) is only invoked when the disfluency detector flags self-corrections in the transcript.
+Stage 3 (STT) runs in batch mode after recording ends — faster-whisper processes the complete audio with INT8 quantization via CTranslate2. Stages 4a and 4b are fast encoder models that run in series on the final transcript. Stage 4c (generative LLM) is only invoked when the disfluency detector flags self-corrections in the transcript.
 
 ---
 
@@ -76,7 +76,8 @@ Captures global hotkeys regardless of focused application.
 - D-Bus global shortcuts portal: GNOME/KDE only, not universal
 
 **Modes:**
-- **Hold-to-talk (default):** Recording starts on key-down, stops on key-up. Simplest, most reliable.
+- **Auto (default):** Automatically detects hold vs double-tap. Hold the key for longer than 300ms and it behaves as hold-to-talk (stops on release). Double-tap quickly and it enters toggle mode (stays recording until the next tap). Best of both worlds with zero configuration.
+- **Hold:** Recording starts on key-down, stops on key-up. Simplest, most reliable.
 - **Toggle:** First press starts recording, second press stops. Better for long dictation.
 - **VAD-auto-stop:** Recording starts on key-down, stops automatically when silence is detected for N seconds. Best for hands-free.
 
@@ -139,40 +140,52 @@ Start/stop cues are played via `sounddevice` output stream:
 
 We support multiple STT backends selected at startup. The engine interface is abstract — all backends implement the same protocol. The default is optimized for our target hardware (CPU with AVX-512, no NVIDIA GPU).
 
-#### Primary: Moonshine v2 Medium (Default)
+#### Primary: faster-whisper large-v3-turbo (Default)
+
+| Attribute | Value |
+|-----------|-------|
+| Parameters | 809M |
+| Architecture | Whisper encoder-decoder, INT8 via CTranslate2 |
+| Avg WER (Open ASR datasets) | 7.25% |
+| Mode | Batch (processes complete audio after recording ends) |
+| Runtime | CTranslate2 (INT8 quantization, AVX-512 optimized) |
+| RAM | ~4GB (Q8) |
+| Languages | 99 languages |
+
+**Why faster-whisper large-v3-turbo:**
+- **Best transcription quality on CPU.** Noticeably better output than smaller models in practice.
+- **Built-in Silero VAD filter** handles silence trimming well, reducing noise-only segments.
+- **CTranslate2 INT8** leverages AVX-512 VNNI for fast quantized inference on the target CPU.
+- **No PyTorch dependency.** CTranslate2 is a standalone C++ inference engine.
+- **Hot-swappable** from the system tray menu at runtime without restarting the application.
+
+#### Alternative: Moonshine v2 Medium (Low-Latency Streaming)
 
 | Attribute | Value |
 |-----------|-------|
 | Parameters | 244.9M |
 | Architecture | Sliding-window streaming encoder |
-| Avg WER (Open ASR datasets) | 6.65% |
-| LibriSpeech clean / other | 2.08% / 5.00% |
-| TTFT | ~258ms (benchmarked on Apple M3; comparable on Ryzen AI MAX+) |
+| Avg WER | 6.65% |
 | Streaming | Native — 80ms algorithmic lookahead |
 | Runtime | ONNX Runtime (CPU) |
 | RAM | ~500MB |
-| Languages | English (community models for others) |
 
-**Why Moonshine v2:**
-- **Designed for CPU/edge.** Not a GPU model with a CPU fallback — the architecture targets low-power processors with 0.1-1 TOPs. On a 16-core AVX-512 chip, it's overkill in the best way.
-- **True native streaming.** Words appear as you speak, not in post-hoc chunks. TTFT is constant regardless of utterance length (5 seconds or 60 seconds: same latency).
-- **6.65% WER at 245M params** competes with Whisper large-v3 (7.14% WER, 1.55B params) — 6x smaller with better accuracy.
-- **No PyTorch dependency.** Runs via ONNX Runtime, which has lower overhead than PyTorch (~100MB runtime vs ~1.2GB).
+For users who prefer streaming output (words appear as you speak) or need lower memory usage. Designed for CPU/edge with 6.65% WER at 245M params.
 
-#### Alternative: Moonshine v2 Tiny (Low-Latency)
+#### Alternative: Moonshine v2 Tiny (Minimal)
 
 | Attribute | Value |
 |-----------|-------|
 | Parameters | 33.6M |
 | TTFT | ~50ms |
-| WER | 12.01% (avg), 4.49% / 12.09% (LS clean/other) |
+| WER | 12.01% (avg) |
 | RAM | ~150MB |
 
 For users who prioritize speed over accuracy (short commands, quick notes). The 50ms TTFT is near-imperceptible.
 
 #### Fallback: whisper.cpp (Highest Accuracy)
 
-For batch-mode transcription when streaming isn't needed (e.g., processing a recorded audio file).
+For batch-mode transcription via GGML quantization.
 
 | Model | Params | Avg WER | Quantization | RAM | CPU Performance |
 |-------|--------|---------|-------------|-----|-----------------|
@@ -205,12 +218,12 @@ For reference, current top models and where our choices sit:
 | 2 | NVIDIA Canary-Qwen 2.5B | 5.63% | 2.5B | No (NeMo/CUDA) | |
 | 5 | NVIDIA Canary-1B-Flash | 6.35% | 883M | No (NeMo/CUDA) | |
 | 6 | NVIDIA Parakeet-TDT 0.6B v3 | 6.34% | 600M | No (NeMo/CUDA) | |
-| — | **Moonshine v2 Medium** | **6.65%** | **245M** | **Yes — designed for it** | **← Our primary** |
-| 8 | Distil-Whisper v3.5 | 7.10% | 756M | Yes (whisper.cpp) | ← Our fallback |
+| — | Moonshine v2 Medium | 6.65% | 245M | Yes — designed for it | ← Our alternative (streaming) |
+| 8 | Distil-Whisper v3.5 | 7.10% | 756M | Yes (faster-whisper) | ← Available option |
 | 9 | Whisper large-v3 | 7.14% | 1.55B | Slow | |
-| 10 | Whisper large-v3-turbo | 7.25% | 809M | Yes (whisper.cpp) | ← Our fallback |
+| 10 | **Whisper large-v3-turbo** | **7.25%** | **809M** | **Yes (faster-whisper INT8)** | **← Our default** |
 
-Moonshine v2 Medium sits between the NVIDIA-exclusive models and the Whisper family — excellent accuracy at a fraction of the parameter count, and the only model in the top 10 that streams natively on CPU.
+Our default (faster-whisper large-v3-turbo) offers the best practical quality on CPU with INT8 quantization. Moonshine v2 Medium remains available for users who want streaming output or lower memory usage.
 
 ### Engine Interface
 
@@ -453,8 +466,9 @@ The most robust long-term solution is implementing an IBus or Fcitx5 input metho
 | Error | Red exclamation | Error description |
 
 **Menu:**
-- Toggle mode (hold-to-talk / toggle / VAD-auto)
-- Model info (name, RAM usage)
+- **Copy Last** — copies the most recent transcription to the clipboard
+- **Model** — submenu to hot-swap STT model at runtime (persists to config)
+- **Mode** — submenu to switch between auto (default — hold vs double-tap detection), hold, toggle, and VAD-auto modes (persists to config)
 - Latency stats (last / avg / p95)
 - Settings (opens config file)
 - Quit
@@ -468,12 +482,12 @@ YAML config file at `~/.config/linux-whisper/config.yaml`:
 ```yaml
 # Hotkey
 hotkey: "ctrl+shift+e"
-mode: "hold"  # hold | toggle | vad-auto
+mode: "auto"  # auto | hold | toggle | vad-auto
 
 # STT Engine
 stt:
-  backend: "moonshine"  # moonshine | whisper-cpp
-  model: "moonshine-medium"  # moonshine-tiny | moonshine-medium | whisper-large-v3-turbo | distil-large-v3.5
+  backend: "faster-whisper"  # faster-whisper | moonshine | whisper-cpp
+  model: "large-v3-turbo"  # large-v3-turbo | distil-large-v3.5 | medium.en | small.en | moonshine-medium | moonshine-tiny
   threads: 8  # CPU threads for inference (0 = auto)
 
 # Polish Pipeline
@@ -514,8 +528,9 @@ tray:
 | Language | Python 3.12+ | Ecosystem (ML libs), rapid iteration, adequate perf with native extensions |
 | Audio capture | `sounddevice` (PortAudio) | Cross-backend (PipeWire, PulseAudio, ALSA), well-maintained |
 | VAD | Silero VAD v5 | ~1ms inference, best open-source VAD, CPU-native |
+| STT (default) | faster-whisper (CTranslate2) | INT8 quantization, AVX-512 optimized, large-v3-turbo, 7.25% WER |
 | STT (streaming) | Moonshine v2 (ONNX Runtime) | Native streaming, CPU-designed, 245M params, 6.65% WER |
-| STT (batch) | `whisper.cpp` (via Python bindings) | AVX-512 optimized, GGML quantization, best CPU Whisper |
+| STT (batch alt) | `whisper.cpp` (via Python bindings) | AVX-512 optimized, GGML quantization |
 | Disfluency | BERT token classifier (ONNX) | Deterministic filler removal, ~10ms, zero hallucination |
 | Punctuation | ELECTRA-small (ONNX) | Token classification, ~5ms, outperforms GPT on this task |
 | LLM | `llama-cpp-python` | GGUF quantized Qwen3 4B, AVX-512 optimized, ~50-70 tok/s |
@@ -545,29 +560,29 @@ The one exception: if we add ROCm GPU acceleration in v0.3+, PyTorch-ROCm may be
 
 ## Memory Budget
 
-All models stay warm (loaded in RAM) for instant response. No load-on-demand delays.
+STT and encoder models stay warm in RAM for instant response. The LLM (Qwen3 4B) is **lazy-loaded** — it remains unloaded until the disfluency detector first flags a self-correction, saving ~2.5GB idle RAM.
 
 | Component | RAM (Resident) | Notes |
 |-----------|---------------|-------|
-| Moonshine v2 Medium (ONNX) | ~500MB | ONNX Runtime + model weights |
+| faster-whisper large-v3-turbo (CTranslate2 INT8) | ~4,000MB | Default STT model |
 | BERT disfluency (ONNX) | ~110MB | Or ~1.3MB with INT8 distilled variant |
 | ELECTRA punctuation (ONNX) | ~60MB | Two 14M-param models |
-| Qwen3 4B Q4_K_M (llama.cpp) | ~2,500MB | Weights + 2K context KV cache |
-| llama.cpp runtime overhead | ~100MB | Lighter than PyTorch (~300MB vs ~1,200MB) |
+| Qwen3 4B Q4_K_M (llama.cpp) | ~2,500MB | **Lazy-loaded** — only when self-corrections detected |
+| llama.cpp runtime overhead | ~100MB | Only when LLM is loaded |
 | ONNX Runtime overhead | ~100MB | Shared across all ONNX models |
 | Silero VAD | ~5MB | Tiny model |
 | Python + app overhead | ~200MB | asyncio, evdev, sounddevice, pystray |
-| **Total** | **~3,575MB** | **~5.5% of 64GB** |
+| **Total (idle, no LLM)** | **~4,475MB** | **~7% of 64GB** |
+| **Total (LLM warm)** | **~7,075MB** | **After first self-correction triggers LLM load** |
 
 ### Comparison with Alternatives
 
-| Configuration | Total RAM | Trade-off |
-|---------------|-----------|-----------|
-| Moonshine Tiny + no LLM (raw transcription) | ~850MB | Fastest, lowest quality |
-| Moonshine Medium + encoder cleanup only (no LLM) | ~1,170MB | Fast, good quality, no self-correction handling |
-| **Moonshine Medium + hybrid pipeline (default)** | **~3,575MB** | **Best balance** |
-| whisper.cpp large-v3-turbo Q8 + hybrid pipeline | ~7,575MB | Best accuracy, not streaming |
-| Moonshine Medium + Gemma 3 4B (swap for Qwen3) | ~4,475MB | Best instruction following |
+| Configuration | Idle RAM | LLM-warm RAM | Trade-off |
+|---------------|----------|-------------|-----------|
+| Moonshine Tiny + no polish | ~350MB | — | Fastest, lowest quality |
+| Moonshine Medium + encoder cleanup only | ~870MB | — | Low latency, streaming, no self-correction handling |
+| **faster-whisper large-v3-turbo + polish (default)** | **~1,500MB** | **~4,000MB** | **Best quality. LLM lazy-loaded.** |
+| faster-whisper large-v3-turbo + Gemma 3 4B | ~1,500MB | ~4,900MB | Best instruction following |
 
 ---
 
@@ -583,7 +598,7 @@ All models stay warm (loaded in RAM) for instant response. No load-on-demand del
 │  ├─ VAD (Silero, ONNX)              │  ← runs in audio callback
 │  ├─ System tray (pystray)            │  ← dedicated thread
 │  │                                   │
-│  ├─ STT inference (Moonshine, ONNX)  │  ← async task, CPU threads
+│  ├─ STT inference (faster-whisper)    │  ← async task, CPU threads
 │  ├─ Disfluency removal (BERT, ONNX)  │  ← async task, CPU (fast)
 │  ├─ Punctuation (ELECTRA, ONNX)      │  ← async task, CPU (fast)
 │  ├─ LLM inference (llama.cpp)        │  ← async task, CPU threads
@@ -613,7 +628,7 @@ STT and LLM never run simultaneously (they're sequential in the pipeline), so th
 ### Concurrency Model
 
 1. **Audio callback** (real-time thread): Copies audio to ring buffer. Runs Silero VAD (~1ms). Sets event flag on speech onset/offset.
-2. **STT task** (async): Awaits audio chunks from ring buffer, feeds to Moonshine streaming engine, collects partial/final transcripts.
+2. **STT task** (async): Awaits complete audio from ring buffer, feeds to faster-whisper batch engine, collects final transcript.
 3. **Polish pipeline** (async): Awaits final transcript from STT. Runs BERT disfluency → ELECTRA punctuation → (conditional) LLM correction. Sequential, fast.
 4. **Injector task** (async): Awaits polished text, invokes text injection subprocess.
 
