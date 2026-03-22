@@ -83,6 +83,26 @@ def _key_name_to_code(name: str) -> int:
     if lower in _MODIFIER_MAP:
         return _MODIFIER_MAP[lower]
 
+    # Common aliases for non-alphanumeric keys.
+    _ALIASES: dict[str, str] = {
+        "`": "GRAVE",
+        "backtick": "GRAVE",
+        "grave": "GRAVE",
+        "~": "GRAVE",
+        "-": "MINUS",
+        "=": "EQUAL",
+        "[": "LEFTBRACE",
+        "]": "RIGHTBRACE",
+        "\\": "BACKSLASH",
+        ";": "SEMICOLON",
+        "'": "APOSTROPHE",
+        ",": "COMMA",
+        ".": "DOT",
+        "/": "SLASH",
+    }
+    if lower in _ALIASES:
+        lower = _ALIASES[lower]
+
     # Try KEY_<NAME> in ecodes (e.g. "e" → KEY_E, "f1" → KEY_F1).
     attr = f"KEY_{lower.upper()}"
     code = getattr(ecodes, attr, None)

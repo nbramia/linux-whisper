@@ -93,7 +93,7 @@ def tmp_config_dir(tmp_path: Path) -> Path:
 def tmp_config_file(tmp_config_dir: Path) -> Path:
     """Write a minimal YAML config and return its path."""
     cfg = {
-        "hotkey": "ctrl+shift+e",
+        "hotkey": "`",
         "mode": "hold",
         "stt": {"backend": "moonshine", "model": "moonshine-medium"},
         "polish": {"enabled": True},
