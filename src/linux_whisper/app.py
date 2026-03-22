@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from linux_whisper.audio import AudioPipeline
     from linux_whisper.hotkey import HotkeyDaemon
     from linux_whisper.inject import TextInjector
+    from linux_whisper.overlay import Overlay
     from linux_whisper.polish.pipeline import PolishPipeline
     from linux_whisper.stt.engine import STTEngine
     from linux_whisper.tray import SystemTray
@@ -46,6 +47,7 @@ class App:
         self._polish: PolishPipeline | None = None
         self._injector: TextInjector | None = None
         self._tray: SystemTray | None = None
+        self._overlay: Overlay | None = None
 
     async def setup(self) -> None:
         """Initialize all components. Call before run()."""
@@ -62,6 +64,7 @@ class App:
         await self._setup_injector()
         await self._setup_hotkey()
         await self._setup_tray()
+        await self._setup_overlay()
 
         # Wire state change listener to tray
         if self._tray:
@@ -124,6 +127,18 @@ class App:
         except ImportError:
             logger.warning("pystray not available, running without system tray")
 
+    async def _setup_overlay(self) -> None:
+        try:
+            from linux_whisper.overlay import Overlay
+
+            self._overlay = Overlay()
+            if self._overlay.available:
+                logger.info("Overlay ready")
+            else:
+                self._overlay = None
+        except ImportError:
+            logger.debug("Overlay not available (GTK4 missing)")
+
     async def run(self) -> None:
         """Run the application until shutdown is requested."""
         logger.info("Starting Linux Whisper")
@@ -136,6 +151,8 @@ class App:
             await self._audio.start()
         if self._tray:
             self._tray.start()
+        if self._overlay:
+            self._overlay.start()
 
         logger.info("Ready — press %s to dictate", self.config.hotkey)
 
@@ -153,6 +170,8 @@ class App:
             await self._audio.stop()
         if self._tray:
             self._tray.stop()
+        if self._overlay:
+            self._overlay.stop()
         logger.info("Shutdown complete")
 
     def _request_shutdown(self) -> None:
@@ -182,6 +201,11 @@ class App:
         if self._stt:
             self._stt.start_stream()
 
+        if self._overlay:
+            self._overlay.show()
+            # Start feeding audio levels to overlay
+            asyncio.ensure_future(self._feed_overlay_levels())
+
         logger.debug("Recording started")
 
     async def _handle_recording_stop(self) -> None:
@@ -208,7 +232,28 @@ class App:
             await self.state.transition(AppState.ERROR)
             await asyncio.sleep(0.5)
         finally:
+            if self._overlay:
+                self._overlay.hide()
             await self.state.transition(AppState.IDLE)
+
+    async def _feed_overlay_levels(self) -> None:
+        """Feed real-time audio levels to the overlay while recording."""
+        if not self._audio or not self._overlay:
+            return
+        while self.state.is_recording:
+            if self._audio.vad_enabled:
+                self._overlay.set_speech_active(self._audio.speech_active)
+            # Compute RMS level from the ring buffer's recent samples
+            try:
+                recent = self._audio.get_pre_roll(0.05)  # last 50ms
+                if len(recent) > 0:
+                    rms = float(np.sqrt(np.mean(recent ** 2)))
+                    # Scale to 0-1 range (typical speech RMS is 0.01-0.3)
+                    level = min(1.0, rms * 5.0)
+                    self._overlay.push_audio_level(level)
+            except Exception:
+                pass
+            await asyncio.sleep(1.0 / 30)  # ~30fps
 
     async def _process_pipeline(self) -> str | None:
         """Run the full pipeline: collect audio → STT → polish → text."""
