@@ -322,6 +322,8 @@ class App:
                 latency = time.monotonic() - start_time
                 self._record_latency(latency)
                 logger.info("Injected %d chars in %.0fms", len(text), latency * 1000)
+                if self._tray:
+                    self._tray.set_last_transcription(text)
             else:
                 logger.debug("Empty transcription, discarding")
         except Exception:

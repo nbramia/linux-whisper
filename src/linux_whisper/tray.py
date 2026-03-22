@@ -259,6 +259,7 @@ class SystemTray:
         self._current_model: str = config.stt.model
         self._last_latency: float | None = None
         self._avg_latency: float | None = None
+        self._last_transcription: str | None = None
 
         # pystray internals
         self._icon: pystray.Icon | None = None  # type: ignore[union-attr]
@@ -357,6 +358,12 @@ class SystemTray:
         except Exception:
             logger.debug("Failed to update speech icon", exc_info=True)
 
+    def set_last_transcription(self, text: str) -> None:
+        """Store the most recent transcription for the Copy Last menu item."""
+        with self._lock:
+            self._last_transcription = text
+        self._refresh_menu()
+
     def update_stats(self, last_latency: float, avg_latency: float) -> None:
         """Push new latency numbers into the tray menu.
 
@@ -410,6 +417,7 @@ class SystemTray:
             current_model = self._current_model
             last_lat = self._last_latency
             avg_lat = self._avg_latency
+            last_text = self._last_transcription
 
         mode_items = [
             pystray.MenuItem(
@@ -432,7 +440,16 @@ class SystemTray:
         else:
             latency_label = "Latency: -"
 
+        # Truncate last transcription for display
+        if last_text:
+            display_text = last_text[:50] + ("..." if len(last_text) > 50 else "")
+            copy_label = f"Copy Last: \"{display_text}\""
+        else:
+            copy_label = "Copy Last (none yet)"
+
         return pystray.Menu(
+            pystray.MenuItem(copy_label, self._handle_copy_last, enabled=bool(last_text)),
+            pystray.Menu.SEPARATOR,
             pystray.MenuItem("Model", pystray.Menu(*model_items)),
             pystray.MenuItem("Mode", pystray.Menu(*mode_items)),
             pystray.Menu.SEPARATOR,
@@ -477,6 +494,35 @@ class SystemTray:
             self._refresh_menu()
 
         return handler
+
+    def _handle_copy_last(self, icon: Any, item: Any) -> None:
+        """Copy the most recent transcription to the clipboard."""
+        with self._lock:
+            text = self._last_transcription
+        if not text:
+            return
+        try:
+            import subprocess
+            subprocess.run(
+                ["wl-copy", "--", text],
+                check=True,
+                timeout=5,
+            )
+            logger.info("Copied last transcription to clipboard (%d chars)", len(text))
+        except FileNotFoundError:
+            # Try xclip fallback
+            try:
+                subprocess.run(
+                    ["xclip", "-selection", "clipboard"],
+                    input=text.encode(),
+                    check=True,
+                    timeout=5,
+                )
+                logger.info("Copied last transcription to clipboard via xclip")
+            except Exception:
+                logger.warning("No clipboard tool found (wl-copy/xclip)")
+        except Exception:
+            logger.warning("Failed to copy to clipboard", exc_info=True)
 
     def _handle_settings(self, icon: Any, item: Any) -> None:
         logger.info("Tray: open settings requested")
