@@ -45,6 +45,7 @@ class TestDefaults:
         assert p.formatting is True
         assert p.llm is True
         assert p.llm_always is False
+        assert p.context_awareness is True
 
     def test_audio_defaults(self):
         a = AudioConfig()

@@ -455,9 +455,21 @@ class App:
                 )
                 return snippet_text
 
+        # Detect focused app for context-aware LLM prompts
+        app_context: str | None = None
+        if self.config.polish.context_awareness:
+            from linux_whisper.focus import build_context_string, detect_focused_app
+
+            focused = detect_focused_app()
+            if focused is not None:
+                app_context = build_context_string(focused)
+                logger.debug("Focused app: %s (%s)", focused.app_name, focused.category.value)
+
         # Polish
         if self._polish:
-            text = await asyncio.to_thread(self._polish.process, text)
+            text = await asyncio.to_thread(
+                self._polish.process, text, app_context
+            )
             logger.debug("Polished: %s", text[:100])
 
         return text
