@@ -18,4 +18,10 @@ models/
 *.gguf
 *.bin
 .env
-.claude/
+
+# Claude Code — track skills, ignore ephemeral state
+.claude/memory/
+.claude/settings.local.json
+.claude/todos.md
+.claude/plans/
+.claude/scheduled_tasks.lock

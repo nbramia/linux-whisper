@@ -342,6 +342,12 @@ ruff check src tests
 ruff format src tests
 ```
 
+### Agent-assisted development
+
+This project uses a [Claude Code](https://claude.ai/claude-code) agent framework for development. The agent can autonomously plan, implement, test, review, and merge changes through an orchestrated skill system with explicit escalation rules for safety-critical areas of the codebase.
+
+See [CLAUDE.md](CLAUDE.md) for the agent operating rules and [.claude/skills/](.claude/skills/) for the skill definitions.
+
 ## Technical Decisions
 
 **Why GPU-first with CPU fallback.** The primary target is AMD systems with ROCm-capable GPUs. whisper.cpp and llama.cpp both support HIP via ggml. GPU STT brings latency from ~2.5s to ~300ms for a 5-second recording. On systems without ROCm, the same code paths fall back to CPU automatically.
