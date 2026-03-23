@@ -111,6 +111,11 @@ def create_engine(config: Config) -> STTEngine:
         return FasterWhisperEngine(config)
 
     if backend == "whisper-cpp":
+        if stt.device == "rocm":
+            from linux_whisper.stt.whisper_gpu import WhisperGPUEngine
+
+            return WhisperGPUEngine(config)
+
         from linux_whisper.stt.whisper_cpp import WhisperCppEngine
 
         return WhisperCppEngine(config)

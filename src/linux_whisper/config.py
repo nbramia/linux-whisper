@@ -19,9 +19,9 @@ MODELS_DIR = CACHE_DIR / "models"
 
 @dataclass(frozen=True)
 class STTConfig:
-    backend: str = "faster-whisper"
-    model: str = "large-v3-turbo"
-    device: str = "cpu"  # cpu | rocm
+    backend: str = "whisper-cpp"
+    model: str = "whisper-large-v3-turbo"
+    device: str = "rocm"  # cpu | rocm
     threads: int = 0  # 0 = auto
 
     VALID_BACKENDS = ("faster-whisper", "moonshine", "whisper-cpp")

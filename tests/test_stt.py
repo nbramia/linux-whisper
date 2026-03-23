@@ -116,10 +116,24 @@ class TestCreateEngine:
             engine = create_engine(cfg)
         assert engine is mock_engine
 
-    def test_whisper_cpp_backend_import(self):
-        """Test that create_engine selects whisper-cpp backend."""
+    def test_whisper_cpp_gpu_backend_import(self):
+        """Test that create_engine selects WhisperGPUEngine for whisper-cpp + rocm."""
         cfg = Config.from_dict({
-            "stt": {"backend": "whisper-cpp", "model": "whisper-large-v3-turbo"},
+            "stt": {"backend": "whisper-cpp", "device": "rocm", "model": "whisper-large-v3-turbo"},
+        })
+
+        mock_engine = MagicMock()
+        mock_cls = MagicMock(return_value=mock_engine)
+        mock_module = MagicMock()
+        mock_module.WhisperGPUEngine = mock_cls
+        with patch.dict("sys.modules", {"linux_whisper.stt.whisper_gpu": mock_module}):
+            engine = create_engine(cfg)
+        assert engine is mock_engine
+
+    def test_whisper_cpp_cpu_backend_import(self):
+        """Test that create_engine selects WhisperCppEngine for whisper-cpp + cpu."""
+        cfg = Config.from_dict({
+            "stt": {"backend": "whisper-cpp", "device": "cpu", "model": "whisper-large-v3-turbo"},
         })
 
         mock_engine = MagicMock()
@@ -273,9 +287,9 @@ class TestWhisperCppEngine:
 class TestSTTDeviceConfig:
     """Test stt.device configuration field."""
 
-    def test_default_device_is_cpu(self):
+    def test_default_device_is_rocm(self):
         stt = STTConfig()
-        assert stt.device == "cpu"
+        assert stt.device == "rocm"
 
     def test_device_from_dict(self):
         cfg = Config.from_dict({"stt": {"device": "rocm"}})
