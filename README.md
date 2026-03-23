@@ -50,6 +50,8 @@ Press hotkey         Capture audio        Transcribe            Polish text     
  CPU-only fallback:   ~2.6s total (simple) / ~2.9s (with LLM)
 ```
 
+**Process isolation:** The GPU STT engine (whisper.cpp/pywhispercpp) runs in a separate subprocess to avoid a ROCm shared-library conflict with onnxruntime (used by Silero VAD, BERT, ELECTRA). The worker process loads the model once, stays warm between transcriptions, and communicates via stdin/stdout pipes. This is transparent — the `WhisperGPUEngine` implements the same `STTEngine` protocol as all other backends.
+
 The polish pipeline uses a hybrid approach:
 
 - **Stage 4a** -- BERT token classifier (or regex fallback) removes filler words ("um", "uh", "like"), repetitions, and false starts. Cannot hallucinate.
@@ -290,7 +292,9 @@ src/linux_whisper/
     tray.py             # pystray system tray with icon generation
     stt/
         engine.py       # STTEngine protocol and factory
-        whisper_cpp.py  # whisper.cpp backend (default, GPU-accelerated via ROCm)
+        whisper_gpu.py  # GPU STT engine — spawns isolated worker subprocess
+        whisper_gpu_worker.py  # Worker process — loads pywhispercpp (ROCm)
+        whisper_cpp.py  # whisper.cpp CPU backend (in-process)
         faster_whisper.py  # CTranslate2 INT8 backend (CPU-only)
         moonshine.py    # ONNX Runtime backend (streaming)
     polish/
@@ -303,10 +307,12 @@ src/linux_whisper/
         injector.py     # Display server detection, xdotool/wtype/ydotool/clipboard
 tests/
     conftest.py         # Shared fixtures, optional dependency stubs
+    test_app.py         # Pipeline orchestration, state transitions, latency
     test_audio.py       # Ring buffer, tones, AGC
     test_cli.py
     test_config.py
     test_focus.py       # Focused app detection
+    test_hotkey.py      # Key parsing, all 4 modes, callbacks
     test_inject.py
     test_polish.py      # All polish stages + pipeline integration
     test_snippets.py    # Snippet matching

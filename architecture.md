@@ -59,7 +59,7 @@ The end-to-end pipeline has 6 stages. Each stage has a latency budget:
 | **Total (simple)** | | **~350ms** | ~2.6s | **No self-corrections detected** |
 | **Total (complex)** | | **~550ms** | ~2.9s | **Self-corrections present → LLM invoked** |
 
-Stage 3 (STT) runs in batch mode after recording ends. The default backend is whisper.cpp with ROCm GPU acceleration via ggml's HIP backend. On systems without ROCm, it falls back to CPU automatically. Stages 4a, 4b, and 4d are fast encoder/rule-based models. Stage 4c (generative LLM) is only invoked when the disfluency detector flags self-corrections. Voice snippet matches bypass the entire polish pipeline.
+Stage 3 (STT) runs in batch mode after recording ends. The default backend is whisper.cpp with ROCm GPU acceleration via ggml's HIP backend, running in a **separate subprocess** to avoid a shared-library conflict with onnxruntime (both link `libamdhip64`). The `WhisperGPUEngine` spawns a worker process that loads pywhispercpp, communicates via stdin/stdout pipes, and stays warm between transcriptions. On systems without ROCm, it falls back to CPU automatically. Stages 4a, 4b, and 4d are fast encoder/rule-based models. Stage 4c (generative LLM) is only invoked when the disfluency detector flags self-corrections. Voice snippet matches bypass the entire polish pipeline.
 
 ---
 
