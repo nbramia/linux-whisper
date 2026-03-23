@@ -8,11 +8,6 @@ preload happens before any other import.
 
 
 def main() -> None:
-    try:
-        import pywhispercpp.model  # noqa: F401
-    except ImportError:
-        pass
-
     from linux_whisper.cli import main as cli_main
 
     raise SystemExit(cli_main())
