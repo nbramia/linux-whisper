@@ -19,9 +19,9 @@ MODELS_DIR = CACHE_DIR / "models"
 
 @dataclass(frozen=True)
 class STTConfig:
-    backend: str = "whisper-cpp"
-    model: str = "whisper-large-v3-turbo"
-    device: str = "rocm"  # cpu | rocm
+    backend: str = "faster-whisper"
+    model: str = "large-v3-turbo"
+    device: str = "cpu"  # cpu | rocm
     threads: int = 0  # 0 = auto
 
     VALID_BACKENDS = ("faster-whisper", "moonshine", "whisper-cpp")
@@ -44,7 +44,7 @@ class PolishConfig:
     context_awareness: bool = True
     llm_backend: str = "llama-cpp"
     llm_model: str = "Qwen3-4B-Q4_K_M"
-    llm_device: str = "rocm"  # cpu | rocm
+    llm_device: str = "cpu"  # cpu | rocm
     llm_threads: int = 0  # 0 = auto
 
 

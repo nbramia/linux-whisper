@@ -229,7 +229,7 @@ class TestWhisperCppEngine:
 
         monkeypatch.setattr(wcpp_module, "_check_whispercpp", lambda: True)
         cfg = Config.from_dict({
-            "stt": {"backend": "whisper-cpp", "model": "whisper-large-v3-turbo"},
+            "stt": {"backend": "whisper-cpp", "model": "distil-large-v3.5"},
         })
         with pytest.raises(FileNotFoundError, match="Model file not found"):
             wcpp_module.WhisperCppEngine(cfg)
@@ -273,9 +273,9 @@ class TestWhisperCppEngine:
 class TestSTTDeviceConfig:
     """Test stt.device configuration field."""
 
-    def test_default_device_is_rocm(self):
+    def test_default_device_is_cpu(self):
         stt = STTConfig()
-        assert stt.device == "rocm"
+        assert stt.device == "cpu"
 
     def test_device_from_dict(self):
         cfg = Config.from_dict({"stt": {"device": "rocm"}})

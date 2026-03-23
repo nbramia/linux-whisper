@@ -95,7 +95,7 @@ def tmp_config_file(tmp_config_dir: Path) -> Path:
     cfg = {
         "hotkey": "fn",
         "mode": "auto",
-        "stt": {"backend": "whisper-cpp", "model": "whisper-large-v3-turbo"},
+        "stt": {"backend": "faster-whisper", "model": "large-v3-turbo"},
         "polish": {"enabled": True},
         "audio": {"sample_rate": 16000},
         "inject": {"method": "auto"},

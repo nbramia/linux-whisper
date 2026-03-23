@@ -37,7 +37,7 @@ dev = [
 ]
 
 [project.scripts]
-linux-whisper = "linux_whisper.cli:main"
+linux-whisper = "linux_whisper._entry:main"
 
 [build-system]
 requires = ["hatchling"]
