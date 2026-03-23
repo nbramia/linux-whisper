@@ -44,7 +44,7 @@ class PolishConfig:
     context_awareness: bool = True
     llm_backend: str = "llama-cpp"
     llm_model: str = "Qwen3-4B-Q4_K_M"
-    llm_device: str = "cpu"  # cpu | rocm
+    llm_device: str = "rocm"  # cpu | rocm
     llm_threads: int = 0  # 0 = auto
 
 

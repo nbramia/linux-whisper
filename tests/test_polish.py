@@ -953,10 +953,10 @@ class TestLLMCorrectorDevice:
         # Verify the config is stored correctly for the fallback path.
         assert corrector._config.llm_device == "rocm"
 
-    def test_default_device_is_cpu(self):
+    def test_default_device_is_rocm(self):
         """Default config should use CPU."""
         cfg = PolishConfig()
-        assert cfg.llm_device == "cpu"
+        assert cfg.llm_device == "rocm"
 
     def test_rocm_config_from_dict(self):
         """Config.from_dict should parse llm_device."""
