@@ -1,111 +1,124 @@
+#!/usr/bin/env python3
 """Isolated GPU worker for whisper.cpp STT inference.
 
-Runs in a separate process to avoid the pywhispercpp/onnxruntime ROCm
-shared-library conflict.  The main process communicates via a pipe:
+Runs as a completely separate subprocess.  CRITICAL: pywhispercpp must
+be imported BEFORE numpy to avoid a ROCm shared-library segfault.
 
-    Main process                    Worker process
-    (onnxruntime OK)                (pywhispercpp OK)
-    ──────────────                  ──────────────────
-    send(audio_bytes)  ──────────→  recv → transcribe
-                       ←──────────  send(segments, text)
-
-This module must NOT import onnxruntime, numpy from the main package,
-or anything that pulls in conflicting ROCm libraries.
+Communication: length-prefixed JSON over stdin/stdout pipes, with raw
+audio bytes sent inline after transcribe commands.
 """
 
-from __future__ import annotations
+# ── IMPORT ORDER MATTERS ──────────────────────────────────────────────
+# pywhispercpp's ROCm/HIP C extension segfaults if numpy is loaded first.
+# Import it at the top, before anything else.
+from pywhispercpp.model import Model as _WhisperModel  # noqa: E402,F401
 
+import json
 import logging
-import os
+import struct
 import sys
-from multiprocessing.connection import Connection
 
-# Configure basic logging for the worker process
+import numpy as np
+
+# ── Logging ───────────────────────────────────────────────────────────
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%H:%M:%S",
+    stream=sys.stderr,
 )
 logger = logging.getLogger("whisper_gpu_worker")
 
-# Commands sent from main → worker
-CMD_LOAD = "load"
-CMD_TRANSCRIBE = "transcribe"
-CMD_SHUTDOWN = "shutdown"
+
+# ── Wire protocol ────────────────────────────────────────────────────
+
+def _recv_msg(stdin) -> dict | None:
+    header = stdin.read(4)
+    if len(header) < 4:
+        return None
+    length = struct.unpack(">I", header)[0]
+    data = stdin.read(length)
+    if len(data) < length:
+        return None
+    return json.loads(data)
 
 
-def worker_main(conn: Connection, model_path: str, n_threads: int) -> None:
-    """Entry point for the GPU worker process.
-
-    Loads the whisper.cpp model once, then loops handling transcription
-    requests until a shutdown command is received.
-    """
-    try:
-        _run(conn, model_path, n_threads)
-    except Exception:
-        logger.exception("Worker crashed")
-    finally:
-        conn.close()
+def _send_msg(stdout, msg: dict) -> None:
+    data = json.dumps(msg).encode()
+    stdout.write(struct.pack(">I", len(data)))
+    stdout.write(data)
+    stdout.flush()
 
 
-def _run(conn: Connection, model_path: str, n_threads: int) -> None:
-    import numpy as np
-    from pywhispercpp.model import Model
+# ── Main loop ────────────────────────────────────────────────────────
 
-    logger.info("Loading whisper.cpp model: %s (threads=%d)", model_path, n_threads)
-    model = Model(model_path, n_threads=n_threads, redirect_whispercpp_logs_to=False)
-    logger.info("Model loaded, GPU worker ready")
+def main() -> None:
+    stdin = sys.stdin.buffer
+    stdout = sys.stdout.buffer
 
-    # Signal ready
-    conn.send({"status": "ready"})
+    # First message: init with model path
+    init_msg = _recv_msg(stdin)
+    if init_msg is None or init_msg.get("cmd") != "init":
+        logger.error("Expected init message, got: %s", init_msg)
+        return
+
+    model_path = init_msg["model_path"]
+    n_threads = init_msg.get("n_threads", 4)
+
+    logger.info("Loading model: %s (threads=%d)", model_path, n_threads)
+    model = _WhisperModel(
+        model_path, n_threads=n_threads, redirect_whispercpp_logs_to=False
+    )
+    logger.info("Model loaded — GPU worker ready")
+
+    _send_msg(stdout, {"status": "ready"})
 
     while True:
-        try:
-            msg = conn.recv()
-        except EOFError:
-            logger.info("Connection closed, shutting down")
+        msg = _recv_msg(stdin)
+        if msg is None:
             break
 
         cmd = msg.get("cmd")
-
-        if cmd == CMD_SHUTDOWN:
-            logger.info("Shutdown requested")
+        if cmd == "shutdown":
+            logger.info("Shutdown")
             break
 
-        if cmd == CMD_TRANSCRIBE:
-            pcm_bytes = msg["audio"]
-            # Convert int16 PCM to float32
-            audio = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+        if cmd == "transcribe":
+            audio_len = msg["audio_length"]
+            pcm_bytes = stdin.read(audio_len)
+            audio = (
+                np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32)
+                / 32768.0
+            )
             duration = len(audio) / 16000.0
 
-            logger.debug("Transcribing %.1fs of audio...", duration)
-
+            logger.info("Transcribing %.1fs audio...", duration)
             try:
-                segments = model.transcribe(audio)
-                result_segs = []
-                full_parts = []
-                for seg in segments:
-                    text = seg.text.strip()
-                    if text:
-                        result_segs.append({
-                            "text": text,
-                            "t0": seg.t0 / 100.0,
-                            "t1": seg.t1 / 100.0,
-                        })
-                        full_parts.append(text)
-
-                conn.send({
+                segs = model.transcribe(audio)
+                out_segs = []
+                parts = []
+                for s in segs:
+                    t = s.text.strip()
+                    if t:
+                        out_segs.append(
+                            {"text": t, "t0": s.t0 / 100.0, "t1": s.t1 / 100.0}
+                        )
+                        parts.append(t)
+                _send_msg(stdout, {
                     "status": "ok",
-                    "segments": result_segs,
-                    "full_text": " ".join(full_parts),
+                    "segments": out_segs,
+                    "full_text": " ".join(parts),
                     "duration": duration,
                 })
             except Exception as e:
                 logger.exception("Transcription failed")
-                conn.send({
+                _send_msg(stdout, {
                     "status": "error",
                     "error": str(e),
                     "duration": duration,
                 })
-        else:
-            logger.warning("Unknown command: %s", cmd)
+
+
+if __name__ == "__main__":
+    main()
