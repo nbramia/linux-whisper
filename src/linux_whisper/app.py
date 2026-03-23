@@ -60,8 +60,11 @@ class App:
                 logger.error("Config error: %s", e)
             raise ValueError(f"Invalid configuration: {'; '.join(errors)}")
 
-        await self._setup_audio()
+        # STT must init before audio: pywhispercpp's ROCm/HIP C extension
+        # segfaults if sounddevice (portaudio) is already loaded. Preloading
+        # the whisper.cpp backend first ensures correct init order.
         await self._setup_stt()
+        await self._setup_audio()
         await self._setup_polish()
         await self._setup_snippets()
         await self._setup_injector()
