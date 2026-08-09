@@ -681,6 +681,24 @@ Tasks are chained via `asyncio.Queue` for backpressure-free handoff.
 - Memory usage monitoring (ensure no leaks over 1000+ transcriptions)
 - ONNX Runtime memory stability (CTranslate2 has known leak issues; verify ONNX doesn't)
 
+### Model Benchmarks
+
+`tests/benchmarks/` scores the real stack — real models, real audio — and gates every model swap. It is deliberately outside the default pytest run, since CI must mock all models.
+
+```bash
+python -m tests.benchmarks.run --suite all --label candidate --out /tmp/cand.json
+python -m tests.benchmarks.run --compare tests/benchmarks/baseline/current.json /tmp/cand.json
+```
+
+| Suite | Fixtures | Scores |
+|-------|----------|--------|
+| `stt` | LibriSpeech `test-clean`, or user clips via `--fixtures-dir` | WER, per-utterance latency, RTFx |
+| `polish` | Text pairs, no audio needed | WER vs expected, exact match, punctuation F1, capitalisation, per-stage latency |
+
+`--compare` exits non-zero on regression, so it works as a merge gate. Baselines are hardware-specific. See `tests/benchmarks/README.md`.
+
+**Fallback behaviour matters when reading results.** Stages 4a and 4b degrade to regex and rule-based implementations when their ONNX models are absent from `~/.cache/linux-whisper/models/`. This is silent apart from an INFO log, and sub-millisecond stage latencies in a benchmark run are the tell. A polish benchmark taken without those models scores the fallbacks, not the models described above.
+
 ### Manual Tests
 - Text injection in: Firefox, Chrome, VS Code, terminal (kitty, alacritty), Slack (Electron), LibreOffice, Obsidian
 - X11 and Wayland (GNOME, KDE, Sway, Hyprland)
