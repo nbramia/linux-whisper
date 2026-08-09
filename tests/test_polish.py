@@ -1211,3 +1211,94 @@ class TestSystemPromptHygiene:
 
         assert "actually" in _SYSTEM_PROMPT
         assert _SYSTEM_PROMPT.count("→") >= 5
+
+
+class TestLiteralTokenPreservation:
+    """Code-like tokens must survive the rule-based punctuation stage intact.
+
+    Dictating code produces tokens that are not prose. Prose rules corrupted
+    them: filenames got capitalised, paths gained a trailing period, and
+    command lines gained Oxford commas. On a case-sensitive filesystem
+    "Server-test.sh" is a different file, and "--verbose." is not a valid flag.
+    """
+
+    @pytest.fixture()
+    def restorer(self):
+        from linux_whisper.polish.punctuation import PunctuationRestorer
+
+        return PunctuationRestorer(model_dir=Path("/nonexistent/model"))
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "server-test.sh",
+            "Open src/linux_whisper/stt/parakeet.py",
+            "Check the .env file in the project root.",
+            "It lives in /var/log/syslog",
+            "The variable is called max_default_threads.",
+            "Call getUserById with the account ID.",
+            "Run it with --no-cache and --verbose.",
+            "Upgrade to version 0.3.34 and rebuild.",
+            "Run git rebase --interactive on main.",
+        ],
+    )
+    def test_code_passes_through_unchanged(self, restorer, text):
+        assert restorer.process(text) == text
+
+    def test_filename_is_not_capitalised(self, restorer):
+        # "Server-test.sh" is a different file on a case-sensitive filesystem.
+        assert restorer.process("server-test.sh").startswith("server")
+
+    def test_no_period_appended_after_a_path(self, restorer):
+        assert not restorer.process("It lives in /var/log/syslog").endswith(".")
+
+    def test_no_comma_inserted_between_flags(self, restorer):
+        assert "," not in restorer.process("Run it with --no-cache and --verbose.")
+
+    def test_prose_still_gets_capitalised_and_punctuated(self, restorer):
+        # The guard must not disable normal behaviour.
+        assert restorer.process("the tests are green") == "The tests are green."
+
+    def test_prose_questions_still_work(self, restorer):
+        out = restorer.process("did you see the pull request")
+        assert out.endswith("?") and out.startswith("Did")
+
+    def test_adjacent_clause_markers_get_one_comma(self, restorer):
+        # Regression: "and then" produced "..., and, then ...".
+        out = restorer.process("i was thinking we should move it and then ship it")
+        assert ", and," not in out
+        assert out.count(",") == 1
+
+
+class TestIsLiteralToken:
+    """Unit coverage for the literal-token predicate."""
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "server-test.sh",
+            "src/linux_whisper/stt/parakeet.py",
+            "/var/log/syslog",
+            ".env",
+            "max_default_threads",
+            "getUserById",
+            "--no-cache",
+            "-v",
+            "0.3.34",
+        ],
+    )
+    def test_recognises_code_tokens(self, token):
+        from linux_whisper.polish.punctuation import _is_literal_token
+
+        assert _is_literal_token(token) is True
+
+    @pytest.mark.parametrize(
+        "token",
+        ["hello", "SQL", "JSON", "the", "I", "", "don't", "Nathan", "well-known"],
+    )
+    def test_leaves_prose_alone(self, token):
+        # "well-known" is hyphenated prose, not a filename — no extension.
+        # Bare acronyms are prose too; they need no protection.
+        from linux_whisper.polish.punctuation import _is_literal_token
+
+        assert _is_literal_token(token) is False

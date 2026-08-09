@@ -59,6 +59,31 @@ PROMPTS: list[tuple[str, str, tuple[str, ...]]] = [
     ("date-time", "The standup is at 9:30 AM on March 15th.", ("formatting",)),
     ("technical", "Run kubectl get pods in the staging namespace.", ("technical",)),
     ("technical-2", "The ONNX runtime session needs an explicit thread count.", ("technical",)),
+    # ── Spoken symbols and filenames ──────────────────────────────────────
+    # Dictating code means saying punctuation out loud. A model that transcribes
+    # "hyphen" and "dot" as words instead of characters is useless for this,
+    # and nothing in LibriSpeech tests it.
+    ("filename-script", "server-test.sh", ("filename", "symbols")),
+    ("filename-path", "Open src/linux_whisper/stt/parakeet.py", ("filename", "symbols")),
+    ("filename-dotfile", "Check the .env file in the project root.", ("filename", "symbols")),
+    ("path-absolute", "It lives in /var/log/syslog", ("filename", "symbols")),
+    ("snake-case", "The variable is called max_default_threads.", ("code", "symbols")),
+    ("camel-case", "Call getUserById with the account ID.", ("code", "symbols")),
+    ("flag-args", "Run it with --no-cache and --verbose.", ("code", "symbols")),
+    # ── Technical homophones and acronyms ─────────────────────────────────
+    # "sequel" vs SQL is the classic: both are correct English, only one is
+    # correct here, and the model has to pick from acoustics alone.
+    ("homophone-sql", "Write a SQL query against the users table.", ("code", "homophone")),
+    ("acronyms", "The API returns JSON, but the config is YAML.", ("code", "acronym")),
+    ("acronyms-2", "ROCm and CUDA both target the same ggml backend.", ("code", "acronym")),
+    ("version-number", "Upgrade to version 0.3.34 and rebuild.", ("code", "formatting")),
+    ("git-command", "Run git rebase --interactive on main.", ("code", "symbols")),
+    (
+        "mixed-technical",
+        "The p95 latency dropped to 288 milliseconds after I capped "
+        "intra_op_num_threads at 8.",
+        ("code", "formatting", "long"),
+    ),
     ("proper-nouns", "I talked to Nathan about the Linux Whisper project on Friday.", ("names",)),
     ("question", "Did the ROCm build finish, or is it still compiling?", ("question",)),
 ]
@@ -71,6 +96,16 @@ DELIVERY_HINTS: dict[str, str] = {
     "self-correction-time": 'say a wrong time first: "let\'s meet at two, actually four"',
     "self-correction-name": 'say a wrong name first: "send it to Sarah, no sorry, Rachel"',
     "self-correction-place": 'say the wrong target first: "deploy to staging, no wait, production"',
+    "filename-script": 'say it as you would dictate it: "server hyphen test dot s h"',
+    "filename-path": 'spell the path aloud: "src slash linux underscore whisper slash..."',
+    "filename-dotfile": 'say "dot e n v file"',
+    "path-absolute": 'say "slash var slash log slash syslog"',
+    "snake-case": 'say "max underscore default underscore threads"',
+    "camel-case": 'say "get user by id" the way you normally would',
+    "flag-args": 'say "dash dash no cache" and "dash dash verbose"',
+    "homophone-sql": 'say it however you normally do — "sequel" or "S Q L"',
+    "version-number": 'say "zero point three point three four"',
+    "git-command": 'say "git rebase dash dash interactive"',
 }
 
 
@@ -142,17 +177,32 @@ def main(argv: list[str] | None = None) -> int:
         help="Maximum length of a single take (default: 15)",
     )
     parser.add_argument("--only", help="Record just this prompt id (re-take a bad one)")
+    parser.add_argument(
+        "--tags",
+        help="Comma-separated tags to record, e.g. 'code,filename'. "
+        "28 prompts is a lot in one sitting; this splits it up.",
+    )
+    parser.add_argument(
+        "--list", action="store_true", help="List prompt ids and tags, then exit"
+    )
     args = parser.parse_args(argv)
+
+    if args.list:
+        for pid, reference, tags in PROMPTS:
+            print(f"{pid:<22} [{','.join(tags)}]  {reference[:50]}")
+        return 0
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     sd = _require_sounddevice()
 
     args.out.mkdir(parents=True, exist_ok=True)
     prompts = [p for p in PROMPTS if not args.only or p[0] == args.only]
+    if args.tags:
+        wanted = {t.strip() for t in args.tags.split(",") if t.strip()}
+        prompts = [p for p in prompts if wanted & set(p[2])]
     if not prompts:
-        print(f"No prompt with id '{args.only}'. Known ids:", file=sys.stderr)
-        for pid, _, _ in PROMPTS:
-            print(f"  {pid}", file=sys.stderr)
+        target = args.only or args.tags
+        print(f"Nothing matches '{target}'. Run --list to see ids and tags.", file=sys.stderr)
         return 2
 
     print(f"\nRecording {len(prompts)} fixture(s) into {args.out}")
