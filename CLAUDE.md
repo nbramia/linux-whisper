@@ -20,6 +20,27 @@ Read `architecture.md` for pipeline details, `vision.md` for design principles, 
 - Branch naming: `<type>/<issue>-<short-description>`.
 - **Maintain documentation as you go.** A change that alters behaviour, models, latency, or config updates `architecture.md`, `README.md`, and this file in the *same* PR — never as a follow-up.
 
+## Dependency Rebuilds
+
+`llama-cpp-python` is built **from source with HIP** for gfx1151, not installed from a wheel:
+
+```bash
+cp -r ~/.pyenv/versions/3.12.12/lib/python3.12/site-packages/llama_cpp/lib ~/llama_cpp_lib.bak
+CMAKE_BUILD_PARALLEL_LEVEL=8 \
+CMAKE_ARGS="-DGGML_HIP=ON -DAMDGPU_TARGETS=gfx1151" FORCE_CMAKE=1 \
+  pip install --no-binary :all: --force-reinstall llama-cpp-python==<version>
+```
+
+Back up `llama_cpp/lib` first — rollback is then a file copy rather than a 20-minute rebuild.
+
+**`--force-reinstall` upgrades transitive dependencies whether or not they need it.** The 0.3.34 rebuild silently moved numpy 2.4.6 → 2.5.2, which broke `numba` ("needs NumPy 2.4 or less") for every other project in this interpreter. llama-cpp-python does not even pin numpy. After any rebuild, check the pip conflict block and re-pin what moved:
+
+```bash
+python -c "import numba, scipy, onnxruntime, onnx_asr, pywhispercpp, llama_cpp"
+```
+
+LifeOS is unaffected by all of this — it lives in `~/.venvs/lifeos/`, never imports `llama_cpp`, and reaches its Gemma model over HTTP on port 8080. Do not point linux-whisper at that server: it serves a different model and LifeOS depends on it.
+
 ## Benchmarking Model Changes
 
 Any change that swaps a model, quantisation, or inference backend must be gated on `tests/benchmarks/` — never merged on the assumption it is better.
