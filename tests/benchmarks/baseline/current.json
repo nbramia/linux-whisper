@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "label": "baseline-post-phase4",
-  "timestamp": "2026-08-09T19:03:23.936352+00:00",
+  "label": "baseline-post-code-guard",
+  "timestamp": "2026-08-09T20:19:38.316401+00:00",
   "stack": {
     "stt_backend": "parakeet",
     "stt_model": "parakeet-tdt-0.6b-v3",
@@ -37,55 +37,55 @@
     "latency": {
       "stt": {
         "count": 40,
-        "mean_ms": 190.1902564743068,
-        "p50_ms": 191.72610397799872,
-        "p95_ms": 281.7595000087749,
-        "max_ms": 309.40851097693667
+        "mean_ms": 178.21848479943583,
+        "p50_ms": 168.8237389898859,
+        "p95_ms": 286.38249399955384,
+        "max_ms": 347.89365401957184
       },
       "vad_window": {
         "count": 10,
-        "mean_ms": 0.05879541274376191,
-        "p50_ms": 0.05729753248323607,
-        "p95_ms": 0.06511912708786333,
-        "max_ms": 0.06511912708786333
+        "mean_ms": 0.06119753073702609,
+        "p50_ms": 0.058783328738289155,
+        "p95_ms": 0.08674999982168949,
+        "max_ms": 0.08674999982168949
       },
       "polish_4a": {
-        "count": 22,
-        "mean_ms": 0.0554314108078622,
-        "p50_ms": 0.05561899160966277,
-        "p95_ms": 0.10342799942009151,
-        "max_ms": 0.11806699330918491
+        "count": 32,
+        "mean_ms": 0.03219481004634872,
+        "p50_ms": 0.02780000795610249,
+        "p95_ms": 0.07207799353636801,
+        "max_ms": 0.10217700037173927
       },
       "polish_4b": {
-        "count": 22,
-        "mean_ms": 0.018568591754460198,
-        "p50_ms": 0.01719902502372861,
-        "p95_ms": 0.037488993257284164,
-        "max_ms": 0.05125900497660041
+        "count": 32,
+        "mean_ms": 0.025006784198922105,
+        "p50_ms": 0.019808998331427574,
+        "p95_ms": 0.059438025346025825,
+        "max_ms": 0.0637889897916466
       },
       "polish_4d": {
-        "count": 22,
-        "mean_ms": 0.03823899235364727,
-        "p50_ms": 0.03313898923806846,
-        "p95_ms": 0.07329799700528383,
-        "max_ms": 0.08284798241220415
+        "count": 32,
+        "mean_ms": 0.02182312346121762,
+        "p50_ms": 0.018869992345571518,
+        "p95_ms": 0.04475898458622396,
+        "max_ms": 0.05344799137674272
       },
       "polish_4c": {
-        "count": 6,
-        "mean_ms": 252.14027716234946,
-        "p50_ms": 147.49324999866076,
-        "p95_ms": 824.7860679985024,
-        "max_ms": 824.7860679985024
+        "count": 8,
+        "mean_ms": 243.4427689986478,
+        "p50_ms": 147.36533199902624,
+        "p95_ms": 837.8842170059215,
+        "max_ms": 837.8842170059215
       },
       "polish_total": {
-        "count": 22,
-        "mean_ms": 68.88994200033432,
-        "p50_ms": 0.1660359848756343,
-        "p95_ms": 155.14304899261333,
-        "max_ms": 824.8292469943408
+        "count": 32,
+        "mean_ms": 60.948768284106336,
+        "p50_ms": 0.08842800161801279,
+        "p95_ms": 218.9959350216668,
+        "max_ms": 837.9335360077675
       }
     },
-    "rtfx": 37.29292811305597,
+    "rtfx": 39.79806904139078,
     "vad": {
       "window_samples": 576,
       "threshold": 0.6,
@@ -95,27 +95,27 @@
       "fixtures": 10
     },
     "polish": {
-      "reference_words": 149,
+      "reference_words": 215,
       "substitutions": 10,
       "deletions": 1,
       "insertions": 12,
       "errors": 23,
-      "wer": 0.15436241610738255,
-      "fixtures": 22,
-      "exact_match": 0.45454545454545453,
-      "llm_invocations": 6,
+      "wer": 0.10697674418604651,
+      "fixtures": 32,
+      "exact_match": 0.625,
+      "llm_invocations": 8,
       "thinking_leaks": 0
     },
     "punctuation": {
       "precision": 1.0,
-      "recall": 0.9259259259259259,
-      "f1": 0.9615384615384615
+      "recall": 0.9512195121951219,
+      "f1": 0.975
     },
     "capitalization": {
-      "accuracy": 0.673469387755102
+      "accuracy": 0.6519607843137255
     }
   },
-  "peak_rss_mb": 3295.34375,
+  "peak_rss_mb": 3296.51171875,
   "per_fixture": {
     "stt": [
       {
@@ -123,7 +123,7 @@
         "reference": "HE HOPED THERE WOULD BE STEW FOR DINNER TURNIPS AND CARROTS AND BRUISED POTATOES AND FAT MUTTON PIECES TO BE LADLED OUT IN THICK PEPPERED FLOUR FATTENED SAUCE",
         "hypothesis": "He hoped there would be stew for dinner, turnips and carrots and bruised potatoes, and fat mutton pieces to be ladled out in thick, peppered, flour fattened sauce.",
         "wer": 0.0,
-        "latency_ms": 236.73815897200257,
+        "latency_ms": 244.78010699385777,
         "audio_seconds": 10.435
       },
       {
@@ -131,7 +131,7 @@
         "reference": "STUFF IT INTO YOU HIS BELLY COUNSELLED HIM",
         "hypothesis": "stuff it into you, his belly counseled him.",
         "wer": 0.125,
-        "latency_ms": 119.16047800332308,
+        "latency_ms": 105.11652400600724,
         "audio_seconds": 3.275
       },
       {
@@ -139,7 +139,7 @@
         "reference": "AFTER EARLY NIGHTFALL THE YELLOW LAMPS WOULD LIGHT UP HERE AND THERE THE SQUALID QUARTER OF THE BROTHELS",
         "hypothesis": "After early nightfall the yellow lamps would light up here and there the squalid quarter of the brothers.",
         "wer": 0.05555555555555555,
-        "latency_ms": 188.0016540235374,
+        "latency_ms": 202.5854630046524,
         "audio_seconds": 6.625
       },
       {
@@ -147,7 +147,7 @@
         "reference": "HELLO BERTIE ANY GOOD IN YOUR MIND",
         "hypothesis": "Hello, Bertie. Any good in your mind?",
         "wer": 0.0,
-        "latency_ms": 87.45794399874285,
+        "latency_ms": 101.72480999608524,
         "audio_seconds": 2.68
       },
       {
@@ -155,7 +155,7 @@
         "reference": "NUMBER TEN FRESH NELLY IS WAITING ON YOU GOOD NIGHT HUSBAND",
         "hypothesis": "Number ten. Fresh Nelly is waiting on you. Good night, husband,",
         "wer": 0.0,
-        "latency_ms": 161.46733300411142,
+        "latency_ms": 159.363029000815,
         "audio_seconds": 5.2150625
       },
       {
@@ -163,7 +163,7 @@
         "reference": "THE MUSIC CAME NEARER AND HE RECALLED THE WORDS THE WORDS OF SHELLEY'S FRAGMENT UPON THE MOON WANDERING COMPANIONLESS PALE FOR WEARINESS",
         "hypothesis": "The music came nearer, and he recalled the words the words of Shelley's fragment upon the moon wandering companionless, pale for weariness.",
         "wer": 0.0,
-        "latency_ms": 259.78046099771746,
+        "latency_ms": 227.48071301612072,
         "audio_seconds": 9.635
       },
       {
@@ -171,7 +171,7 @@
         "reference": "THE DULL LIGHT FELL MORE FAINTLY UPON THE PAGE WHEREON ANOTHER EQUATION BEGAN TO UNFOLD ITSELF SLOWLY AND TO SPREAD ABROAD ITS WIDENING TAIL",
         "hypothesis": "The dull light fell more faintly upon the page, whereon another equation began to unfold itself slowly, and to spread abroad its widening tail.",
         "wer": 0.0,
-        "latency_ms": 228.31405999022536,
+        "latency_ms": 228.0440379981883,
         "audio_seconds": 10.555
       },
       {
@@ -179,7 +179,7 @@
         "reference": "A COLD LUCID INDIFFERENCE REIGNED IN HIS SOUL",
         "hypothesis": "A cold, lucid indifference reigned in his soul.",
         "wer": 0.0,
-        "latency_ms": 142.75830599945039,
+        "latency_ms": 134.13262797985226,
         "audio_seconds": 4.275
       },
       {
@@ -187,7 +187,7 @@
         "reference": "THE CHAOS IN WHICH HIS ARDOUR EXTINGUISHED ITSELF WAS A COLD INDIFFERENT KNOWLEDGE OF HIMSELF",
         "hypothesis": "The chaos in which his ardour extinguished itself was a cold, indifferent knowledge of himself,",
         "wer": 0.0,
-        "latency_ms": 204.6754740003962,
+        "latency_ms": 173.42769299284555,
         "audio_seconds": 6.73
       },
       {
@@ -195,7 +195,7 @@
         "reference": "AT MOST BY AN ALMS GIVEN TO A BEGGAR WHOSE BLESSING HE FLED FROM HE MIGHT HOPE WEARILY TO WIN FOR HIMSELF SOME MEASURE OF ACTUAL GRACE",
         "hypothesis": "At most, by an alms given to a beggar whose blessing he fled from, he might hope wearily to win for himself some measure of actual grace.",
         "wer": 0.0,
-        "latency_ms": 267.22405399777927,
+        "latency_ms": 224.72720898804255,
         "audio_seconds": 10.575
       },
       {
@@ -203,7 +203,7 @@
         "reference": "WELL NOW ENNIS I DECLARE YOU HAVE A HEAD AND SO HAS MY STICK",
         "hypothesis": "Well now, Ennis, I declare you have a head, and so has my stick,",
         "wer": 0.0,
-        "latency_ms": 150.72418600902893,
+        "latency_ms": 152.99575799144804,
         "audio_seconds": 4.405
       },
       {
@@ -211,7 +211,7 @@
         "reference": "ON SATURDAY MORNINGS WHEN THE SODALITY MET IN THE CHAPEL TO RECITE THE LITTLE OFFICE HIS PLACE WAS A CUSHIONED KNEELING DESK AT THE RIGHT OF THE ALTAR FROM WHICH HE LED HIS WING OF BOYS THROUGH THE RESPONSES",
         "hypothesis": "On Saturday mornings when the Sodality met in the chapel to recite the little office, his place was a cushioned kneeling desk at the right of the altar, from which he led his wing of boys through the responses.",
         "wer": 0.0,
-        "latency_ms": 280.36568700917996,
+        "latency_ms": 252.8145289979875,
         "audio_seconds": 12.445
       },
       {
@@ -219,7 +219,7 @@
         "reference": "HER EYES SEEMED TO REGARD HIM WITH MILD PITY HER HOLINESS A STRANGE LIGHT GLOWING FAINTLY UPON HER FRAIL FLESH DID NOT HUMILIATE THE SINNER WHO APPROACHED HER",
         "hypothesis": "Her eyes seemed to regard him with mild pity. Her holiness, a strange light glowing faintly upon her frail flesh, did not humiliate the sinner who approached her.",
         "wer": 0.0,
-        "latency_ms": 262.86882799468003,
+        "latency_ms": 247.69905401626602,
         "audio_seconds": 11.64
       },
       {
@@ -227,7 +227,7 @@
         "reference": "IF EVER HE WAS IMPELLED TO CAST SIN FROM HIM AND TO REPENT THE IMPULSE THAT MOVED HIM WAS THE WISH TO BE HER KNIGHT",
         "hypothesis": "If ever he was impelled to cast sin from him and to repent, the impulse that moved him was the wish to be her knight.",
         "wer": 0.0,
-        "latency_ms": 210.46208002371714,
+        "latency_ms": 180.6318890012335,
         "audio_seconds": 7.915
       },
       {
@@ -235,7 +235,7 @@
         "reference": "HE TRIED TO THINK HOW IT COULD BE",
         "hypothesis": "He tried to think how it could be",
         "wer": 0.0,
-        "latency_ms": 85.43809701222926,
+        "latency_ms": 71.8239099951461,
         "audio_seconds": 2.225
       },
       {
@@ -243,7 +243,7 @@
         "reference": "BUT THE DUSK DEEPENING IN THE SCHOOLROOM COVERED OVER HIS THOUGHTS THE BELL RANG",
         "hypothesis": "but the dusk, deepening in the schoolroom, covered over his thoughts. The bell rang,",
         "wer": 0.0,
-        "latency_ms": 191.72610397799872,
+        "latency_ms": 146.38299299986102,
         "audio_seconds": 5.815
       },
       {
@@ -251,7 +251,7 @@
         "reference": "THEN YOU CAN ASK HIM QUESTIONS ON THE CATECHISM DEDALUS",
         "hypothesis": "Then you can ask him questions on the catechism, Dedalus.",
         "wer": 0.0,
-        "latency_ms": 107.58727299980819,
+        "latency_ms": 108.11226899386384,
         "audio_seconds": 3.54
       },
       {
@@ -259,7 +259,7 @@
         "reference": "STEPHEN LEANING BACK AND DRAWING IDLY ON HIS SCRIBBLER LISTENED TO THE TALK ABOUT HIM WHICH HERON CHECKED FROM TIME TO TIME BY SAYING",
         "hypothesis": "Stephen, leaning back and drawing idly on his scribbler, listened to the talk about him, which Heron checked from time to time by saying,",
         "wer": 0.0,
-        "latency_ms": 211.30990801611915,
+        "latency_ms": 205.79848100896925,
         "audio_seconds": 8.87
       },
       {
@@ -267,7 +267,7 @@
         "reference": "IT WAS STRANGE TOO THAT HE FOUND AN ARID PLEASURE IN FOLLOWING UP TO THE END THE RIGID LINES OF THE DOCTRINES OF THE CHURCH AND PENETRATING INTO OBSCURE SILENCES ONLY TO HEAR AND FEEL THE MORE DEEPLY HIS OWN CONDEMNATION",
         "hypothesis": "It was strange, too, that he found an arid pleasure in following up to the end the rigid lines of the doctrines of the church, and penetrating into obscure silences only to hear and feel the more deeply his own condemnation.",
         "wer": 0.0,
-        "latency_ms": 302.84139499417506,
+        "latency_ms": 347.89365401957184,
         "audio_seconds": 15.72
       },
       {
@@ -275,7 +275,7 @@
         "reference": "THE SENTENCE OF SAINT JAMES WHICH SAYS THAT HE WHO OFFENDS AGAINST ONE COMMANDMENT BECOMES GUILTY OF ALL HAD SEEMED TO HIM FIRST A SWOLLEN PHRASE UNTIL HE HAD BEGUN TO GROPE IN THE DARKNESS OF HIS OWN STATE",
         "hypothesis": "The sentence of Saint James, which says that he who offends against one commandment becomes guilty of all, had seemed to him first a swollen phrase, until he had begun to grope in the darkness of his own state.",
         "wer": 0.0,
-        "latency_ms": 279.2094869946595,
+        "latency_ms": 286.38249399955384,
         "audio_seconds": 13.895
       },
       {
@@ -283,7 +283,7 @@
         "reference": "IF A MAN HAD STOLEN A POUND IN HIS YOUTH AND HAD USED THAT POUND TO AMASS A HUGE FORTUNE HOW MUCH WAS HE OBLIGED TO GIVE BACK THE POUND HE HAD STOLEN ONLY OR THE POUND TOGETHER WITH THE COMPOUND INTEREST ACCRUING UPON IT OR ALL HIS HUGE FORTUNE",
         "hypothesis": "If a man had stolen a pound in his youth, and had used that pound to amass a huge fortune, how much was he obliged to give back? The pound he had stolen only, or the pound together with the compound interest accruing upon it, or all his huge fortune.",
         "wer": 0.0,
-        "latency_ms": 309.40851097693667,
+        "latency_ms": 295.36664197803475,
         "audio_seconds": 16.79
       },
       {
@@ -291,7 +291,7 @@
         "reference": "IF A LAYMAN IN GIVING BAPTISM POUR THE WATER BEFORE SAYING THE WORDS IS THE CHILD BAPTIZED",
         "hypothesis": "If a layman, in giving baptism, pour the water before saying the words, is the child baptized.",
         "wer": 0.0,
-        "latency_ms": 189.7107480035629,
+        "latency_ms": 189.00999199831858,
         "audio_seconds": 6.55
       },
       {
@@ -299,7 +299,7 @@
         "reference": "HOW COMES IT THAT WHILE THE FIRST BEATITUDE PROMISES THE KINGDOM OF HEAVEN TO THE POOR OF HEART THE SECOND BEATITUDE PROMISES ALSO TO THE MEEK THAT THEY SHALL POSSESS THE LAND",
         "hypothesis": "How comes it that while the first beatitude promises the kingdom of heaven to the poor of heart, the second beatitude promises also to the meek that they shall possess the land.",
         "wer": 0.0,
-        "latency_ms": 268.6055169906467,
+        "latency_ms": 225.92534401337616,
         "audio_seconds": 11.175
       },
       {
@@ -307,7 +307,7 @@
         "reference": "WHY WAS THE SACRAMENT OF THE EUCHARIST INSTITUTED UNDER THE TWO SPECIES OF BREAD AND WINE IF JESUS CHRIST BE PRESENT BODY AND BLOOD SOUL AND DIVINITY IN THE BREAD ALONE AND IN THE WINE ALONE",
         "hypothesis": "Why was the sacrament of the Eucharist instituted under the two species of bread and wine, if Jesus Christ be present body and blood, soul and divinity, in the bread alone, and in the wine alone?",
         "wer": 0.0,
-        "latency_ms": 281.7595000087749,
+        "latency_ms": 254.8224109923467,
         "audio_seconds": 13.275
       },
       {
@@ -315,7 +315,7 @@
         "reference": "IF THE WINE CHANGE INTO VINEGAR AND THE HOST CRUMBLE INTO CORRUPTION AFTER THEY HAVE BEEN CONSECRATED IS JESUS CHRIST STILL PRESENT UNDER THEIR SPECIES AS GOD AND AS MAN",
         "hypothesis": "If the wine change into vinegar, and the host crumble into corruption, after they have been consecrated, is Jesus Christ still present under their species as God and as man?",
         "wer": 0.0,
-        "latency_ms": 272.12962400517426,
+        "latency_ms": 257.5909529987257,
         "audio_seconds": 11.655
       },
       {
@@ -323,7 +323,7 @@
         "reference": "A GENTLE KICK FROM THE TALL BOY IN THE BENCH BEHIND URGED STEPHEN TO ASK A DIFFICULT QUESTION",
         "hypothesis": "A gentle kick from the tall boy in the bench behind urged Stephen to ask a difficult question.",
         "wer": 0.0,
-        "latency_ms": 202.1276009909343,
+        "latency_ms": 176.3921770034358,
         "audio_seconds": 6.61
       },
       {
@@ -331,7 +331,7 @@
         "reference": "THE RECTOR DID NOT ASK FOR A CATECHISM TO HEAR THE LESSON FROM",
         "hypothesis": "The rector did not ask for a catechism to hear the lesson from,",
         "wer": 0.0,
-        "latency_ms": 143.64872200530954,
+        "latency_ms": 142.28234699112363,
         "audio_seconds": 4.01
       },
       {
@@ -339,7 +339,7 @@
         "reference": "HE CLASPED HIS HANDS ON THE DESK AND SAID",
         "hypothesis": "he clasped his hands on the desk and said,",
         "wer": 0.0,
-        "latency_ms": 128.74164499226026,
+        "latency_ms": 86.32872102316469,
         "audio_seconds": 2.71
       },
       {
@@ -347,7 +347,7 @@
         "reference": "THE RETREAT WILL BEGIN ON WEDNESDAY AFTERNOON IN HONOUR OF SAINT FRANCIS XAVIER WHOSE FEAST DAY IS SATURDAY",
         "hypothesis": "The retreat will begin on Wednesda afternoon in honor of Saint Francis Xavier, whose feast day is Saturday.",
         "wer": 0.1111111111111111,
-        "latency_ms": 220.3800190181937,
+        "latency_ms": 200.7163230155129,
         "audio_seconds": 7.83
       },
       {
@@ -355,7 +355,7 @@
         "reference": "ON FRIDAY CONFESSION WILL BE HEARD ALL THE AFTERNOON AFTER BEADS",
         "hypothesis": "On Friday confession will be heard all the afternoon after Beads.",
         "wer": 0.0,
-        "latency_ms": 163.59701598412357,
+        "latency_ms": 146.96347498102114,
         "audio_seconds": 4.67
       },
       {
@@ -363,7 +363,7 @@
         "reference": "BEWARE OF MAKING THAT MISTAKE",
         "hypothesis": "Beware of making that mistake.",
         "wer": 0.0,
-        "latency_ms": 87.07312398473732,
+        "latency_ms": 105.90166097972542,
         "audio_seconds": 2.715
       },
       {
@@ -371,7 +371,7 @@
         "reference": "STEPHEN'S HEART BEGAN SLOWLY TO FOLD AND FADE WITH FEAR LIKE A WITHERING FLOWER",
         "hypothesis": "Stephen's heart began slowly to fold and fade with fear like a withering flower.",
         "wer": 0.0,
-        "latency_ms": 196.07395998900756,
+        "latency_ms": 191.4481519779656,
         "audio_seconds": 6.615
       },
       {
@@ -379,7 +379,7 @@
         "reference": "HE IS CALLED AS YOU KNOW THE APOSTLE OF THE INDIES",
         "hypothesis": "He is called, as you know, the Apostle of the Indies.",
         "wer": 0.0,
-        "latency_ms": 185.2816540049389,
+        "latency_ms": 164.9135799962096,
         "audio_seconds": 4.09
       },
       {
@@ -387,7 +387,7 @@
         "reference": "A GREAT SAINT SAINT FRANCIS XAVIER",
         "hypothesis": "a great saint, Saint Francis Xavier,",
         "wer": 0.0,
-        "latency_ms": 97.99685602774844,
+        "latency_ms": 97.85602701595053,
         "audio_seconds": 3.33
       },
       {
@@ -395,7 +395,7 @@
         "reference": "THE RECTOR PAUSED AND THEN SHAKING HIS CLASPED HANDS BEFORE HIM WENT ON",
         "hypothesis": "The rector paused, and then, shaking his clasped hands before him, went on",
         "wer": 0.0,
-        "latency_ms": 193.81304900161922,
+        "latency_ms": 163.14201900968328,
         "audio_seconds": 5.81
       },
       {
@@ -403,7 +403,7 @@
         "reference": "HE HAD THE FAITH IN HIM THAT MOVES MOUNTAINS",
         "hypothesis": "He had the faith in him that moves mountains,",
         "wer": 0.0,
-        "latency_ms": 126.66629900922999,
+        "latency_ms": 130.76574000297114,
         "audio_seconds": 3.445
       },
       {
@@ -411,7 +411,7 @@
         "reference": "A GREAT SAINT SAINT FRANCIS XAVIER",
         "hypothesis": "a great Saint, Saint Francis Xavier,",
         "wer": 0.0,
-        "latency_ms": 117.30450598406605,
+        "latency_ms": 97.0049099996686,
         "audio_seconds": 3.25
       },
       {
@@ -419,7 +419,7 @@
         "reference": "IN THE SILENCE THEIR DARK FIRE KINDLED THE DUSK INTO A TAWNY GLOW",
         "hypothesis": "In the silence their dark fire kindled the dusk into a tawny glow.",
         "wer": 0.0,
-        "latency_ms": 197.04418399487622,
+        "latency_ms": 157.3294630215969,
         "audio_seconds": 5.21
       },
       {
@@ -427,7 +427,7 @@
         "reference": "HE COULD WAIT NO LONGER",
         "hypothesis": "He could wait no longer.",
         "wer": 0.0,
-        "latency_ms": 71.33129899739288,
+        "latency_ms": 74.23847098834813,
         "audio_seconds": 2.085
       },
       {
@@ -435,7 +435,7 @@
         "reference": "FOR A FULL HOUR HE HAD PACED UP AND DOWN WAITING BUT HE COULD WAIT NO LONGER",
         "hypothesis": "For a full hour he had paced up and down, waiting, but he could wait no longer.",
         "wer": 0.0,
-        "latency_ms": 176.80545698385686,
+        "latency_ms": 168.8237389898859,
         "audio_seconds": 5.415
       }
     ],
@@ -788,6 +788,146 @@
         "raw": "Ship it.",
         "expected": "Ship it.",
         "actual": "Ship it.",
+        "wer": 0.0,
+        "exact": true,
+        "llm_invoked": false,
+        "self_corrections_detected": false
+      },
+      {
+        "id": "passthrough-filename",
+        "tags": [
+          "passthrough",
+          "filename"
+        ],
+        "raw": "server-test.sh",
+        "expected": "server-test.sh",
+        "actual": "server-test.sh",
+        "wer": 0.0,
+        "exact": true,
+        "llm_invoked": false,
+        "self_corrections_detected": false
+      },
+      {
+        "id": "passthrough-path",
+        "tags": [
+          "passthrough",
+          "filename"
+        ],
+        "raw": "Open src/linux_whisper/stt/parakeet.py",
+        "expected": "Open src/linux_whisper/stt/parakeet.py",
+        "actual": "Open src/linux_whisper/stt/parakeet.py",
+        "wer": 0.0,
+        "exact": true,
+        "llm_invoked": false,
+        "self_corrections_detected": false
+      },
+      {
+        "id": "passthrough-dotfile",
+        "tags": [
+          "passthrough",
+          "filename"
+        ],
+        "raw": "Check the .env file in the project root.",
+        "expected": "Check the .env file in the project root.",
+        "actual": "Check the .env file in the project root.",
+        "wer": 0.0,
+        "exact": true,
+        "llm_invoked": false,
+        "self_corrections_detected": false
+      },
+      {
+        "id": "passthrough-snake-case",
+        "tags": [
+          "passthrough",
+          "code"
+        ],
+        "raw": "The variable is called max_default_threads.",
+        "expected": "The variable is called max_default_threads.",
+        "actual": "The variable is called max_default_threads.",
+        "wer": 0.0,
+        "exact": true,
+        "llm_invoked": false,
+        "self_corrections_detected": false
+      },
+      {
+        "id": "passthrough-camel-case",
+        "tags": [
+          "passthrough",
+          "code"
+        ],
+        "raw": "Call getUserById with the account ID.",
+        "expected": "Call getUserById with the account ID.",
+        "actual": "Call getUserById with the account ID.",
+        "wer": 0.0,
+        "exact": true,
+        "llm_invoked": false,
+        "self_corrections_detected": false
+      },
+      {
+        "id": "passthrough-flags",
+        "tags": [
+          "passthrough",
+          "code"
+        ],
+        "raw": "Run it with --no-cache and --verbose.",
+        "expected": "Run it with --no-cache and --verbose.",
+        "actual": "Run it with --no-cache and --verbose.",
+        "wer": 0.0,
+        "exact": true,
+        "llm_invoked": true,
+        "self_corrections_detected": true
+      },
+      {
+        "id": "passthrough-sql",
+        "tags": [
+          "passthrough",
+          "code"
+        ],
+        "raw": "Write a SQL query against the users table.",
+        "expected": "Write a SQL query against the users table.",
+        "actual": "Write a SQL query against the users table.",
+        "wer": 0.0,
+        "exact": true,
+        "llm_invoked": false,
+        "self_corrections_detected": false
+      },
+      {
+        "id": "passthrough-acronyms",
+        "tags": [
+          "passthrough",
+          "code"
+        ],
+        "raw": "The API returns JSON, but the config is YAML.",
+        "expected": "The API returns JSON, but the config is YAML.",
+        "actual": "The API returns JSON, but the config is YAML.",
+        "wer": 0.0,
+        "exact": true,
+        "llm_invoked": false,
+        "self_corrections_detected": false
+      },
+      {
+        "id": "passthrough-git-command",
+        "tags": [
+          "passthrough",
+          "code"
+        ],
+        "raw": "Run git rebase --interactive on main.",
+        "expected": "Run git rebase --interactive on main.",
+        "actual": "Run git rebase --interactive on main.",
+        "wer": 0.0,
+        "exact": true,
+        "llm_invoked": true,
+        "self_corrections_detected": true
+      },
+      {
+        "id": "passthrough-version",
+        "tags": [
+          "passthrough",
+          "code"
+        ],
+        "raw": "Upgrade to version 0.3.34 and rebuild.",
+        "expected": "Upgrade to version 0.3.34 and rebuild.",
+        "actual": "Upgrade to version 0.3.34 and rebuild.",
         "wer": 0.0,
         "exact": true,
         "llm_invoked": false,
