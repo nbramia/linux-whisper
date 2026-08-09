@@ -335,6 +335,31 @@ class TestCompareRuns:
         candidate = _run(vad={"noise_false_positive_rate": 0.5})
         assert len(metrics.compare_runs(baseline, candidate)) == 1
 
+    def test_punctuation_rate_collapse_is_a_regression(self) -> None:
+        # A backend that stops emitting punctuation entirely.
+        baseline = _run(stt={"punctuation_rate": 12.0})
+        candidate = _run(stt={"punctuation_rate": 0.0})
+        regressions = metrics.compare_runs(baseline, candidate)
+        assert [r.metric for r in regressions] == ["stt.punctuation_rate"]
+
+    def test_punctuation_rate_style_difference_passes(self) -> None:
+        # Two backends punctuating slightly differently is not a regression.
+        baseline = _run(stt={"punctuation_rate": 12.0})
+        candidate = _run(stt={"punctuation_rate": 10.0})
+        assert metrics.compare_runs(baseline, candidate) == []
+
+    def test_stt_only_run_does_not_trip_polish_punctuation(self) -> None:
+        # Regression guard for a harness bug: the STT and polish suites both
+        # wrote "punctuation.f1", so an STT-only candidate looked like it had
+        # destroyed the polish suite's score. The STT suite now reports
+        # stt.punctuation_rate instead and the keys no longer collide.
+        baseline = _run(
+            stt={"wer": 0.0148, "punctuation_rate": 12.0},
+            punctuation={"f1": 0.9615},
+        )
+        candidate = _run(stt={"wer": 0.0054, "punctuation_rate": 12.5})
+        assert metrics.compare_runs(baseline, candidate) == []
+
     def test_regression_formats_readably(self) -> None:
         regression = metrics.Regression("stt.wer", 0.05, 0.09, "+0.0050 abs")
         formatted = regression.format()

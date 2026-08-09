@@ -277,6 +277,7 @@ DEFAULT_WER_TOLERANCE = 0.005
 DEFAULT_LATENCY_RATIO = 1.10
 DEFAULT_QUALITY_TOLERANCE = 0.05
 DEFAULT_VAD_TOLERANCE = 0.10
+DEFAULT_PUNCTUATION_RATE_TOLERANCE = 3.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -294,6 +295,9 @@ class Thresholds:
     capitalization_abs: float = DEFAULT_QUALITY_TOLERANCE
     # VAD rates swing more between runs than text metrics, so a wider band.
     vad_abs: float = DEFAULT_VAD_TOLERANCE
+    # Marks per 100 words; catches a backend that stops punctuating entirely
+    # without failing one that merely punctuates a little differently.
+    punctuation_rate_abs: float = DEFAULT_PUNCTUATION_RATE_TOLERANCE
 
 
 @dataclass(frozen=True, slots=True)
@@ -328,6 +332,7 @@ _HIGHER_IS_BETTER = (
     "capitalization.accuracy",
     "polish.exact_match",
     "vad.speech_frame_rate",
+    "stt.punctuation_rate",
 )
 
 # Metrics where a *lower* value is better, scored with an absolute tolerance.
@@ -388,6 +393,8 @@ def compare_runs(
         "capitalization.accuracy": thresholds.capitalization_abs,
         "polish.exact_match": thresholds.punctuation_f1_abs,
         "vad.speech_frame_rate": thresholds.vad_abs,
+        # Marks per 100 words, so the tolerance is in those units, not a ratio.
+        "stt.punctuation_rate": thresholds.punctuation_rate_abs,
     }
     for path in _HIGHER_IS_BETTER:
         b, c = _get(base_metrics, path), _get(cand_metrics, path)

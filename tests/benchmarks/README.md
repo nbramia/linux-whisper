@@ -128,6 +128,11 @@ bought is the point of the harness.
 
 - Latency numbers are hardware-specific. A baseline captured on one machine
   cannot gate a candidate run on another.
+- **Ambient system load moves the numbers a lot.** A whisper.cpp baseline taken
+  while a `llama-server` was resident measured p95 968ms; the same stack on a
+  quiet machine measured 383ms. Capture the baseline and the candidate
+  **back to back**, and do not compare against a baseline from another session.
+  This hits GPU backends hardest, since they contend for the shared iGPU.
 - The first transcription is a discarded warm-up so model load and GPU kernel
   compilation are not charged to fixture 1.
 - `peak_rss_mb` is the whole process, so on a GPU backend it excludes VRAM and

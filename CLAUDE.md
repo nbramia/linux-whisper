@@ -94,16 +94,18 @@ Referenced during planning to assess whether a change is safe.
 |-------|--------------|-------------|
 | 1. Hotkey detection | < 5ms | < 5ms |
 | 2. Audio + VAD + AGC | < 10ms | < 10ms |
-| 3. STT (whisper.cpp) | ~300ms | ~2.5s |
+| 3. STT (Parakeet TDT v3, CPU) | ~190ms | ~190ms |
 | 4a. Disfluency removal | < 15ms | < 15ms |
 | 4b. Punctuation | < 15ms | < 15ms |
 | 4d. Number/date formatting | < 1ms | < 1ms |
-| 4c. LLM correction (conditional) | ~200ms | ~370ms |
+| 4c. LLM correction (conditional) | ~150ms | ~370ms |
 | 5. Text injection | < 20ms | < 20ms |
-| **Total (simple)** | **~350ms** | **~2.6s** |
-| **Total (with LLM)** | **~550ms** | **~2.9s** |
+| **Total (simple)** | **~240ms** | **~240ms** |
+| **Total (with LLM)** | **~390ms** | **~560ms** |
 
-GPU STT runs in a subprocess worker (pywhispercpp/onnxruntime ROCm conflict requires process isolation).
+The default STT backend (Parakeet TDT v3) runs INT8 ONNX on the **CPU** — it beat whisper.cpp on the ROCm GPU on both WER and latency, and staying on CPU sidesteps the onnxruntime/pywhispercpp `libamdhip64` conflict entirely.
+
+The whisper.cpp GPU backend remains supported and still runs in a subprocess worker (that conflict is why). Do not delete it — it is the proven fallback.
 
 ## Key Files
 
