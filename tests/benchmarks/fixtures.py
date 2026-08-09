@@ -37,7 +37,17 @@ logger = logging.getLogger(__name__)
 
 BENCH_DIR = CACHE_DIR / "benchmarks"
 LIBRISPEECH_DIR = BENCH_DIR / "librispeech"
-LIBRISPEECH_URL = "https://www.openslr.org/resources/12/test-clean.tar.gz"
+
+# LibriSpeech splits.  ``test-clean`` is studio-quality read prose; ``test-other``
+# is the deliberately harder split — accents, faster delivery, worse recordings.
+# Neither contains disfluencies or self-corrections, so both understate how a
+# model handles real dictation.  Use ``--fixtures-dir`` with your own clips for
+# that; see ``record.py``.
+LIBRISPEECH_SPLITS: dict[str, str] = {
+    "test-clean": "https://www.openslr.org/resources/12/test-clean.tar.gz",
+    "test-other": "https://www.openslr.org/resources/12/test-other.tar.gz",
+}
+DEFAULT_SPLIT = "test-clean"
 
 SAMPLE_RATE = 16_000
 
@@ -116,23 +126,29 @@ def to_pcm16(audio: npt.NDArray[np.float32]) -> bytes:
 # ---------------------------------------------------------------------------
 
 
-def ensure_librispeech(force: bool = False) -> Path:
-    """Download and extract LibriSpeech ``test-clean`` into the cache.
+def ensure_librispeech(split: str = DEFAULT_SPLIT, force: bool = False) -> Path:
+    """Download and extract a LibriSpeech *split* into the cache.
 
-    Returns the directory containing the extracted ``LibriSpeech/test-clean``
-    tree.  Roughly a 346 MB download, performed once.
+    Returns the directory containing the extracted ``LibriSpeech/<split>`` tree.
+    Roughly a 330-346 MB download per split, performed once.
     """
-    extracted = LIBRISPEECH_DIR / "LibriSpeech" / "test-clean"
+    if split not in LIBRISPEECH_SPLITS:
+        raise ValueError(
+            f"Unknown LibriSpeech split '{split}'. Valid: {list(LIBRISPEECH_SPLITS)}"
+        )
+
+    extracted = LIBRISPEECH_DIR / "LibriSpeech" / split
     if extracted.is_dir() and not force:
         return extracted
 
     LIBRISPEECH_DIR.mkdir(parents=True, exist_ok=True)
-    archive = LIBRISPEECH_DIR / "test-clean.tar.gz"
+    url = LIBRISPEECH_SPLITS[split]
+    archive = LIBRISPEECH_DIR / f"{split}.tar.gz"
 
     if not archive.exists() or force:
-        logger.info("Downloading LibriSpeech test-clean (~346 MB) from %s", LIBRISPEECH_URL)
+        logger.info("Downloading LibriSpeech %s (~340 MB) from %s", split, url)
         tmp = archive.with_suffix(".partial")
-        with urllib.request.urlopen(LIBRISPEECH_URL) as response, open(tmp, "wb") as out:
+        with urllib.request.urlopen(url) as response, open(tmp, "wb") as out:
             shutil.copyfileobj(response, out)
         tmp.rename(archive)
 
@@ -145,13 +161,16 @@ def ensure_librispeech(force: bool = False) -> Path:
     return extracted
 
 
-def load_librispeech_fixtures(count: int = DEFAULT_AUDIO_FIXTURE_COUNT) -> list[AudioFixture]:
+def load_librispeech_fixtures(
+    count: int = DEFAULT_AUDIO_FIXTURE_COUNT,
+    split: str = DEFAULT_SPLIT,
+) -> list[AudioFixture]:
     """Return the first *count* LibriSpeech utterances in deterministic order.
 
     Sorted by utterance id so the same fixture set is scored on every run —
     a shuffled set would make run-to-run WER differences meaningless.
     """
-    root = ensure_librispeech()
+    root = ensure_librispeech(split)
 
     fixtures: list[AudioFixture] = []
     for transcript_file in sorted(root.rglob("*.trans.txt")):
@@ -167,7 +186,7 @@ def load_librispeech_fixtures(count: int = DEFAULT_AUDIO_FIXTURE_COUNT) -> list[
                     id=utterance_id,
                     path=audio_path,
                     reference=reference.strip(),
-                    tags=("librispeech", "read-speech"),
+                    tags=("librispeech", split, "read-speech"),
                 )
             )
             if len(fixtures) >= count:
@@ -207,8 +226,9 @@ def load_user_fixtures(directory: Path) -> list[AudioFixture]:
 def load_audio_fixtures(
     directory: Path | None = None,
     count: int = DEFAULT_AUDIO_FIXTURE_COUNT,
+    split: str = DEFAULT_SPLIT,
 ) -> list[AudioFixture]:
     """Load user fixtures if *directory* is given, otherwise LibriSpeech."""
     if directory is not None:
         return load_user_fixtures(directory)
-    return load_librispeech_fixtures(count)
+    return load_librispeech_fixtures(count, split)

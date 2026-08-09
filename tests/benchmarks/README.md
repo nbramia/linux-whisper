@@ -43,16 +43,27 @@ scoring them through an STT backend would just add noise to the measurement.
 order — deterministic, so run-to-run WER differences mean something. Downloaded
 to `~/.cache/linux-whisper/benchmarks/` on first use.
 
-LibriSpeech is read audiobook speech. It measures relative model accuracy well,
-but it contains no fillers, stammers, or self-corrections, so it **understates**
-how the polish pipeline behaves on real dictation. For a representative number,
-use your own clips:
+`--split test-other` selects LibriSpeech's harder split — accents, faster
+delivery, worse recordings. Worth running when a backend looks good on
+`test-clean`, since the ranking can move: Moonshine v2-small sits 1.5x behind v1
+on `test-clean` but only 1.13x behind on `test-other`.
+
+**Both splits are read audiobook prose.** Neither contains fillers, stammers, or
+self-corrections, and both use utterances far longer than a dictated sentence.
+They rank models sensibly but cannot tell you how a backend handles *your* voice
+saying what you actually dictate — the only question that decides a default.
+
+Record that set with the bundled helper:
 
 ```bash
-mkdir -p ~/dictation-fixtures
-# clip.wav  + clip.txt  (the reference transcript), one pair per utterance
+python -m tests.benchmarks.record --out ~/dictation-fixtures
 python -m tests.benchmarks.run --suite stt --fixtures-dir ~/dictation-fixtures
 ```
+
+It walks 15 prompts covering fillers, stammers, self-corrections, numbers,
+dates, technical vocabulary, and questions, writing the `clip.wav` + `clip.txt`
+pairs `--fixtures-dir` expects. Re-take a bad one with `--only <prompt-id>`.
+Any directory of `.wav`/`.txt` pairs works, so hand-made fixtures are fine too.
 
 **Text** fixtures live in `text_fixtures.py`, tagged by category: `filler`,
 `repetition`, `false-start`, `self-correction`, `formatting`, `punctuation`, and
