@@ -349,7 +349,20 @@ We evaluated sub-4B models on **IFEval** (instruction following) as the critical
 
 **The prompt's "delete nothing else" rule is load-bearing.** Without it this checkpoint compresses past the self-correction — dropping qualifiers like "just" and leading subjects like "Let's" — which reads as a summary rather than a transcript. Benchmarked: adding the rule moved exact-match from 40.9% to 45.5%.
 
-**Why not Qwen3.5-4B?** It is the better model on paper (Apache 2.0, non-thinking by default, ~9 points higher on the Artificial Analysis Intelligence Index) but its GGUF declares `general.architecture = qwen35`, which the vendored llama.cpp in `llama-cpp-python` 0.3.16 rejects with `unknown model architecture`. Adopting it means rebuilding llama-cpp-python from source with HIP for gfx1151, which puts the working ROCm offload path at risk. Revisit when that rebuild is done on its own terms — a newer llama.cpp would also unlock Qwen3-ASR via `mtmd`.
+**Why not Qwen3.5-4B?** Not for the reason originally recorded. `llama-cpp-python` was rebuilt from source with HIP for gfx1151 (0.3.16 → 0.3.34, vendoring llama.cpp from July 2026), and Qwen3.5-4B now loads and runs on ROCm. It was then benchmarked against Qwen3-4B-Instruct-2507 on the polish suite and **lost on latency for no measurable quality gain**:
+
+| | Qwen3-4B-Instruct-2507 | Qwen3.5-4B |
+|---|---|---|
+| polish WER | 0.1070 | 0.1070 |
+| exact match | 62.5% | 62.5% |
+| stage 4c p50 | **141ms** | 262ms |
+| polish total p95 | **200ms** | 338ms |
+
+31 of 32 fixtures produced byte-identical output. The one that differed favoured Qwen3.5 semantically — on `self-correction-quantity` it kept the repair ("fifteen") where 2507 kept the reparandum ("fifty") — but both scored the same WER because neither converts the number to a digit (see #32).
+
+So the extra capability does not show on a task this narrow, and +138ms p95 is not worth one fixture. **2507 stays the default.** Qwen3.5-4B remains selectable via `polish.llm_model` if the polish task ever widens.
+
+The rebuild was still worth doing: it is what makes Qwen3-ASR available for the STT fallback path, and it removes the version ceiling on every future model.
 
 **Alternative: Gemma 3 4B IT (Q4_K_M)**
 - IFEval 90.2 — absolute best instruction adherence in the sub-4B class
