@@ -27,6 +27,7 @@ class STTConfig:
     VALID_BACKENDS = ("faster-whisper", "moonshine", "whisper-cpp")
     VALID_MODELS = (
         "moonshine-tiny",
+        "moonshine-small",
         "moonshine-medium",
         "whisper-large-v3-turbo",
         "distil-large-v3.5",

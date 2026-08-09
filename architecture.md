@@ -542,7 +542,7 @@ tray:
 | Audio capture | `sounddevice` (PortAudio) | Cross-backend (PipeWire, PulseAudio, ALSA), well-maintained |
 | VAD | Silero VAD v6 | ~0.1ms inference, best open-source VAD, CPU-native |
 | STT (default) | faster-whisper (CTranslate2) | INT8 quantization, AVX-512 optimized, large-v3-turbo, 7.25% WER |
-| STT (streaming) | Moonshine v2 (ONNX Runtime) | Native streaming, CPU-designed, 245M params, 6.65% WER |
+| STT (streaming) | Moonshine v2 (`moonshine-voice`) | Native streaming, CPU-designed, 245M params, 6.65% WER claimed |
 | STT (batch alt) | `whisper.cpp` (via Python bindings) | AVX-512 optimized, GGML quantization |
 | Disfluency | BERT token classifier (ONNX) | Deterministic filler removal, ~10ms, zero hallucination |
 | Punctuation | ELECTRA-small (ONNX) | Token classification, ~5ms, outperforms GPT on this task |
@@ -691,6 +691,32 @@ Tasks are chained via `asyncio.Queue` for backpressure-free handoff.
 - Latency benchmarks with regression detection (per-stage and end-to-end)
 - Memory usage monitoring (ensure no leaks over 1000+ transcriptions)
 - ONNX Runtime memory stability (CTranslate2 has known leak issues; verify ONNX doesn't)
+
+### Moonshine v2 Backend
+
+The `moonshine` backend runs Moonshine v2 via the `moonshine-voice` package (v1's `useful-moonshine-onnx` is frozen pre-v2 and cannot load v2 checkpoints). Its ONNX Runtime is bundled inside the wheel, so it shares no runtime with the Silero VAD or the polish encoders — no repeat of the pywhispercpp/onnxruntime ROCm conflict.
+
+**It inverts the usual work split.** Every other backend buffers in `feed_audio` and does everything in `finalize`. This one pushes each chunk into a per-utterance `Stream`, so encoding overlaps the user still speaking:
+
+| | whisper.cpp (GPU) | Moonshine v2 medium-streaming (CPU) |
+|---|---|---|
+| Work during recording | none | ~0.38x realtime |
+| **Post-speech latency** | **~290ms** | **11-49ms** |
+
+That post-speech number is what the user actually waits for, and it is the reason to care about this backend.
+
+**A fresh `Stream` per utterance is mandatory for correctness, not just latency.** `Transcriber.transcribe_without_streaming` carries decoder state across calls with no working reset — `stop()`/`start()`, `create_stream()`, and `remove_all_listeners()` all leave it in place. The second and later utterances then inherit the previous one's context and pick up hallucinated leading tokens (a spurious "Yeah" on 4 of 15 LibriSpeech fixtures). The same clip is clean as the first call on a fresh `Transcriber`.
+
+**Accuracy is worse than v1 on read speech.** Measured on 15 LibriSpeech test-clean utterances:
+
+| Backend | WER |
+|---------|-----|
+| Moonshine v1 base | 2.13% |
+| Moonshine v2 small-streaming | 3.19% |
+| Moonshine v2 medium-streaming | 4.96% |
+| whisper.cpp large-v3-turbo (default) | 1.48% |
+
+v2 was adopted despite this because it is the only path to streaming STT (issue #5), because v1's package is a dead end, and because the backend is not the default — `whisper-cpp` remains the shipping choice and is more accurate than either. Do not switch the default to Moonshine on these numbers.
 
 ### Model Benchmarks
 

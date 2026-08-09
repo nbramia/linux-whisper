@@ -18,7 +18,7 @@ Local voice dictation for Linux. Press a hotkey, speak naturally with filler wor
 - **Voice snippets**: say a trigger phrase ("my email") to instantly expand configured text, bypassing the full pipeline
 - **Context-aware tone**: detects the focused application (Slack, email, terminal, etc.) and adjusts LLM output tone accordingly
 - **Number/date formatting**: spoken forms like "three hundred and fifty" or "march twenty second" are automatically converted to "350" and "March 22nd"
-- **Multiple STT backends**: whisper.cpp (default, GPU), faster-whisper (CTranslate2, CPU), Moonshine v2 (ONNX, streaming)
+- **Multiple STT backends**: whisper.cpp (default, GPU), faster-whisper (CTranslate2, CPU), Moonshine v2 (`moonshine-voice`, streaming — lower accuracy than the default, but ~25ms post-speech latency)
 - **Hot-swappable models** from the system tray menu with automatic config persistence
 - **Four-stage polish pipeline**: BERT disfluency removal, ELECTRA/rule-based punctuation, spoken-form formatting, conditional LLM correction
 - **Pre-roll buffer** (750ms) captures audio before the hotkey press
