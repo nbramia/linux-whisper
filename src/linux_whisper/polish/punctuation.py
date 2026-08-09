@@ -109,6 +109,43 @@ _ALWAYS_UPPER: set[str] = {
     "i",  # The pronoun "I"
 }
 
+# ---------------------------------------------------------------------------
+# Literal (code-like) tokens
+# ---------------------------------------------------------------------------
+
+# Dictating code means the transcript contains tokens that are *not* prose and
+# must survive byte-identical.  Prose rules actively corrupt them:
+#
+#   "server-test.sh"        -> "Server-test.sh."   capitalised + period appended
+#   "... parakeet.py"       -> "... parakeet.py."  period breaks the path
+#   "--no-cache and --verbose" -> "--no-cache, and --verbose"
+#
+# On a case-sensitive filesystem the first is a different file, and the others
+# are no longer runnable.  A token matching any pattern below is treated as
+# literal: never capitalised, never given a trailing period, and never used as
+# a comma anchor.
+_LITERAL_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"/"),                        # paths: src/foo.py, /var/log
+    re.compile(r"_"),                        # snake_case, __dunder__
+    re.compile(r"^-{1,2}[A-Za-z]"),          # CLI flags: -v, --no-cache
+    re.compile(r"^\.[A-Za-z]"),              # dotfiles: .env, .gitignore
+    re.compile(r"^[\w.-]+\.[A-Za-z]{1,5}$"), # filenames: server-test.sh
+    re.compile(r"^\d+(\.\d+)+$"),            # versions: 0.3.34
+    re.compile(r"[a-z][A-Z]"),               # camelCase: getUserById
+)
+
+
+def _is_literal_token(word: str) -> bool:
+    """True if *word* is code-like and must not be reshaped by prose rules."""
+    if not word:
+        return False
+    # Strip punctuation the sentence splitter may have left attached, but keep
+    # a leading dot — that is what makes ".env" a dotfile rather than prose.
+    bare = word.rstrip(",;:!?")
+    if not bare:
+        return False
+    return any(pattern.search(bare) for pattern in _LITERAL_PATTERNS)
+
 # Common proper nouns / names are hard to detect without NER — we only handle
 # the pronoun "I" and sentence-initial capitalisation in the rule-based mode.
 
@@ -354,6 +391,13 @@ def _insert_commas(text: str) -> str:
             # Don't add a comma if the preceding token already ends with one
             and not result[-1].endswith(",")
             and not result[-1].endswith(";")
+            # "--no-cache and --verbose" is a command line, not a clause
+            # boundary.  A comma either side of the conjunction breaks it.
+            and not _is_literal_token(result[-1])
+            and not (i + 1 < len(words) and _is_literal_token(words[i + 1]))
+            # Adjacent markers are one boundary, not two: "and then" produced
+            # "..., and, then ..." before this guard.
+            and result[-1].lower().rstrip(",;") not in _CLAUSE_MARKERS
         ):
             # Append a comma to the preceding word
             result[-1] = result[-1] + ","
@@ -375,7 +419,12 @@ def _capitalise_sentence(text: str) -> str:
         bare = word.rstrip(".,?!;:")
         trailing = word[len(bare):]
 
-        if bare.lower() in _ALWAYS_UPPER:
+        if _is_literal_token(word):
+            # Leave code-like tokens exactly as dictated.  The pending
+            # capitalisation is consumed rather than carried forward — a
+            # filename genuinely opened this sentence.
+            capitalise_next = False
+        elif bare.lower() in _ALWAYS_UPPER:
             bare = bare.upper()
             capitalise_next = False  # first-word cap consumed
         elif capitalise_next and bare:
@@ -398,6 +447,12 @@ def _ensure_terminal_punctuation(text: str) -> str:
         return text
 
     if text[-1] in _TERMINAL_PUNCT:
+        return text
+
+    # A sentence ending in a path, filename, or flag must not gain a period —
+    # "parakeet.py." and "--verbose." are both broken.  Prefer a missing full
+    # stop over a corrupted token.
+    if _is_literal_token(text.split()[-1]):
         return text
 
     # Determine if the sentence is likely a question

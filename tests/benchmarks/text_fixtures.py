@@ -165,6 +165,70 @@ POLISH_FIXTURES: list[TextFixture] = [
         expected="Ship it.",
         tags=("passthrough",),
     ),
+    # ── Code and filenames must survive the pipeline untouched ────────────
+    # These are passthrough guards with teeth.  A grammar-fixing LLM has every
+    # incentive to "correct" a filename into prose, expand an acronym, or add a
+    # space after a hyphen — each of which silently breaks dictated code.
+    TextFixture(
+        id="passthrough-filename",
+        raw="server-test.sh",
+        expected="server-test.sh",
+        tags=("passthrough", "filename"),
+    ),
+    TextFixture(
+        id="passthrough-path",
+        raw="Open src/linux_whisper/stt/parakeet.py",
+        expected="Open src/linux_whisper/stt/parakeet.py",
+        tags=("passthrough", "filename"),
+    ),
+    TextFixture(
+        id="passthrough-dotfile",
+        raw="Check the .env file in the project root.",
+        expected="Check the .env file in the project root.",
+        tags=("passthrough", "filename"),
+    ),
+    TextFixture(
+        id="passthrough-snake-case",
+        raw="The variable is called max_default_threads.",
+        expected="The variable is called max_default_threads.",
+        tags=("passthrough", "code"),
+    ),
+    TextFixture(
+        id="passthrough-camel-case",
+        raw="Call getUserById with the account ID.",
+        expected="Call getUserById with the account ID.",
+        tags=("passthrough", "code"),
+    ),
+    TextFixture(
+        id="passthrough-flags",
+        raw="Run it with --no-cache and --verbose.",
+        expected="Run it with --no-cache and --verbose.",
+        tags=("passthrough", "code"),
+    ),
+    TextFixture(
+        id="passthrough-sql",
+        raw="Write a SQL query against the users table.",
+        expected="Write a SQL query against the users table.",
+        tags=("passthrough", "code"),
+    ),
+    TextFixture(
+        id="passthrough-acronyms",
+        raw="The API returns JSON, but the config is YAML.",
+        expected="The API returns JSON, but the config is YAML.",
+        tags=("passthrough", "code"),
+    ),
+    TextFixture(
+        id="passthrough-git-command",
+        raw="Run git rebase --interactive on main.",
+        expected="Run git rebase --interactive on main.",
+        tags=("passthrough", "code"),
+    ),
+    TextFixture(
+        id="passthrough-version",
+        raw="Upgrade to version 0.3.34 and rebuild.",
+        expected="Upgrade to version 0.3.34 and rebuild.",
+        tags=("passthrough", "code"),
+    ),
 ]
 
 
