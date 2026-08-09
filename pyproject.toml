@@ -52,6 +52,7 @@ asyncio_mode = "auto"
 markers = [
     "slow: marks tests that require model loading",
     "integration: marks integration tests requiring full pipeline",
+    "benchmark: marks model A/B benchmarks requiring real models and audio",
 ]
 
 [tool.ruff]

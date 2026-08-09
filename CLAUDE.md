@@ -18,6 +18,24 @@ Read `architecture.md` for pipeline details, `vision.md` for design principles, 
 - Mock external dependencies in tests (audio devices, evdev, display servers, ONNX/GGUF models). Use `conftest.py` stubs.
 - Conventional commits: `feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `chore:`.
 - Branch naming: `<type>/<issue>-<short-description>`.
+- **Maintain documentation as you go.** A change that alters behaviour, models, latency, or config updates `architecture.md`, `README.md`, and this file in the *same* PR — never as a follow-up.
+
+## Benchmarking Model Changes
+
+Any change that swaps a model, quantisation, or inference backend must be gated on `tests/benchmarks/` — never merged on the assumption it is better.
+
+```bash
+python -m tests.benchmarks.run --suite all --label candidate --out /tmp/cand.json
+python -m tests.benchmarks.run --compare tests/benchmarks/baseline/current.json /tmp/cand.json
+```
+
+`--compare` exits non-zero on regression. Rules:
+
+- The harness needs real models and real audio, so it is **excluded from the default pytest run**. Only the pure scoring functions are unit-tested (`tests/test_benchmarks.py`).
+- Latency numbers are hardware-specific — a baseline captured on one machine cannot gate a run from another.
+- Re-baseline only *after* a candidate passes and merges. Keep the superseded baseline file.
+- `passthrough` text fixtures must come out byte-identical. An edit there is the pipeline paraphrasing, which `vision.md` treats as a correctness bug — fail the candidate even if every other metric improved.
+- Any non-zero `thinking_leaks` fails a run outright, regardless of other metrics.
 
 ## Escalation Rules
 
