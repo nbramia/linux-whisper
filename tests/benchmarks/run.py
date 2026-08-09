@@ -594,6 +594,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--label", default="run", help="Name recorded in the result file")
     parser.add_argument("--out", type=Path, help="Write the JSON result here")
     parser.add_argument(
+        "--split",
+        default="test-clean",
+        choices=("test-clean", "test-other"),
+        help="LibriSpeech split when no --fixtures-dir is given (default: test-clean)",
+    )
+    parser.add_argument(
         "--fixtures-dir",
         type=Path,
         help="Directory of <name>.wav + <name>.txt pairs (default: LibriSpeech test-clean)",
@@ -674,14 +680,14 @@ def main(argv: list[str] | None = None) -> int:
 
     suites: dict[str, dict[str, Any]] = {}
     if args.suite in ("stt", "all"):
-        fixtures = load_audio_fixtures(args.fixtures_dir, args.count)
+        fixtures = load_audio_fixtures(args.fixtures_dir, args.count, args.split)
         if not fixtures:
             logger.error("No audio fixtures found — cannot run the STT suite")
             return 2
         suites["stt"] = run_stt_suite(config, fixtures)
 
     if args.suite in ("vad", "all"):
-        vad_fixtures = load_audio_fixtures(args.fixtures_dir, min(args.count, 10))
+        vad_fixtures = load_audio_fixtures(args.fixtures_dir, min(args.count, 10), args.split)
         if not vad_fixtures:
             logger.error("No audio fixtures found — cannot run the VAD suite")
             return 2
