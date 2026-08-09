@@ -17,7 +17,7 @@ dependencies = [
 # ML backends (install what you need)
 audio = ["sounddevice>=0.5"]
 vad = ["onnxruntime>=1.19"]
-moonshine = ["moonshine>=0.1"]
+moonshine = ["moonshine-voice>=0.1"]
 llm = ["llama-cpp-python>=0.3"]
 hotkey = ["evdev>=1.7"]
 tray = ["pystray>=0.19", "Pillow>=10.0"]

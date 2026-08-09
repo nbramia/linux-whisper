@@ -204,12 +204,108 @@ class TestMoonshineEngine:
             "stt": {"backend": "moonshine", "model": "moonshine-medium"},
         })
         engine = MoonshineEngine(cfg)
-        engine._audio_buffer = bytearray(b"\x00" * 100)
+        engine._samples_fed = 100
         engine._stream_started = True
 
         engine.reset()
-        assert engine._audio_buffer == bytearray()
+        assert engine._samples_fed == 0
         assert engine._stream_started is False
+        assert engine._stream is None
+
+    def test_reset_closes_the_stream(self):
+        """The per-utterance stream must be released, not leaked."""
+        from unittest.mock import MagicMock
+
+        from linux_whisper.stt.moonshine import MoonshineEngine
+
+        cfg = Config.from_dict({
+            "stt": {"backend": "moonshine", "model": "moonshine-medium"},
+        })
+        engine = MoonshineEngine(cfg)
+        stream = MagicMock()
+        engine._stream = stream
+
+        engine.reset()
+        stream.close.assert_called_once()
+        assert engine._stream is None
+
+    def test_close_tolerates_a_failing_stream(self):
+        """A stream that raises on close must not break the next utterance."""
+        from unittest.mock import MagicMock
+
+        from linux_whisper.stt.moonshine import MoonshineEngine
+
+        cfg = Config.from_dict({
+            "stt": {"backend": "moonshine", "model": "moonshine-medium"},
+        })
+        engine = MoonshineEngine(cfg)
+        stream = MagicMock()
+        stream.close.side_effect = RuntimeError("already closed")
+        engine._stream = stream
+
+        engine.reset()  # must not raise
+        assert engine._stream is None
+
+    def test_start_stream_creates_a_fresh_stream_each_time(self):
+        """Reusing a stream across utterances leaks decoder state (see #20)."""
+        from unittest.mock import MagicMock
+
+        from linux_whisper.stt.moonshine import MoonshineEngine
+
+        cfg = Config.from_dict({
+            "stt": {"backend": "moonshine", "model": "moonshine-medium"},
+        })
+        engine = MoonshineEngine(cfg)
+        engine._transcriber = MagicMock()
+        first, second = MagicMock(), MagicMock()
+        engine._transcriber.create_stream.side_effect = [first, second]
+
+        engine.start_stream()
+        assert engine._stream is first
+        engine.start_stream()
+
+        first.close.assert_called_once()
+        assert engine._stream is second
+
+    def test_feed_audio_pushes_into_the_stream(self):
+        """Encode work happens during feed_audio, not finalize."""
+        from unittest.mock import MagicMock
+
+        from linux_whisper.stt.moonshine import MoonshineEngine
+
+        cfg = Config.from_dict({
+            "stt": {"backend": "moonshine", "model": "moonshine-medium"},
+        })
+        engine = MoonshineEngine(cfg)
+        engine._transcriber = MagicMock()
+        stream = MagicMock()
+        engine._transcriber.create_stream.return_value = stream
+
+        engine.start_stream()
+        engine.feed_audio(b"\x00\x00" * 512)
+
+        stream.add_audio.assert_called_once()
+        assert engine._samples_fed == 512
+
+    def test_feed_audio_survives_a_decoder_error(self):
+        """A mid-stream failure must not abort the recording."""
+        from unittest.mock import MagicMock
+
+        from linux_whisper.stt.moonshine import MoonshineEngine
+
+        cfg = Config.from_dict({
+            "stt": {"backend": "moonshine", "model": "moonshine-medium"},
+        })
+        engine = MoonshineEngine(cfg)
+        engine._transcriber = MagicMock()
+        stream = MagicMock()
+        stream.add_audio.side_effect = RuntimeError("decoder blew up")
+        engine._transcriber.create_stream.return_value = stream
+
+        engine.start_stream()
+        engine.feed_audio(b"\x00\x00" * 512)  # must not raise
+
+        assert engine._samples_fed == 512
 
 
 # ── WhisperCppEngine unit tests (mocked) ───────────────────────────────────
