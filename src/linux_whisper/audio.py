@@ -1,7 +1,7 @@
 """Audio capture pipeline with ring buffer, Silero VAD, and feedback tones.
 
 Captures audio from the default input device via sounddevice (PipeWire/PulseAudio/ALSA),
-runs Silero VAD v5 (ONNX) for voice activity detection, and exposes an async generator
+runs Silero VAD v6 (ONNX) for voice activity detection, and exposes an async generator
 that yields speech audio chunks in streaming or batch mode.
 
 Sample format: 16kHz, mono, float32.
@@ -38,8 +38,18 @@ SAMPLE_RATE = 16_000
 CHANNELS = 1
 DTYPE = "float32"
 
-# VAD operates on 512-sample windows (32ms at 16kHz) — matches Silero's expected input
-VAD_WINDOW_SAMPLES = 512
+# VAD operates on 576-sample windows (36ms at 16kHz) — Silero v6's required
+# input size.  v5 used 512.
+#
+# This is not a free parameter.  The v6 graph accepts a 512-sample window
+# without raising, and then returns ~0.001 for every window including clear
+# speech — so a stale 512 here disables voice activity detection silently,
+# with no error and no log line.  Measured on LibriSpeech test-clean: 0.0%
+# of speech frames cross the 0.6 threshold at 512, versus 69-90% at 576.
+#
+# The model declares its input dimension dynamically, so this cannot be read
+# from the graph; `tests/benchmarks/run.py --suite vad` is the guard instead.
+VAD_WINDOW_SAMPLES = 576
 
 # Ring buffer holds 30 seconds of audio by default
 DEFAULT_RING_BUFFER_SECONDS = 120  # 2 minutes max recording
@@ -195,22 +205,30 @@ class RingBuffer:
 
 
 # ---------------------------------------------------------------------------
-# Silero VAD v5 — ONNX Runtime wrapper
+# Silero VAD v6 — ONNX Runtime wrapper
 # ---------------------------------------------------------------------------
+
+# Fallback state shape, used only when the model graph declares its state
+# dimensions symbolically.  Both v5 and v6 use [2, batch, 128]; the value is a
+# last resort, not the source of truth.
+_DEFAULT_VAD_STATE_DIM = (2, 1, 128)
 
 
 class SileroVAD:
-    """Silero VAD v5 voice activity detector using ONNX Runtime.
+    """Silero VAD v6 voice activity detector using ONNX Runtime.
 
     The model expects 512 samples (32ms) of float32 mono audio at 16kHz and
-    returns a speech probability in [0, 1].  Internal RNN state (h/c) is
-    maintained between calls for temporal coherence.
+    returns a speech probability in [0, 1].  Internal RNN state is maintained
+    between calls for temporal coherence.
+
+    The state tensor's shape is read from the loaded graph rather than
+    hard-coded.  v5 and v6 happen to share ``[2, batch, 128]``, so a hard-coded
+    shape survived the v5→v6 upgrade by luck; a future model with different
+    dimensions would have silently fed the network zeroed state of the wrong
+    shape instead of failing loudly.
 
     If the ONNX model file does not exist, construction raises FileNotFoundError.
     """
-
-    # Silero v5 state tensor dimensions
-    _STATE_DIM = (2, 1, 128)
 
     def __init__(self, model_path: Path) -> None:
         import onnxruntime as ort
@@ -227,11 +245,37 @@ class SileroVAD:
             sess_options=self._make_session_options(),
         )
 
-        # RNN hidden state — shape [2, batch, 128] for this Silero version
-        self._state = np.zeros(self._STATE_DIM, dtype=np.float32)
+        self._state_dim = self._infer_state_dim(self._session)
+        self._state = np.zeros(self._state_dim, dtype=np.float32)
         self._sr = np.array(SAMPLE_RATE, dtype=np.int64)
 
-        logger.info("Silero VAD loaded from %s", model_path)
+        logger.info(
+            "Silero VAD loaded from %s (state shape %s)", model_path, self._state_dim
+        )
+
+    @staticmethod
+    def _infer_state_dim(session: object) -> tuple[int, ...]:
+        """Read the RNN state tensor's shape from the model graph.
+
+        ONNX declares dynamic axes as strings or ``None``; those are replaced
+        with the corresponding default, since batch size is always 1 here.
+        """
+        for tensor in session.get_inputs():  # type: ignore[attr-defined]
+            if tensor.name != "state":
+                continue
+            resolved = tuple(
+                dim if isinstance(dim, int) else default
+                for dim, default in zip(tensor.shape, _DEFAULT_VAD_STATE_DIM, strict=False)
+            )
+            if len(resolved) == len(_DEFAULT_VAD_STATE_DIM):
+                return resolved
+            logger.warning(
+                "Silero VAD state input has unexpected rank %d — using default %s",
+                len(resolved),
+                _DEFAULT_VAD_STATE_DIM,
+            )
+            break
+        return _DEFAULT_VAD_STATE_DIM
 
     @staticmethod
     def _make_session_options():  # noqa: ANN205
@@ -265,7 +309,7 @@ class SileroVAD:
 
     def reset_state(self) -> None:
         """Reset the RNN hidden state.  Call between utterances."""
-        self._state = np.zeros(self._STATE_DIM, dtype=np.float32)
+        self._state = np.zeros(self._state_dim, dtype=np.float32)
 
 
 # ---------------------------------------------------------------------------

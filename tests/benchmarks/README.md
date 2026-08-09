@@ -31,6 +31,7 @@ merge gate.
 |-------|----------|--------|
 | `stt` | LibriSpeech `test-clean` audio, or your own clips | WER, per-utterance latency, RTFx |
 | `polish` | Text pairs in `text_fixtures.py` — no audio needed | WER vs expected, exact-match rate, punctuation F1, capitalisation, per-stage latency (4a/4b/4c/4d) |
+| `vad` | Audio fixtures plus synthetic silence and noise | Speech-frame detection rate, false-positive rates, per-window latency |
 | `all` | Both | Everything above |
 
 Splitting them this way is deliberate: the polish stages are text-in/text-out, so
@@ -82,6 +83,14 @@ starts invoking the LLM on everything would blow the latency budget.
     stt             284.1    331.7    402.9
 ```
 
+The `vad` suite exists because a mis-sized VAD window is invisible everywhere
+else. Silero v6 accepts v5's 512-sample window without error and returns ~0.001
+for every frame, so detection dies silently while hold-to-talk dictation keeps
+working and nothing logs a complaint. The suite scores speech detection against
+negative controls (digital silence, low-level noise) so a stuck-low **or**
+stuck-high VAD fails. A speech rate below 30% prints a warning; a collapse
+against baseline fails the compare gate.
+
 `thinking_leaks` appears only when it is non-zero. It counts outputs containing
 reasoning-trace markers (`<think>` and friends) — a hybrid-reasoning model
 ignoring its instructions. Any non-zero value fails the run regardless of what
@@ -94,6 +103,8 @@ the other numbers say.
 | `stt.wer`, `polish.wer` | lower better | +0.005 absolute (0.5 WER points) |
 | `latency.*.p95_ms` | lower better | ×1.10 (10% slowdown) |
 | `punctuation.f1`, `capitalization.accuracy`, `polish.exact_match` | higher better | −0.05 absolute |
+| `vad.speech_frame_rate` | higher better | −0.10 absolute |
+| `vad.*_false_positive_rate` | lower better | +0.10 absolute |
 
 Override with `--wer-tolerance` and `--latency-tolerance`.
 

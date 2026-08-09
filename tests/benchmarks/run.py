@@ -32,6 +32,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+import numpy.typing as npt
+
 from linux_whisper.config import Config
 from tests.benchmarks import metrics
 from tests.benchmarks.fixtures import (
@@ -51,6 +54,10 @@ SCHEMA_VERSION = 1
 # Audio is fed to STT backends in the same 512-sample chunks the live capture
 # path uses, so buffering behaviour is exercised the same way.
 CHUNK_SAMPLES = 512
+
+# Below this fraction of speech frames on clean read speech, the VAD is not
+# merely tuned conservatively — it is broken.  A mis-sized window scores ~0.
+MIN_HEALTHY_SPEECH_RATE = 0.30
 
 
 def peak_rss_mb() -> float:
@@ -282,6 +289,91 @@ def run_polish_suite(config: Config, fixtures: list[TextFixture]) -> dict[str, A
     }
 
 
+# ---------------------------------------------------------------------------
+# VAD suite
+# ---------------------------------------------------------------------------
+
+
+def run_vad_suite(config: Config, fixtures: list[AudioFixture]) -> dict[str, Any]:
+    """Score voice activity detection on speech, silence, and quiet noise.
+
+    Exists because a silently mis-sized VAD window is invisible everywhere
+    else: the model accepts the wrong window length without error and simply
+    returns ~0 for every frame, so dictation still "works" in hold-to-talk mode
+    while VAD-driven auto-stop never fires.  This suite fails loudly instead.
+    """
+    from linux_whisper.audio import (
+        SILERO_MODEL_PATH,
+        VAD_WINDOW_SAMPLES,
+        SileroVAD,
+    )
+
+    logger.info("VAD suite: window=%d samples over %d fixtures", VAD_WINDOW_SAMPLES, len(fixtures))
+    vad = SileroVAD(SILERO_MODEL_PATH)
+    threshold = config.audio.vad_threshold
+
+    def frame_probabilities(audio: npt.NDArray[np.float32]) -> npt.NDArray[np.float32]:
+        probabilities: list[float] = []
+        for offset in range(0, len(audio) - VAD_WINDOW_SAMPLES, VAD_WINDOW_SAMPLES):
+            probabilities.append(vad(audio[offset : offset + VAD_WINDOW_SAMPLES]))
+        vad.reset_state()
+        return np.asarray(probabilities, dtype=np.float32)
+
+    speech_rates: list[float] = []
+    per_fixture: list[dict[str, Any]] = []
+    window_latencies: list[float] = []
+
+    for fixture in fixtures:
+        audio = load_audio(fixture.path)
+        start = time.perf_counter()
+        probabilities = frame_probabilities(audio)
+        if len(probabilities):
+            window_latencies.append(
+                (time.perf_counter() - start) * 1000.0 / len(probabilities)
+            )
+
+        rate = float(np.mean(probabilities > threshold)) if len(probabilities) else 0.0
+        speech_rates.append(rate)
+        per_fixture.append(
+            {
+                "id": fixture.id,
+                "speech_frame_rate": rate,
+                "mean_probability": float(probabilities.mean()) if len(probabilities) else 0.0,
+                "windows": len(probabilities),
+            }
+        )
+
+    # Negative controls: neither digital silence nor low-level noise may register
+    # as speech, or the "detection" above is just a stuck-high output.
+    silence = np.zeros(16_000 * 3, dtype=np.float32)
+    noise = (np.random.default_rng(0).standard_normal(16_000 * 3) * 0.01).astype(np.float32)
+    silence_rate = float(np.mean(frame_probabilities(silence) > threshold))
+    noise_rate = float(np.mean(frame_probabilities(noise) > threshold))
+
+    mean_speech_rate = sum(speech_rates) / len(speech_rates) if speech_rates else 0.0
+    logger.info(
+        "VAD: speech %.1f%% | silence %.1f%% | noise %.1f%%",
+        mean_speech_rate * 100,
+        silence_rate * 100,
+        noise_rate * 100,
+    )
+
+    return {
+        "metrics": {
+            "vad": {
+                "window_samples": VAD_WINDOW_SAMPLES,
+                "threshold": threshold,
+                "speech_frame_rate": mean_speech_rate,
+                "silence_false_positive_rate": silence_rate,
+                "noise_false_positive_rate": noise_rate,
+                "fixtures": len(fixtures),
+            },
+            "latency": {"vad_window": metrics.summarize_latency(window_latencies).to_dict()},
+        },
+        "per_fixture": per_fixture,
+    }
+
+
 _THINKING_MARKERS = ("<think>", "</think>", "<thinking>", "Let me think", "Okay, so the user")
 
 
@@ -379,6 +471,16 @@ def print_summary(result: dict[str, Any]) -> None:
         if polish.get("thinking_leaks"):
             print(f"  !! thinking leaks: {polish['thinking_leaks']}")
 
+    if "vad" in metrics:
+        vad = metrics["vad"]
+        print(f"\n  VAD window:       {vad['window_samples']} samples "
+              f"(threshold {vad['threshold']})")
+        print(f"  Speech detected:  {vad['speech_frame_rate']:.1%} of frames")
+        print(f"  False positives:  silence {vad['silence_false_positive_rate']:.1%}, "
+              f"noise {vad['noise_false_positive_rate']:.1%}")
+        if vad["speech_frame_rate"] < MIN_HEALTHY_SPEECH_RATE:
+            print("  !! VAD detects almost no speech — check VAD_WINDOW_SAMPLES")
+
     if "punctuation" in metrics:
         print(f"  Punctuation F1:   {metrics['punctuation']['f1']:.4f}")
     if "capitalization" in metrics:
@@ -425,6 +527,9 @@ def _print_metric_deltas(base: dict[str, Any], cand: dict[str, Any]) -> None:
         ("polish.exact_match", False),
         ("punctuation.f1", False),
         ("capitalization.accuracy", False),
+        ("vad.speech_frame_rate", False),
+        ("vad.silence_false_positive_rate", True),
+        ("vad.noise_false_positive_rate", True),
     ):
         b, c = _lookup(base, path), _lookup(cand, path)
         if b is not None and c is not None:
@@ -469,7 +574,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--suite",
-        choices=("stt", "polish", "all"),
+        choices=("stt", "polish", "vad", "all"),
         default="all",
         help="Which suite to run (default: all)",
     )
@@ -562,6 +667,13 @@ def main(argv: list[str] | None = None) -> int:
             logger.error("No audio fixtures found — cannot run the STT suite")
             return 2
         suites["stt"] = run_stt_suite(config, fixtures)
+
+    if args.suite in ("vad", "all"):
+        vad_fixtures = load_audio_fixtures(args.fixtures_dir, min(args.count, 10))
+        if not vad_fixtures:
+            logger.error("No audio fixtures found — cannot run the VAD suite")
+            return 2
+        suites["vad"] = run_vad_suite(config, vad_fixtures)
 
     if args.suite in ("polish", "all"):
         suites["polish"] = run_polish_suite(config, load_text_fixtures())

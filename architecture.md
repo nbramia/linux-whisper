@@ -114,7 +114,13 @@ PipeWire is the default audio server on modern Linux (Fedora 34+, Ubuntu 22.10+,
 
 ### Voice Activity Detection (VAD)
 
-**Model:** Silero VAD v5
+**Model:** Silero VAD v6
+
+**Window size is 576 samples (36ms at 16kHz), not 512.** v5 used 512; v6 requires 576. This is a trap rather than a detail: the v6 graph accepts a 512-sample window without raising, then returns ~0.001 for every window including unambiguous speech. Voice activity detection is silently dead while logs, tests, and hold-to-talk dictation all still look healthy — only VAD-driven auto-stop breaks. Measured on LibriSpeech test-clean: 0.0% of speech frames cross the 0.6 threshold at 512, versus 69-90% at 576.
+
+The model declares its input dimension dynamically, so the window size cannot be read from the graph. `tests/benchmarks/run.py --suite vad` is the guard: it scores speech detection rate plus false-positive rates on silence and low-level noise, and the compare gate fails when the speech rate collapses.
+
+The capture blocksize (`audio.buffer_size`, 512) and the VAD window are deliberately independent — an accumulator re-chunks capture blocks into VAD windows.
 
 - ~1ms inference per 32ms audio chunk on CPU
 - Detects speech onset within 50ms
@@ -534,7 +540,7 @@ tray:
 |-----------|-----------|-----------|
 | Language | Python 3.12+ | Ecosystem (ML libs), rapid iteration, adequate perf with native extensions |
 | Audio capture | `sounddevice` (PortAudio) | Cross-backend (PipeWire, PulseAudio, ALSA), well-maintained |
-| VAD | Silero VAD v5 | ~1ms inference, best open-source VAD, CPU-native |
+| VAD | Silero VAD v6 | ~0.1ms inference, best open-source VAD, CPU-native |
 | STT (default) | faster-whisper (CTranslate2) | INT8 quantization, AVX-512 optimized, large-v3-turbo, 7.25% WER |
 | STT (streaming) | Moonshine v2 (ONNX Runtime) | Native streaming, CPU-designed, 245M params, 6.65% WER |
 | STT (batch alt) | `whisper.cpp` (via Python bindings) | AVX-512 optimized, GGML quantization |

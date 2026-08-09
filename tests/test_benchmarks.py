@@ -309,6 +309,32 @@ class TestCompareRuns:
         candidate = _run(latency={"stt": {"p95_ms": 50.0}})
         assert metrics.compare_runs(baseline, candidate) == []
 
+    def test_vad_speech_rate_collapse_is_a_regression(self) -> None:
+        # The exact failure this suite exists for: a mis-sized VAD window
+        # drops the speech detection rate to ~0 without raising anything.
+        baseline = _run(vad={"speech_frame_rate": 0.82})
+        candidate = _run(vad={"speech_frame_rate": 0.00})
+        regressions = metrics.compare_runs(baseline, candidate)
+        assert [r.metric for r in regressions] == ["vad.speech_frame_rate"]
+
+    def test_vad_speech_rate_minor_drift_passes(self) -> None:
+        baseline = _run(vad={"speech_frame_rate": 0.82})
+        candidate = _run(vad={"speech_frame_rate": 0.78})
+        assert metrics.compare_runs(baseline, candidate) == []
+
+    def test_vad_false_positive_increase_is_a_regression(self) -> None:
+        # A VAD stuck high would score a perfect speech rate, so the negative
+        # controls have to be gated too.
+        baseline = _run(vad={"silence_false_positive_rate": 0.0})
+        candidate = _run(vad={"silence_false_positive_rate": 0.9})
+        regressions = metrics.compare_runs(baseline, candidate)
+        assert [r.metric for r in regressions] == ["vad.silence_false_positive_rate"]
+
+    def test_vad_noise_false_positive_gated(self) -> None:
+        baseline = _run(vad={"noise_false_positive_rate": 0.0})
+        candidate = _run(vad={"noise_false_positive_rate": 0.5})
+        assert len(metrics.compare_runs(baseline, candidate)) == 1
+
     def test_regression_formats_readably(self) -> None:
         regression = metrics.Regression("stt.wer", 0.05, 0.09, "+0.0050 abs")
         formatted = regression.format()
