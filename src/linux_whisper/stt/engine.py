@@ -105,6 +105,11 @@ def create_engine(config: Config) -> STTEngine:
 
         return MoonshineEngine(config)
 
+    if backend == "parakeet":
+        from linux_whisper.stt.parakeet import ParakeetEngine
+
+        return ParakeetEngine(config)
+
     if backend == "faster-whisper":
         from linux_whisper.stt.faster_whisper import FasterWhisperEngine
 

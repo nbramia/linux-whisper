@@ -49,17 +49,19 @@ The end-to-end pipeline has 6 stages. Each stage has a latency budget:
 |-------|-----------|--------------|---------------|-------|
 | 1 | Hotkey detection | < 5ms | < 5ms | Kernel-level evdev input event |
 | 2 | Audio capture + VAD + AGC | < 10ms | < 10ms | PipeWire stream, Silero VAD, auto gain control |
-| 3 | Speech-to-text | **~300ms** | ~2.5s | whisper.cpp large-v3-turbo (GPU via ROCm HIP) |
+| 3 | Speech-to-text | **~190ms** | ~190ms | Parakeet TDT 0.6B v3 INT8 ONNX (CPU) |
 | 4a | Disfluency removal | < 15ms | < 15ms | BERT token classifier / regex fallback |
 | 4b | Punctuation + caps | < 15ms | < 15ms | ELECTRA-small classifier / rule-based |
 | 4d | Number/date formatting | < 1ms | < 1ms | Rule-based spoken-form conversion |
 | 4c | Self-correction + grammar | **~150ms** | ~370ms | Qwen3-4B-Instruct-2507 Q4_K_M (GPU), only when needed |
 | -- | Focused app detection | < 10ms | < 10ms | xdotool/swaymsg/hyprctl subprocess |
 | 5 | Text injection | < 20ms | < 20ms | ydotool/xdotool/wtype/clipboard |
-| **Total (simple)** | | **~350ms** | ~2.6s | **No self-corrections detected** |
-| **Total (complex)** | | **~550ms** | ~2.9s | **Self-corrections present → LLM invoked** |
+| **Total (simple)** | | **~240ms** | ~240ms | **No self-corrections detected** |
+| **Total (complex)** | | **~390ms** | ~560ms | **Self-corrections present → LLM invoked** |
 
-Stage 3 (STT) runs in batch mode after recording ends. The default backend is whisper.cpp with ROCm GPU acceleration via ggml's HIP backend, running in a **separate subprocess** to avoid a shared-library conflict with onnxruntime (both link `libamdhip64`). The `WhisperGPUEngine` spawns a worker process that loads pywhispercpp, communicates via stdin/stdout pipes, and stays warm between transcriptions. On systems without ROCm, it falls back to CPU automatically. Stages 4a, 4b, and 4d are fast encoder/rule-based models. Stage 4c (generative LLM) is only invoked when the disfluency detector flags self-corrections. Voice snippet matches bypass the entire polish pipeline.
+Stage 3 (STT) runs in batch mode after recording ends. The default backend is **Parakeet TDT 0.6B v3**, INT8 ONNX on the CPU execution provider — it measured better than whisper.cpp on the ROCm GPU on both WER (0.54% vs 1.48%) and latency (p95 288ms vs 383ms), and running on CPU avoids the `libamdhip64` conflict entirely. There is no GPU column to speak of for this backend: the CPU and GPU numbers are the same because it never touches the GPU.
+
+The whisper.cpp backend remains fully supported as `stt.backend: whisper-cpp`. It uses ROCm GPU acceleration via ggml's HIP backend and runs in a **separate subprocess** to avoid a shared-library conflict with onnxruntime (both link `libamdhip64`). The `WhisperGPUEngine` spawns a worker process that loads pywhispercpp, communicates via stdin/stdout pipes, and stays warm between transcriptions. On systems without ROCm, it falls back to CPU automatically. This is the proven fallback path and is not going away. Stages 4a, 4b, and 4d are fast encoder/rule-based models. Stage 4c (generative LLM) is only invoked when the disfluency detector flags self-corrections. Voice snippet matches bypass the entire polish pipeline.
 
 ---
 
@@ -225,11 +227,13 @@ For reference, current top models and where our choices sit:
 | 1 | IBM Granite 4.0 1B Speech | 5.52% | ~2B | Possible but heavy | New #1, just released Mar 2026 |
 | 2 | NVIDIA Canary-Qwen 2.5B | 5.63% | 2.5B | No (NeMo/CUDA) | |
 | 5 | NVIDIA Canary-1B-Flash | 6.35% | 883M | No (NeMo/CUDA) | |
-| 6 | NVIDIA Parakeet-TDT 0.6B v3 | 6.34% | 600M | No (NeMo/CUDA) | |
+| 6 | **NVIDIA Parakeet-TDT 0.6B v3** | **6.34%** | **600M** | **Yes (INT8 ONNX via `onnx-asr`)** | **← Our default** |
 | — | Moonshine v2 Medium | 6.65% | 245M | Yes — designed for it | ← Our alternative (streaming) |
 | 8 | Distil-Whisper v3.5 | 7.10% | 756M | Yes (faster-whisper) | ← Available option |
 | 9 | Whisper large-v3 | 7.14% | 1.55B | Slow | |
-| 10 | **Whisper large-v3-turbo** | **7.25%** | **809M** | **Yes (faster-whisper INT8)** | **← Our default** |
+| 10 | Whisper large-v3-turbo | 7.25% | 809M | Yes (faster-whisper INT8) | ← Previous default, still supported |
+
+The "CPU-Viable: No (NeMo/CUDA)" note against Parakeet was true when this table was written and is not any more — `onnx-asr` runs the INT8 ONNX export on plain ONNX Runtime with no NeMo and no CUDA. That single change is what made it the default.
 
 Our default (faster-whisper large-v3-turbo) offers the best practical quality on CPU with INT8 quantization. Moonshine v2 Medium remains available for users who want streaming output or lower memory usage.
 
@@ -580,6 +584,7 @@ STT and encoder models stay warm in RAM for instant response. The LLM (Qwen3-4B-
 | faster-whisper large-v3-turbo (CTranslate2 INT8) | ~4,000MB | Default STT model |
 | BERT disfluency (ONNX) | ~110MB | Or ~1.3MB with INT8 distilled variant |
 | ELECTRA punctuation (ONNX) | ~60MB | Two 14M-param models |
+| Parakeet TDT 0.6B v3 INT8 (ONNX) | ~1,200MB | Default STT backend, resident in the main process |
 | Qwen3-4B-Instruct-2507 Q4_K_M (llama.cpp) | ~2,500MB | **Lazy-loaded** — only when self-corrections detected |
 | llama.cpp runtime overhead | ~100MB | Only when LLM is loaded |
 | ONNX Runtime overhead | ~100MB | Shared across all ONNX models |

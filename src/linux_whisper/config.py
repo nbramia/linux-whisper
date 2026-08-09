@@ -19,15 +19,20 @@ MODELS_DIR = CACHE_DIR / "models"
 
 @dataclass(frozen=True)
 class STTConfig:
-    backend: str = "whisper-cpp"
-    model: str = "whisper-large-v3-turbo"
+    # Parakeet is the default on measured accuracy and latency (see
+    # architecture.md).  To go back to the previous default, set:
+    #     stt: {backend: whisper-cpp, model: whisper-large-v3-turbo}
+    backend: str = "parakeet"
+    model: str = "parakeet-tdt-0.6b-v3"
     device: str = "rocm"  # cpu | rocm
     threads: int = 0  # 0 = auto
 
-    VALID_BACKENDS = ("faster-whisper", "moonshine", "whisper-cpp")
+    VALID_BACKENDS = ("faster-whisper", "moonshine", "parakeet", "whisper-cpp")
     VALID_MODELS = (
         "moonshine-tiny",
         "moonshine-medium",
+        "parakeet-tdt-0.6b-v2",
+        "parakeet-tdt-0.6b-v3",
         "whisper-large-v3-turbo",
         "distil-large-v3.5",
     )

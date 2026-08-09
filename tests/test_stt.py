@@ -212,6 +212,106 @@ class TestMoonshineEngine:
         assert engine._stream_started is False
 
 
+# ── ParakeetEngine unit tests (mocked) ─────────────────────────────────────
+
+
+class TestParakeetEngine:
+
+    def _cfg(self, **stt):
+        base = {"backend": "parakeet", "model": "parakeet-tdt-0.6b-v3"}
+        base.update(stt)
+        return Config.from_dict({"stt": base})
+
+    def test_invalid_model_raises_value_error(self):
+        from linux_whisper.stt.parakeet import ParakeetEngine
+
+        with pytest.raises(ValueError, match="Unknown Parakeet model"):
+            ParakeetEngine(self._cfg(model="nonexistent-model"))
+
+    def test_missing_package_raises_import_error(self):
+        import linux_whisper.stt.parakeet as parakeet_module
+
+        original = parakeet_module._HAS_ONNX_ASR
+        try:
+            parakeet_module._HAS_ONNX_ASR = False
+            with pytest.raises(ImportError, match="onnx-asr"):
+                parakeet_module.ParakeetEngine(self._cfg())
+        finally:
+            parakeet_module._HAS_ONNX_ASR = original
+
+    def test_feed_audio_without_start_raises(self):
+        from linux_whisper.stt.parakeet import ParakeetEngine
+
+        engine = ParakeetEngine(self._cfg())
+        engine._stream_started = False
+        with pytest.raises(RuntimeError, match="start_stream"):
+            engine.feed_audio(b"\x00" * 100)
+
+    def test_finalize_without_start_returns_empty(self):
+        from linux_whisper.stt.parakeet import ParakeetEngine
+
+        engine = ParakeetEngine(self._cfg())
+        result = engine.finalize()
+        assert result.full_text == ""
+        assert result.segments == []
+
+    def test_reset_clears_state(self):
+        from linux_whisper.stt.parakeet import ParakeetEngine
+
+        engine = ParakeetEngine(self._cfg())
+        engine._audio_buffer = bytearray(b"\x00" * 100)
+        engine._stream_started = True
+        engine.reset()
+        assert engine._audio_buffer == bytearray()
+        assert engine._stream_started is False
+
+    def test_default_threads_are_capped(self):
+        """cpu_count() oversubscribes this model badly — see the measured table."""
+        from linux_whisper.stt.parakeet import _MAX_DEFAULT_THREADS, ParakeetEngine
+
+        engine = ParakeetEngine(self._cfg())
+        assert engine._threads <= _MAX_DEFAULT_THREADS
+
+    def test_explicit_thread_count_overrides_the_cap(self):
+        from linux_whisper.stt.parakeet import ParakeetEngine
+
+        engine = ParakeetEngine(self._cfg(threads=16))
+        assert engine._threads == 16
+
+    def test_transcription_failure_returns_empty_not_raises(self):
+        from unittest.mock import MagicMock
+
+        from linux_whisper.stt.parakeet import ParakeetEngine
+
+        engine = ParakeetEngine(self._cfg())
+        engine._model = MagicMock()
+        engine._model.recognize.side_effect = RuntimeError("onnx blew up")
+
+        engine.start_stream()
+        engine.feed_audio(b"\x00\x00" * 1000)
+        result = engine.finalize()
+
+        assert result.full_text == ""
+        assert result.segments == []
+
+    def test_finalize_returns_recognized_text(self):
+        from unittest.mock import MagicMock
+
+        from linux_whisper.stt.parakeet import ParakeetEngine
+
+        engine = ParakeetEngine(self._cfg())
+        engine._model = MagicMock()
+        engine._model.recognize.return_value = "  Hello there.  "
+
+        engine.start_stream()
+        engine.feed_audio(b"\x00\x00" * 16000)
+        result = engine.finalize()
+
+        assert result.full_text == "Hello there."
+        assert len(result.segments) == 1
+        assert result.duration == pytest.approx(1.0, abs=0.01)
+
+
 # ── WhisperCppEngine unit tests (mocked) ───────────────────────────────────
 
 

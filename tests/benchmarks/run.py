@@ -118,18 +118,28 @@ def run_stt_suite(config: Config, fixtures: list[AudioFixture]) -> dict[str, Any
     latency = metrics.summarize_latency(latencies)
     total_ms = sum(latencies)
 
-    # Punctuation/capitalisation are only meaningful when the reference has
-    # them.  LibriSpeech references are unpunctuated upper-case, so this is
-    # reported but naturally near-zero for that corpus.
-    punct = metrics.punctuation_f1(
-        " ".join(f.reference for f in fixtures),
-        " ".join(p[1] for p in pairs),
-    )
+    # Deliberately NOT reported under the shared "punctuation" key.  LibriSpeech
+    # references are unpunctuated upper-case, so an F1 against them is always ~0
+    # and says nothing about the backend.  Reusing the key made a Parakeet run
+    # (STT suite only) look like it had destroyed the polish suite's punctuation
+    # score, which came from a different suite entirely.
+    #
+    # What is actually worth knowing is whether a backend emits punctuation at
+    # all — Parakeet and Whisper do, a raw CTC model does not — so measure the
+    # hypothesis directly instead of scoring it against a reference that has none.
+    hypothesis_text = " ".join(p[1] for p in pairs)
+    hypothesis_words = max(1, len(hypothesis_text.split()))
+    marks = sum(hypothesis_text.count(m) for m in ".,?!;:")
 
     return {
         "metrics": {
-            "stt": {**total.to_dict(), "fixtures": len(fixtures)},
-            "punctuation": punct,
+            "stt": {
+                **total.to_dict(),
+                "fixtures": len(fixtures),
+                # Marks per 100 words.  English prose runs roughly 8-15.
+                "punctuation_rate": 100.0 * marks / hypothesis_words,
+                "emits_punctuation": marks > 0,
+            },
             "latency": {"stt": latency.to_dict()},
             "rtfx": (audio_seconds / (total_ms / 1000.0)) if total_ms > 0 else 0.0,
         },
@@ -462,6 +472,8 @@ def print_summary(result: dict[str, Any]) -> None:
               f"{stt['fixtures']} fixtures)")
         if "rtfx" in metrics:
             print(f"  RTFx:             {metrics['rtfx']:.1f}")
+        print(f"  Punctuation rate: {stt['punctuation_rate']:.1f} marks/100 words"
+              f"{'' if stt['emits_punctuation'] else '  (none emitted)'}")
 
     if "polish" in metrics:
         polish = metrics["polish"]
