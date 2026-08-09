@@ -427,3 +427,99 @@ class TestApplyAGC:
         audio = np.array([0.1, -0.1], dtype=np.float32)
         result = apply_agc(audio)
         assert np.isclose(np.max(np.abs(result)), 0.7, atol=1e-6)
+
+
+# ── Silero v6 window size ──────────────────────────────────────────────────
+
+
+class TestVadWindowSize:
+    """Guard the VAD window constant against silent breakage.
+
+    Silero v6 requires 576-sample windows.  Feeding it v5's 512 raises no
+    error — the graph accepts the shorter window and returns ~0.001 for every
+    frame, including unambiguous speech.  Voice activity detection is then
+    entirely dead while every test and log line still looks healthy, so the
+    constant needs an explicit assertion.
+    """
+
+    def test_window_is_576_samples(self):
+        from linux_whisper.audio import VAD_WINDOW_SAMPLES
+
+        assert VAD_WINDOW_SAMPLES == 576
+
+    def test_window_is_36ms_at_16khz(self):
+        from linux_whisper.audio import SAMPLE_RATE, VAD_WINDOW_SAMPLES
+
+        assert pytest.approx(0.036, abs=0.001) == VAD_WINDOW_SAMPLES / SAMPLE_RATE
+
+    def test_vad_rejects_wrong_window_length(self):
+        """__call__ must reject a mis-sized window rather than pass it through."""
+        from unittest.mock import MagicMock
+
+        from linux_whisper.audio import VAD_WINDOW_SAMPLES, SileroVAD
+
+        vad = SileroVAD.__new__(SileroVAD)
+        vad._session = MagicMock()
+        vad._state_dim = (2, 1, 128)
+        vad._state = np.zeros((2, 1, 128), dtype=np.float32)
+        vad._sr = np.array(16000, dtype=np.int64)
+
+        with pytest.raises(ValueError, match="576"):
+            vad(np.zeros(512, dtype=np.float32))
+
+        vad._session.run.assert_not_called()
+        assert VAD_WINDOW_SAMPLES == 576
+
+    def test_capture_blocksize_need_not_match_vad_window(self):
+        """The accumulator decouples capture chunks from the VAD window."""
+        from linux_whisper.audio import VAD_WINDOW_SAMPLES
+        from linux_whisper.config import AudioConfig
+
+        # 512-sample capture blocks feeding 576-sample VAD windows is fine and
+        # intentional; they are separate concerns.
+        assert AudioConfig().buffer_size != VAD_WINDOW_SAMPLES
+
+
+class TestSileroStateIntrospection:
+    """State shape comes from the model graph, not a hard-coded constant."""
+
+    def test_state_dim_read_from_graph(self):
+        from unittest.mock import MagicMock
+
+        from linux_whisper.audio import SileroVAD
+
+        state_input = MagicMock()
+        state_input.name = "state"
+        state_input.shape = [2, "batch", 128]
+        session = MagicMock()
+        session.get_inputs.return_value = [state_input]
+
+        assert SileroVAD._infer_state_dim(session) == (2, 1, 128)
+
+    def test_non_default_state_dim_is_honoured(self):
+        from unittest.mock import MagicMock
+
+        from linux_whisper.audio import SileroVAD
+
+        state_input = MagicMock()
+        state_input.name = "state"
+        state_input.shape = [4, 1, 256]
+        session = MagicMock()
+        session.get_inputs.return_value = [state_input]
+
+        # A future model with different dimensions must not be silently fed a
+        # zeroed tensor of the old shape.
+        assert SileroVAD._infer_state_dim(session) == (4, 1, 256)
+
+    def test_missing_state_input_falls_back(self):
+        from unittest.mock import MagicMock
+
+        from linux_whisper.audio import SileroVAD
+
+        other = MagicMock()
+        other.name = "input"
+        other.shape = [1, 576]
+        session = MagicMock()
+        session.get_inputs.return_value = [other]
+
+        assert SileroVAD._infer_state_dim(session) == (2, 1, 128)

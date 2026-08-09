@@ -5,7 +5,7 @@ Local voice dictation for Linux. Press a hotkey, speak naturally with filler wor
 ## How It Works
 
 1. **Press the hotkey** (default: `Fn`). In auto mode, the system detects your intent: hold > 300ms for hold-to-talk, double-tap for toggle mode. A 750ms pre-roll buffer captures audio from *before* the keypress so the first syllable is never lost.
-2. **Speak naturally.** Say "um", repeat yourself, change your mind mid-sentence. Silero VAD v5 monitors speech in real time. The tray icon and floating overlay show when speech is detected.
+2. **Speak naturally.** Say "um", repeat yourself, change your mind mid-sentence. Silero VAD v6 monitors speech in real time. The tray icon and floating overlay show when speech is detected.
 3. **Release the hotkey.** Audio goes through a 6-stage pipeline: STT transcription (whisper.cpp with GPU acceleration), then a four-stage polish pipeline that removes filler words, adds punctuation, formats numbers/dates, and conditionally invokes a local LLM to resolve self-corrections.
 4. **Text appears at the cursor** in whatever application is focused, via xdotool (X11), wtype (wlroots), ydotool (any Wayland), or clipboard fallback.
 

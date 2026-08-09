@@ -276,6 +276,7 @@ def summarize_latency(samples: list[float]) -> LatencySummary:
 DEFAULT_WER_TOLERANCE = 0.005
 DEFAULT_LATENCY_RATIO = 1.10
 DEFAULT_QUALITY_TOLERANCE = 0.05
+DEFAULT_VAD_TOLERANCE = 0.10
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,6 +292,8 @@ class Thresholds:
     latency_ratio: float = DEFAULT_LATENCY_RATIO
     punctuation_f1_abs: float = DEFAULT_QUALITY_TOLERANCE
     capitalization_abs: float = DEFAULT_QUALITY_TOLERANCE
+    # VAD rates swing more between runs than text metrics, so a wider band.
+    vad_abs: float = DEFAULT_VAD_TOLERANCE
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,7 +323,18 @@ def _get(data: dict[str, Any], path: str) -> float | None:
 
 
 # Metrics where a *higher* value is better.
-_HIGHER_IS_BETTER = ("punctuation.f1", "capitalization.accuracy", "polish.exact_match")
+_HIGHER_IS_BETTER = (
+    "punctuation.f1",
+    "capitalization.accuracy",
+    "polish.exact_match",
+    "vad.speech_frame_rate",
+)
+
+# Metrics where a *lower* value is better, scored with an absolute tolerance.
+_LOWER_IS_BETTER_ABS = (
+    "vad.silence_false_positive_rate",
+    "vad.noise_false_positive_rate",
+)
 
 
 def compare_runs(
@@ -373,6 +387,7 @@ def compare_runs(
         "punctuation.f1": thresholds.punctuation_f1_abs,
         "capitalization.accuracy": thresholds.capitalization_abs,
         "polish.exact_match": thresholds.punctuation_f1_abs,
+        "vad.speech_frame_rate": thresholds.vad_abs,
     }
     for path in _HIGHER_IS_BETTER:
         b, c = _get(base_metrics, path), _get(cand_metrics, path)
@@ -381,5 +396,13 @@ def compare_runs(
         tol = tolerance_for[path]
         if c < b - tol:
             regressions.append(Regression(path, b, c, f"-{tol:.4f} abs"))
+
+    # --- VAD false positives: lower is better -------------------------------
+    for path in _LOWER_IS_BETTER_ABS:
+        b, c = _get(base_metrics, path), _get(cand_metrics, path)
+        if b is None or c is None:
+            continue
+        if c > b + thresholds.vad_abs:
+            regressions.append(Regression(path, b, c, f"+{thresholds.vad_abs:.4f} abs"))
 
     return regressions
