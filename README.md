@@ -13,7 +13,7 @@ Local voice dictation for Linux. Press a hotkey, speak naturally with filler wor
 
 - **Auto mode** (default): hold fn > 300ms for hold-to-talk, double-tap for toggle. Plus explicit hold, toggle, and VAD-auto-stop modes via kernel-level evdev (works on X11 and Wayland)
 - **GPU-accelerated STT**: whisper.cpp with ROCm HIP on AMD GPUs. ~5-10x faster than CPU (0.3s vs 2.5s for 5s audio). Automatic CPU fallback when GPU is unavailable
-- **GPU-accelerated LLM**: Qwen3 4B via llama-cpp with ROCm offload (~2x speedup)
+- **GPU-accelerated LLM**: Qwen3-4B-Instruct-2507 via llama-cpp with ROCm offload (~2x speedup)
 - **Automatic gain control**: normalizes quiet/whispered speech before STT for consistent transcription quality
 - **Voice snippets**: say a trigger phrase ("my email") to instantly expand configured text, bypassing the full pipeline
 - **Context-aware tone**: detects the focused application (Slack, email, terminal, etc.) and adjusts LLM output tone accordingly
@@ -57,7 +57,7 @@ The polish pipeline uses a hybrid approach:
 - **Stage 4a** -- BERT token classifier (or regex fallback) removes filler words ("um", "uh", "like"), repetitions, and false starts. Cannot hallucinate.
 - **Stage 4b** -- ELECTRA classifier (or rule-based fallback) adds punctuation and fixes capitalization. Cannot hallucinate.
 - **Stage 4d** -- Rule-based formatter converts spoken numbers, dates, times, currency, emails, and phone numbers to their written forms.
-- **Stage 4c** -- Qwen3 4B LLM via llama-cpp resolves self-corrections ("at 2, actually 4" becomes "at 4"). Only invoked when Stage 4a flags self-correction patterns. Context-aware: adapts tone based on the focused application. Lazy-loaded to save ~2.5GB RAM when not needed. Has a 3-second timeout and a 2x length hallucination guard.
+- **Stage 4c** -- Qwen3-4B-Instruct-2507 LLM via llama-cpp resolves self-corrections ("at 2, actually 4" becomes "at 4"). Only invoked when Stage 4a flags self-correction patterns. Context-aware: adapts tone based on the focused application. Lazy-loaded to save ~2.5GB RAM when not needed. Has a 3-second timeout and a 2x length hallucination guard.
 
 This split means 80%+ of dictations never touch a generative model.
 
@@ -200,7 +200,7 @@ polish:
   llm_always: false            # true = run LLM on every utterance
   context_awareness: true      # detect focused app, adjust LLM tone
   llm_backend: "llama-cpp"
-  llm_model: "Qwen3-4B-Q4_K_M"
+  llm_model: "Qwen3-4B-Instruct-2507-Q4_K_M"
   llm_device: "rocm"           # rocm (GPU) | cpu
   llm_threads: 0
 
@@ -302,7 +302,7 @@ src/linux_whisper/
         disfluency.py   # BERT ONNX / regex filler removal
         punctuation.py  # ELECTRA ONNX / rule-based punctuation
         formatting.py   # Rule-based number/date/time/currency/email formatting
-        llm.py          # Qwen3 4B via llama-cpp-python (ROCm GPU offload)
+        llm.py          # Qwen3-4B-Instruct-2507 via llama-cpp-python (ROCm GPU offload)
     inject/
         injector.py     # Display server detection, xdotool/wtype/ydotool/clipboard
 tests/
