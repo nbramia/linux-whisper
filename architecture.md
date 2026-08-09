@@ -53,7 +53,7 @@ The end-to-end pipeline has 6 stages. Each stage has a latency budget:
 | 4a | Disfluency removal | < 15ms | < 15ms | BERT token classifier / regex fallback |
 | 4b | Punctuation + caps | < 15ms | < 15ms | ELECTRA-small classifier / rule-based |
 | 4d | Number/date formatting | < 1ms | < 1ms | Rule-based spoken-form conversion |
-| 4c | Self-correction + grammar | **~200ms** | ~370ms | Qwen3 4B Q4_K_M (GPU), only when needed |
+| 4c | Self-correction + grammar | **~150ms** | ~370ms | Qwen3-4B-Instruct-2507 Q4_K_M (GPU), only when needed |
 | -- | Focused app detection | < 10ms | < 10ms | xdotool/swaymsg/hyprctl subprocess |
 | 5 | Text injection | < 20ms | < 20ms | ydotool/xdotool/wtype/clipboard |
 | **Total (simple)** | | **~350ms** | ~2.6s | **No self-corrections detected** |
@@ -329,12 +329,17 @@ We evaluated sub-4B models on **IFEval** (instruction following) as the critical
 | Llama 3.2 3B Instruct | 77.4 | 2.0GB | ~60-80 tok/s | Lighter but weaker on instruction following |
 | Qwen 2.5 3B Instruct | 58.2 | 2.0GB | ~60-80 tok/s | Poor instruction following at this size |
 
-**Primary: Qwen3 4B Instruct (Q4_K_M)**
+**Primary: Qwen3-4B-Instruct-2507 (Q4_K_M)**
 - IFEval ~87.8 — second-best instruction following, critical for "do NOT paraphrase"
 - 2.5GB Q4_K_M — 0.9GB lighter than Gemma 3 4B with only ~2.4% lower IFEval
 - ~50-70 tok/s on AVX-512 — generates 20-50 cleanup tokens in 300-700ms
 - Strong multilingual foundation for future language support
 - Served via `llama-cpp-python` (GGUF format), kept warm in RAM
+- **Instruct-only.** The original Qwen3-4B was a hybrid-reasoning checkpoint that needed a `/no_think` suffix appended to every system prompt to suppress reasoning traces. That workaround is gone.
+
+**The prompt's "delete nothing else" rule is load-bearing.** Without it this checkpoint compresses past the self-correction — dropping qualifiers like "just" and leading subjects like "Let's" — which reads as a summary rather than a transcript. Benchmarked: adding the rule moved exact-match from 40.9% to 45.5%.
+
+**Why not Qwen3.5-4B?** It is the better model on paper (Apache 2.0, non-thinking by default, ~9 points higher on the Artificial Analysis Intelligence Index) but its GGUF declares `general.architecture = qwen35`, which the vendored llama.cpp in `llama-cpp-python` 0.3.16 rejects with `unknown model architecture`. Adopting it means rebuilding llama-cpp-python from source with HIP for gfx1151, which puts the working ROCm offload path at risk. Revisit when that rebuild is done on its own terms — a newer llama.cpp would also unlock Qwen3-ASR via `mtmd`.
 
 **Alternative: Gemma 3 4B IT (Q4_K_M)**
 - IFEval 90.2 — absolute best instruction adherence in the sub-4B class
@@ -390,7 +395,7 @@ Raw STT transcript
               │ Yes
               ▼
 ┌─────────────────────────┐
-│ 4c: Qwen3 4B LLM       │  ~300ms, conditional
+│ 4c: Qwen3-4B-Instr LLM │  ~150ms, conditional
 │     Resolve corrections │
 │     Fix grammar         │
 └───────────┬─────────────┘
@@ -497,10 +502,10 @@ polish:
   enabled: true
   disfluency: true       # 4a: BERT filler/repetition removal
   punctuation: true       # 4b: ELECTRA punctuation + capitalization
-  llm: true               # 4c: Qwen3 4B self-correction + grammar
+  llm: true               # 4c: Qwen3-4B-Instruct-2507 self-correction + grammar
   llm_always: false       # true = run LLM on every utterance; false = only on self-corrections
   llm_backend: "llama-cpp"
-  llm_model: "Qwen3-4B-Instruct-Q4_K_M"
+  llm_model: "Qwen3-4B-Instruct-2507-Q4_K_M"
   llm_threads: 8          # CPU threads for LLM inference (0 = auto)
 
 # Audio
@@ -535,7 +540,7 @@ tray:
 | STT (batch alt) | `whisper.cpp` (via Python bindings) | AVX-512 optimized, GGML quantization |
 | Disfluency | BERT token classifier (ONNX) | Deterministic filler removal, ~10ms, zero hallucination |
 | Punctuation | ELECTRA-small (ONNX) | Token classification, ~5ms, outperforms GPT on this task |
-| LLM | `llama-cpp-python` | GGUF quantized Qwen3 4B, AVX-512 optimized, ~50-70 tok/s |
+| LLM | `llama-cpp-python` | GGUF quantized Qwen3-4B-Instruct-2507, AVX-512 optimized, ~50-70 tok/s |
 | Text injection | `ydotool` / `xdotool` / `wtype` | Covers X11 + all major Wayland compositors |
 | System tray | `pystray` | AppIndicator + StatusNotifier support |
 | Hotkey | `evdev` | Kernel-level, works on X11 + Wayland, no root needed |
@@ -562,14 +567,14 @@ The one exception: if we add ROCm GPU acceleration in v0.3+, PyTorch-ROCm may be
 
 ## Memory Budget
 
-STT and encoder models stay warm in RAM for instant response. The LLM (Qwen3 4B) is **lazy-loaded** — it remains unloaded until the disfluency detector first flags a self-correction, saving ~2.5GB idle RAM.
+STT and encoder models stay warm in RAM for instant response. The LLM (Qwen3-4B-Instruct-2507) is **lazy-loaded** — it remains unloaded until the disfluency detector first flags a self-correction, saving ~2.5GB idle RAM.
 
 | Component | RAM (Resident) | Notes |
 |-----------|---------------|-------|
 | faster-whisper large-v3-turbo (CTranslate2 INT8) | ~4,000MB | Default STT model |
 | BERT disfluency (ONNX) | ~110MB | Or ~1.3MB with INT8 distilled variant |
 | ELECTRA punctuation (ONNX) | ~60MB | Two 14M-param models |
-| Qwen3 4B Q4_K_M (llama.cpp) | ~2,500MB | **Lazy-loaded** — only when self-corrections detected |
+| Qwen3-4B-Instruct-2507 Q4_K_M (llama.cpp) | ~2,500MB | **Lazy-loaded** — only when self-corrections detected |
 | llama.cpp runtime overhead | ~100MB | Only when LLM is loaded |
 | ONNX Runtime overhead | ~100MB | Shared across all ONNX models |
 | Silero VAD | ~5MB | Tiny model |
@@ -731,7 +736,7 @@ dependencies = [
     "moonshine>=0.2",      # Moonshine v2 streaming
 
     # LLM
-    "llama-cpp-python>=0.3",  # Qwen3 4B GGUF inference
+    "llama-cpp-python>=0.3",  # Qwen3-4B-Instruct-2507 GGUF inference
 
     # Input
     "evdev>=1.7",

@@ -41,7 +41,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 _DEFAULT_MODEL_DIR = MODELS_DIR / "llm"
-_DEFAULT_MODEL_FILENAME = "Qwen3-4B-Q4_K_M.gguf"
+_DEFAULT_MODEL_FILENAME = "Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
 _DEFAULT_TIMEOUT_MS = 3000  # generous for cold start; warm inference is ~300ms
 _DEFAULT_TEMPERATURE = 0.0
 _DEFAULT_MAX_TOKENS = 256
@@ -49,8 +49,23 @@ _DEFAULT_MAX_TOKENS = 256
 # Focused system prompt — deliberately narrow.  Filler removal and punctuation
 # are already handled by stages 4a / 4b; the LLM only resolves semantic
 # self-corrections and grammar.
+#
+# No thinking-suppression suffix is needed: the default model is an
+# instruct-only checkpoint with no reasoning mode to switch off.  If you point
+# ``polish.llm_model`` at a hybrid-reasoning model (the original Qwen3-4B, for
+# instance) it may emit reasoning traces into the output — the benchmark
+# harness counts these as ``thinking_leaks``.
+#
+# The "delete nothing else" rule is load-bearing.  Without it the instruct
+# checkpoint compresses beyond the self-correction — dropping qualifiers like
+# "just" and leading subjects like "Let's" — which reads as a summary rather
+# than a transcript.
 _SYSTEM_PROMPT = """\
 You resolve self-corrections in dictated text. When someone changes their mind mid-sentence, keep ONLY the final version. Fix grammar. Output ONLY the result.
+
+Delete nothing except the abandoned half of a self-correction. Keep every
+other word, including qualifiers and the opening subject. Never shorten,
+summarise, or rephrase.
 
 Examples:
 "meet at 2, actually no at 4 on Friday" → "Meet at 4 on Friday."
@@ -58,7 +73,9 @@ Examples:
 "go with option A, actually option B is better" → "Go with option B."
 "the deadline is Monday, I mean Tuesday" → "The deadline is Tuesday."
 "move it to friday, actually no lets do it on monday" → "Let's do it on Monday."
-/no_think"""
+"the deploy just needs another review" → "The deploy just needs another review."
+"let's meet at two, actually make it four" → "Let's meet at four."
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +161,10 @@ class LLMCorrector:
 
     def _resolve_model_path(self) -> Path | None:
         """Determine the GGUF model file path from config."""
-        model_name = self._config.llm_model or "Qwen3-4B-Instruct-Q4_K_M"
+        # Falls back to the packaged default filename rather than a literal:
+        # the two drifted apart previously, so an empty ``llm_model`` resolved
+        # to a file that had never existed.
+        model_name = self._config.llm_model or _DEFAULT_MODEL_FILENAME
 
         # If the model name looks like an absolute path, use it directly.
         if "/" in model_name or model_name.endswith(".gguf"):

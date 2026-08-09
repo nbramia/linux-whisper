@@ -972,6 +972,30 @@ class TestLLMCorrectorModelPath:
         corrector = LLMCorrector(config=PolishConfig())
         path = corrector._resolve_model_path()
         assert path is not None
+        assert path.name == "Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
+
+    def test_config_default_matches_packaged_filename(self):
+        # The config default and _DEFAULT_MODEL_FILENAME must name the same
+        # file.  They drifted apart before, leaving the empty-config fallback
+        # pointing at a GGUF that had never existed.
+        from linux_whisper.polish.llm import _DEFAULT_MODEL_FILENAME
+
+        assert f"{PolishConfig().llm_model}.gguf" == _DEFAULT_MODEL_FILENAME
+
+    def test_resolve_empty_model_falls_back_to_packaged_default(self):
+        from linux_whisper.polish.llm import _DEFAULT_MODEL_FILENAME
+
+        corrector = LLMCorrector(config=PolishConfig(llm_model=""))
+        path = corrector._resolve_model_path()
+        assert path is not None
+        assert path.name == _DEFAULT_MODEL_FILENAME
+
+    def test_previous_model_remains_selectable(self):
+        # Rollback path: the old Qwen3-4B must stay loadable from config.
+        cfg = PolishConfig(llm_model="Qwen3-4B-Q4_K_M")
+        corrector = LLMCorrector(config=cfg)
+        path = corrector._resolve_model_path()
+        assert path is not None
         assert path.name == "Qwen3-4B-Q4_K_M.gguf"
 
     def test_resolve_gguf_suffix(self):
@@ -1164,3 +1188,26 @@ class TestPolishPipelineLLMConditional:
         # LLM should still be called because llm_always is True
         if pipeline._llm is not None and pipeline._llm._model is not None:
             pipeline._llm._model.create_chat_completion.assert_called_once()
+
+
+class TestSystemPromptHygiene:
+    """The system prompt must not carry model-specific workarounds."""
+
+    def test_no_thinking_suppression_hack(self):
+        from linux_whisper.polish.llm import _SYSTEM_PROMPT
+
+        # The default model is instruct-only, so there is no reasoning mode to
+        # switch off.  A stray /no_think would be dead weight in every prompt.
+        assert "/no_think" not in _SYSTEM_PROMPT
+        assert "/nothink" not in _SYSTEM_PROMPT.lower()
+
+    def test_prompt_still_forbids_paraphrasing(self):
+        from linux_whisper.polish.llm import _SYSTEM_PROMPT
+
+        assert "ONLY" in _SYSTEM_PROMPT
+
+    def test_prompt_retains_self_correction_examples(self):
+        from linux_whisper.polish.llm import _SYSTEM_PROMPT
+
+        assert "actually" in _SYSTEM_PROMPT
+        assert _SYSTEM_PROMPT.count("→") >= 5

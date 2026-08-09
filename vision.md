@@ -121,7 +121,7 @@ After dictating, hold the hotkey again and speak an editing command:
 | faster-whisper large-v3-turbo (INT8) | ~4GB | Default STT model |
 | BERT disfluency classifier | ~110MB | |
 | ELECTRA punctuation model | ~60MB | |
-| Qwen3 4B Instruct (Q4_K_M) | ~2.5GB | **Lazy-loaded** — only when self-corrections detected |
+| Qwen3-4B-Instruct-2507 (Q4_K_M) | ~2.5GB | **Lazy-loaded** — only when self-corrections detected |
 | Python runtime + overhead | ~200MB | |
 | **Total (idle)** | **~1.5GB** | LLM not loaded |
 | **Total (LLM warm)** | **~4GB** | After first self-correction triggers LLM load |
