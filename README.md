@@ -18,7 +18,7 @@ Local voice dictation for Linux. Press a hotkey, speak naturally with filler wor
 - **Voice snippets**: say a trigger phrase ("my email") to instantly expand configured text, bypassing the full pipeline
 - **Context-aware tone**: detects the focused application (Slack, email, terminal, etc.) and adjusts LLM output tone accordingly
 - **Number/date formatting**: spoken forms like "three hundred and fifty" or "march twenty second" are automatically converted to "350" and "March 22nd"
-- **Multiple STT backends**: Parakeet TDT v3 (default, CPU ONNX), whisper.cpp (GPU), faster-whisper (CTranslate2, CPU), Moonshine v2 (ONNX, streaming)
+- **Multiple STT backends**: whisper.cpp (default, GPU), Parakeet TDT v3 (CPU ONNX, faster but weaker on dictation), faster-whisper (CTranslate2, CPU), Moonshine v2 (ONNX, streaming)
 - **Hot-swappable models** from the system tray menu with automatic config persistence
 - **Four-stage polish pipeline**: BERT disfluency removal, ELECTRA/rule-based punctuation, spoken-form formatting, conditional LLM correction
 - **Pre-roll buffer** (750ms) captures audio before the hotkey press
@@ -185,10 +185,10 @@ mode: "auto"
 
 # Speech-to-text engine
 stt:
-  backend: "parakeet"          # parakeet | whisper-cpp | faster-whisper | moonshine
-  model: "parakeet-tdt-0.6b-v3"
-  device: "rocm"               # rocm (GPU) | cpu — Parakeet always runs on CPU
-  threads: 0                   # CPU threads (0 = auto; Parakeet caps the default at 8)
+  backend: "whisper-cpp"       # whisper-cpp | parakeet | faster-whisper | moonshine
+  model: "whisper-large-v3-turbo"
+  device: "rocm"               # rocm (GPU) | cpu — auto-falls back to CPU
+  threads: 0                   # CPU threads (0 = auto)
 
 # Polish pipeline — cleans up raw transcripts
 polish:

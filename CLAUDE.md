@@ -115,18 +115,18 @@ Referenced during planning to assess whether a change is safe.
 |-------|--------------|-------------|
 | 1. Hotkey detection | < 5ms | < 5ms |
 | 2. Audio + VAD + AGC | < 10ms | < 10ms |
-| 3. STT (Parakeet TDT v3, CPU) | ~190ms | ~190ms |
+| 3. STT (whisper.cpp large-v3-turbo) | ~285ms | ~2.5s |
 | 4a. Disfluency removal | < 15ms | < 15ms |
 | 4b. Punctuation | < 15ms | < 15ms |
 | 4d. Number/date formatting | < 1ms | < 1ms |
 | 4c. LLM correction (conditional) | ~150ms | ~370ms |
 | 5. Text injection | < 20ms | < 20ms |
-| **Total (simple)** | **~240ms** | **~240ms** |
-| **Total (with LLM)** | **~390ms** | **~560ms** |
+| **Total (simple)** | **~340ms** | **~2.6s** |
+| **Total (with LLM)** | **~490ms** | **~2.9s** |
 
-The default STT backend (Parakeet TDT v3) runs INT8 ONNX on the **CPU** — it beat whisper.cpp on the ROCm GPU on both WER and latency, and staying on CPU sidesteps the onnxruntime/pywhispercpp `libamdhip64` conflict entirely.
+The default STT backend is whisper.cpp large-v3-turbo on the ROCm GPU, in a subprocess worker (the pywhispercpp/onnxruntime `libamdhip64` conflict is why).
 
-The whisper.cpp GPU backend remains supported and still runs in a subprocess worker (that conflict is why). Do not delete it — it is the proven fallback.
+**Benchmark corpora do not decide the default; recorded dictation does.** Parakeet TDT v3 beat whisper on LibriSpeech (0.54% vs 1.48% WER, 191ms vs 285ms p50) and was made default on that basis — then lost 49.3% to 21.5% on 28 real dictation clips. LibriSpeech contains no digits, symbols, or filenames, so it never tested inverse text normalisation, which is most of what dictation is. Always confirm an STT change against `--fixtures-dir` recordings before touching the default.
 
 ## Key Files
 

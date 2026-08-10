@@ -33,8 +33,8 @@ class TestDefaults:
 
     def test_stt_defaults(self):
         stt = STTConfig()
-        assert stt.backend == "parakeet"
-        assert stt.model == "parakeet-tdt-0.6b-v3"
+        assert stt.backend == "whisper-cpp"
+        assert stt.model == "whisper-large-v3-turbo"
         assert stt.device == "rocm"
         assert stt.threads == 0
 
@@ -84,7 +84,7 @@ class TestFromDict:
         assert cfg.hotkey == "alt+d"
         assert cfg.mode == "toggle"
         # Nested defaults still hold
-        assert cfg.stt.backend == "parakeet"
+        assert cfg.stt.backend == "whisper-cpp"
 
     def test_nested_override(self):
         cfg = Config.from_dict({
@@ -273,13 +273,13 @@ class TestMergeDataclass:
     def test_partial_overrides(self):
         result = _merge_dataclass(STTConfig, {"backend": "whisper-cpp"})
         assert result.backend == "whisper-cpp"
-        assert result.model == "parakeet-tdt-0.6b-v3"  # untouched default
+        assert result.model == "whisper-large-v3-turbo"  # untouched default
 
     def test_skips_VALID_constants(self):
         # VALID_BACKENDS is a class variable, not a constructor param.
         # _merge_dataclass must skip it.
         result = _merge_dataclass(STTConfig, {"VALID_BACKENDS": ("fake",)})
-        assert result.backend == "parakeet"
+        assert result.backend == "whisper-cpp"
 
 
 # ── _dataclass_to_dict ──────────────────────────────────────────────────────
@@ -304,7 +304,7 @@ class TestDataclassToDict:
         assert "hotkey" in d
         assert "stt" in d
         assert isinstance(d["stt"], dict)
-        assert d["stt"]["backend"] == "parakeet"
+        assert d["stt"]["backend"] == "whisper-cpp"
         # VALID_ keys should not appear
         assert "VALID_BACKENDS" not in d["stt"]
         assert "VALID_MODES" not in d
