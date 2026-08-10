@@ -19,11 +19,12 @@ MODELS_DIR = CACHE_DIR / "models"
 
 @dataclass(frozen=True)
 class STTConfig:
-    # Parakeet is the default on measured accuracy and latency (see
-    # architecture.md).  To go back to the previous default, set:
-    #     stt: {backend: whisper-cpp, model: whisper-large-v3-turbo}
-    backend: str = "parakeet"
-    model: str = "parakeet-tdt-0.6b-v3"
+    # whisper.cpp is the default.  Parakeet briefly held this slot on
+    # LibriSpeech numbers and lost it on real dictation — LibriSpeech contains
+    # no digits, symbols, or filenames, so it never tested inverse text
+    # normalisation, which dominates dictation.  See architecture.md.
+    backend: str = "whisper-cpp"
+    model: str = "whisper-large-v3-turbo"
     device: str = "rocm"  # cpu | rocm
     threads: int = 0  # 0 = auto
 
