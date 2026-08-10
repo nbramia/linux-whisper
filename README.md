@@ -362,4 +362,18 @@ See [CLAUDE.md](CLAUDE.md) for the agent operating rules and [.claude/skills/](.
 
 ## License
 
-MIT License. See [LICENSE](LICENSE) for details.
+The **code** is MIT licensed. See [LICENSE](LICENSE) for details.
+
+The **models** Linux Whisper downloads are separately licensed and are not covered
+by this project's MIT grant. Check them against your own use case:
+
+| Model | Used for | License |
+|-------|----------|---------|
+| Whisper large-v3-turbo | STT (default) | MIT |
+| Silero VAD v6 | Voice activity detection | MIT |
+| Qwen3-4B-Instruct-2507 | Self-correction (stage 4c) | Apache 2.0 |
+| Parakeet TDT 0.6B v3 | STT (optional backend) | **CC-BY-4.0 — attribution required** |
+| Moonshine | STT (optional backend) | See upstream model card |
+
+Parakeet is the one to watch: CC-BY-4.0 requires attribution if you redistribute,
+which the other defaults do not.
