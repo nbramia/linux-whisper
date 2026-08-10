@@ -278,6 +278,10 @@ DEFAULT_LATENCY_RATIO = 1.10
 DEFAULT_QUALITY_TOLERANCE = 0.05
 DEFAULT_VAD_TOLERANCE = 0.10
 DEFAULT_PUNCTUATION_RATE_TOLERANCE = 3.0
+# Below this, a latency ratio is measuring scheduler noise, not the change.
+# Stage 4a/4b/4d run in tens of microseconds, where a 10% "regression" is
+# 0.015ms and means nothing.
+LATENCY_FLOOR_MS = 5.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,6 +295,7 @@ class Thresholds:
 
     wer_abs: float = DEFAULT_WER_TOLERANCE
     latency_ratio: float = DEFAULT_LATENCY_RATIO
+    latency_floor_ms: float = LATENCY_FLOOR_MS
     punctuation_f1_abs: float = DEFAULT_QUALITY_TOLERANCE
     capitalization_abs: float = DEFAULT_QUALITY_TOLERANCE
     # VAD rates swing more between runs than text metrics, so a wider band.
@@ -376,6 +381,9 @@ def compare_runs(
             continue
         b, c = base_stage.get("p95_ms"), stage_data.get("p95_ms")
         if not isinstance(b, int | float) or not isinstance(c, int | float):
+            continue
+        # Ignore stages too fast for a ratio to mean anything.
+        if b < thresholds.latency_floor_ms and c < thresholds.latency_floor_ms:
             continue
         if b > 0 and c > b * thresholds.latency_ratio:
             regressions.append(

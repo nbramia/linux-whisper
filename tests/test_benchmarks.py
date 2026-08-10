@@ -360,6 +360,24 @@ class TestCompareRuns:
         candidate = _run(stt={"wer": 0.0054, "punctuation_rate": 12.5})
         assert metrics.compare_runs(baseline, candidate) == []
 
+    def test_submillisecond_stages_are_not_gated(self) -> None:
+        # Stage 4a/4b/4d run in tens of microseconds. A 10% ratio there is
+        # ~0.015ms of scheduler noise, which produced false regressions.
+        baseline = _run(latency={"polish_4d": {"p95_ms": 0.045}})
+        candidate = _run(latency={"polish_4d": {"p95_ms": 0.060}})
+        assert metrics.compare_runs(baseline, candidate) == []
+
+    def test_real_latency_still_gated_above_the_floor(self) -> None:
+        baseline = _run(latency={"stt": {"p95_ms": 300.0}})
+        candidate = _run(latency={"stt": {"p95_ms": 400.0}})
+        assert len(metrics.compare_runs(baseline, candidate)) == 1
+
+    def test_crossing_the_floor_is_still_gated(self) -> None:
+        # A stage that goes from trivial to genuinely slow must not be excused.
+        baseline = _run(latency={"polish_4d": {"p95_ms": 0.05}})
+        candidate = _run(latency={"polish_4d": {"p95_ms": 50.0}})
+        assert len(metrics.compare_runs(baseline, candidate)) == 1
+
     def test_regression_formats_readably(self) -> None:
         regression = metrics.Regression("stt.wer", 0.05, 0.09, "+0.0050 abs")
         formatted = regression.format()

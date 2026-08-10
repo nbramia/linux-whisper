@@ -1302,3 +1302,182 @@ class TestIsLiteralToken:
         from linux_whisper.polish.punctuation import _is_literal_token
 
         assert _is_literal_token(token) is False
+
+
+class TestSpokenYearFormatting:
+    """Spoken years are read as paired numbers, not summed.
+
+    "twenty twenty six" is 2026, not 20 + 20 + 6 = 46. The summing behaviour
+    silently corrupted every dictated year this decade (issue #32).
+    """
+
+    @pytest.fixture()
+    def formatter(self):
+        from linux_whisper.polish.formatting import SpokenFormFormatter
+
+        return SpokenFormFormatter()
+
+    @pytest.mark.parametrize(
+        ("words", "expected"),
+        [
+            (["twenty", "twenty", "six"], 2026),
+            (["twenty", "twenty"], 2020),
+            (["nineteen", "ninety", "nine"], 1999),
+            (["nineteen", "eighty", "four"], 1984),
+            (["two", "thousand", "twenty", "six"], 2026),
+        ],
+    )
+    def test_years_parse(self, words, expected):
+        from linux_whisper.polish.formatting import _words_to_year
+
+        assert _words_to_year(words) == expected
+
+    @pytest.mark.parametrize(
+        "words",
+        [
+            ["twenty", "three"],       # 23, not 2003
+            ["thirty", "five"],        # 35, not 3005
+            ["three", "hundred"],      # not a year
+            ["five"],                  # too short
+            [],
+        ],
+    )
+    def test_non_years_rejected(self, words):
+        from linux_whisper.polish.formatting import _words_to_year
+
+        assert _words_to_year(words) is None
+
+    def test_date_with_year(self, formatter):
+        out = formatter.process("lets ship on march fifteenth twenty twenty six")
+        assert out == "lets ship on March 15, 2026"
+
+    def test_date_without_year_keeps_ordinal(self, formatter):
+        assert formatter.process("lets ship on march twenty second") == "lets ship on March 22nd"
+
+    def test_bare_year(self, formatter):
+        assert formatter.process("the release was in nineteen ninety nine") == (
+            "the release was in 1999"
+        )
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("the build took twenty three minutes", "the build took 23 minutes"),
+            ("she is twenty five years old", "she is 25 years old"),
+            ("i counted three hundred and fifty items", "i counted 350 items"),
+        ],
+    )
+    def test_ordinary_numbers_unaffected(self, formatter, text, expected):
+        # The year rule must not capture ordinary compounds.
+        assert formatter.process(text) == expected
+
+
+class TestPercentAndMeridiem:
+
+    @pytest.fixture()
+    def formatter(self):
+        from linux_whisper.polish.formatting import SpokenFormFormatter
+
+        return SpokenFormFormatter()
+
+    def test_percent(self, formatter):
+        assert formatter.process("latency dropped by forty percent") == (
+            "latency dropped by 40%"
+        )
+
+    def test_percent_compound(self, formatter):
+        assert formatter.process("it grew by twenty five percent") == "it grew by 25%"
+
+    def test_split_meridiem(self, formatter):
+        # Dictation splits "a.m." into two tokens: "nine thirty a m".
+        assert formatter.process("the standup is at nine thirty a m") == (
+            "the standup is at 9:30 AM"
+        )
+
+    def test_joined_meridiem_still_works(self, formatter):
+        assert formatter.process("the meeting is at four thirty PM") == (
+            "the meeting is at 4:30 PM"
+        )
+
+    def test_single_number_word_left_alone(self, formatter):
+        # Deliberate: converting bare cardinals would turn "one of the things"
+        # into "1 of the things".
+        assert formatter.process("one of the things we discussed") == (
+            "one of the things we discussed"
+        )
+        assert formatter.process("i need fifteen units") == "i need fifteen units"
+
+
+class TestOnnxPunctuationPath:
+    """First coverage for the ELECTRA path, which no test previously exercised.
+
+    The models are not present on any dev machine, so this path silently never
+    ran. Dropping models in would have switched the live pipeline to untested
+    code — and would have bypassed the code-token guard that the rule path
+    gained, re-breaking every dictated filename.
+    """
+
+    @staticmethod
+    def _restorer_with_fake_models(punct_label: int, cap_label: int):
+        """A PunctuationRestorer whose ONNX sessions always predict the same labels."""
+        import numpy as np
+
+        from linux_whisper.polish.punctuation import PunctuationRestorer
+
+        class FakeSession:
+            def __init__(self, label: int, n_labels: int) -> None:
+                self._label = label
+                self._n = n_labels
+
+            def run(self, _outputs, feed):
+                n_tokens = feed["input_ids"].shape[1]
+                logits = np.zeros((1, n_tokens, self._n), dtype=np.float32)
+                logits[0, :, self._label] = 10.0
+                return [logits]
+
+        r = PunctuationRestorer(model_dir=Path("/nonexistent/model"))
+        r._punct_session = FakeSession(punct_label, 7)
+        r._caps_session = FakeSession(cap_label, 3)
+        r._vocab = {"[CLS]": 101, "[SEP]": 102, "[UNK]": 100}
+        r._using_onnx = True
+        return r
+
+    def test_model_predictions_apply_to_prose(self):
+        # Sanity check the harness: with "capitalise + period" forced, prose
+        # should come back capitalised and punctuated.
+        r = self._restorer_with_fake_models(punct_label=2, cap_label=1)
+        assert r.process("hello there") == "Hello. There."
+
+    def test_code_tokens_bypass_the_model(self):
+        # Same forced predictions — code tokens must be untouched.
+        r = self._restorer_with_fake_models(punct_label=2, cap_label=1)
+        assert r.process("server-test.sh") == "server-test.sh"
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "server-test.sh",
+            "src/linux_whisper/stt/parakeet.py",
+            "/var/log/syslog",
+            ".env",
+            "max_default_threads",
+            "getUserById",
+            "--no-cache",
+            "0.3.34",
+        ],
+    )
+    def test_every_literal_form_survives_the_model(self, token):
+        r = self._restorer_with_fake_models(punct_label=2, cap_label=2)
+        assert token in r.process(f"run {token} now")
+
+    def test_mixed_prose_and_code(self):
+        r = self._restorer_with_fake_models(punct_label=0, cap_label=1)
+        out = r.process("open src/main.py now")
+        assert "src/main.py" in out
+        assert out.startswith("Open")
+
+    def test_onnx_path_is_actually_taken(self):
+        r = self._restorer_with_fake_models(punct_label=0, cap_label=0)
+        assert r._using_onnx is True
+        # Would raise AssertionError inside _process_onnx if sessions were None.
+        r.process("some text")

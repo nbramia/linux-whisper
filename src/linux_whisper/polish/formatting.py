@@ -110,6 +110,49 @@ def _words_to_number(words: list[str]) -> int | None:
     return result + current
 
 
+# Words that can lead a spoken year: "nineteen ninety nine", "twenty twenty six".
+# Bounded to 13-29 so ordinary counting ("three hundred and fifty") is untouched.
+_CENTURY_LEADS: dict[str, int] = {
+    w: v for w, v in {**_ONES, **_TENS}.items() if 13 <= v <= 29
+}
+
+
+def _words_to_year(words: list[str]) -> int | None:
+    """Convert a spoken year to an integer, or None if it is not one.
+
+    Spoken years are read as two paired numbers rather than as a single value:
+    "twenty twenty six" is 2026, not 20 + 20 + 6 = 46.  :func:`_words_to_number`
+    computes the latter, which silently corrupted every dictated year in this
+    decade until this function was added.
+
+    Handles the paired form ("nineteen ninety nine", "twenty twenty") and defers
+    the explicit form ("two thousand twenty six") to ``_words_to_number``, which
+    already gets it right.
+    """
+    if not words:
+        return None
+    tokens = [w for w in words if w != "and"]
+    if len(tokens) < 2:
+        return None
+
+    lead = _CENTURY_LEADS.get(tokens[0])
+    if lead is None:
+        # Not a paired year — "two thousand twenty six" and friends.
+        value = _words_to_number(tokens)
+        return value if value is not None and 1000 <= value <= 2999 else None
+
+    remainder = _words_to_number(tokens[1:])
+    if remainder is None or not 0 <= remainder <= 99:
+        return None
+    # The remainder must itself be a decade ("ninety nine", "twenty", "oh five"
+    # is not supported), which is what separates a year from an ordinary
+    # compound number.  Without this, "twenty three" would read as 2003 and
+    # "twenty three minutes" would become "2003 minutes".
+    if 0 < remainder < 10:
+        return None
+    return lead * 100 + remainder
+
+
 def _ordinal_suffix(n: int) -> str:
     """Return the ordinal suffix for a number (e.g. 1 -> '1st')."""
     if 11 <= (n % 100) <= 13:
@@ -235,10 +278,20 @@ def _format_times(text: str) -> str:
                     if j < len(words):
                         ampm_bare = words[j].upper().rstrip(".,?!;:")
                         ampm_trailing = words[j][len(words[j].rstrip(".,?!;:")):]
-                        if ampm_bare in ("AM", "PM"):
-                            am_pm = f" {ampm_bare}"
+                        if ampm_bare in ("AM", "PM", "A.M.", "P.M."):
+                            am_pm = f" {ampm_bare[0]}M"
                             trailing = ampm_trailing
                             j += 1
+                        elif ampm_bare in ("A", "P") and j + 1 < len(words):
+                            # Dictation splits the meridiem into two tokens:
+                            # "nine thirty a m".  Without this the transcript
+                            # keeps a bare "a m" that no downstream stage fixes.
+                            second = words[j + 1].upper().rstrip(".,?!;:")
+                            if second == "M":
+                                am_pm = f" {ampm_bare}M"
+                                last = words[j + 1]
+                                trailing = last[len(last.rstrip(".,?!;:")):]
+                                j += 2
 
                     if not trailing:
                         # Get trailing punct from last consumed word
@@ -256,6 +309,24 @@ def _format_times(text: str) -> str:
             i += 1
 
     return " ".join(result)
+
+
+def _append_year(words: list[str], start: int, prefix: str) -> tuple[str | None, int]:
+    """Try to consume a spoken year at *start*, returning ("<prefix>, <year>", next_i).
+
+    Returns (None, start) when the following words are not a year, so the caller
+    can fall back to its ordinal-only rendering.
+    """
+    for length in (3, 2):
+        if start + length > len(words):
+            continue
+        chunk = [w.lower().rstrip(".,?!;:") for w in words[start : start + length]]
+        year = _words_to_year(chunk)
+        if year is not None and 1000 <= year <= 2999:
+            last = words[start + length - 1]
+            trailing = last[len(last.rstrip(".,?!;:")):]
+            return f"{prefix}, {year}{trailing}", start + length
+    return None, start
 
 
 def _format_dates(text: str) -> str:
@@ -284,8 +355,13 @@ def _format_dates(text: str) -> str:
 
                 if tens_bare in _TENS and ones_bare in _ORDINAL_ONES:
                     day = _TENS[tens_bare] + _ORDINAL_ONES[ones_bare][0]
-                    result.append(f"{month_cap} {_ordinal_suffix(day)}{trailing}")
-                    i = j + 2
+                    piece, next_i = _append_year(words, j + 2, f"{month_cap} {day}")
+                    if piece is None:
+                        result.append(f"{month_cap} {_ordinal_suffix(day)}{trailing}")
+                        i = j + 2
+                    else:
+                        result.append(piece)
+                        i = next_i
                     continue
 
             # Try simple ordinal: "first", "tenth", "twentieth"
@@ -293,9 +369,14 @@ def _format_dates(text: str) -> str:
                 ord_bare = words[j].lower().rstrip(".,?!;:")
                 trailing = words[j][len(words[j].rstrip(".,?!;:")):]
                 if ord_bare in _ORDINAL_WORD_MAP:
-                    _, day_str = _ORDINAL_WORD_MAP[ord_bare]
-                    result.append(f"{month_cap} {day_str}{trailing}")
-                    i = j + 1
+                    day_num, day_str = _ORDINAL_WORD_MAP[ord_bare]
+                    piece, next_i = _append_year(words, j + 1, f"{month_cap} {day_num}")
+                    if piece is None:
+                        result.append(f"{month_cap} {day_str}{trailing}")
+                        i = j + 1
+                    else:
+                        result.append(piece)
+                        i = next_i
                     continue
 
             result.append(words[i])
@@ -391,6 +472,48 @@ def _format_currency(text: str) -> str:
     return " ".join(result)
 
 
+def _format_percent(text: str) -> str:
+    """Convert '<number words> percent' to '<digits>%'.
+
+    Runs before cardinal formatting because a single number word ("forty") is
+    left alone there — see :func:`_format_cardinal_numbers` — but "forty percent"
+    is unambiguous, so the trailing unit licenses the conversion.
+    """
+    words = text.split()
+    result: list[str] = []
+    i = 0
+
+    while i < len(words):
+        bare = words[i].lower().rstrip(".,?!;:")
+        if bare in _NUMBER_WORDS and bare != "and":
+            j = i
+            number_words: list[str] = []
+            while j < len(words):
+                nbare = words[j].lower().rstrip(".,?!;:")
+                if nbare in _NUMBER_WORDS:
+                    number_words.append(nbare)
+                    j += 1
+                else:
+                    break
+            next_bare = words[j].lower().rstrip(".,?!;:") if j < len(words) else ""
+            if next_bare in ("percent", "percents"):
+                parsed = _words_to_number(number_words)
+                if parsed is not None:
+                    last = words[j]
+                    trailing = last[len(last.rstrip(".,?!;:")):]
+                    result.append(f"{parsed}%{trailing}")
+                    i = j + 1
+                    continue
+            for idx in range(i, j):
+                result.append(words[idx])
+            i = j if j > i else i + 1
+        else:
+            result.append(words[i])
+            i += 1
+
+    return " ".join(result)
+
+
 def _format_cardinal_numbers(text: str) -> str:
     """Convert multi-word spoken numbers to digits.
 
@@ -431,7 +554,12 @@ def _format_cardinal_numbers(text: str) -> str:
             meaningful = [w for w in number_words if w not in ("and", "a")]
             has_scale = any(w in _SCALES for w in meaningful)
             if len(meaningful) >= 2 or (has_scale and len(number_words) >= 2):
-                parsed = _words_to_number(number_words)
+                # A paired-decade sequence is a spoken year, and summing it is
+                # never what the speaker meant: "nineteen ninety nine" is 1999,
+                # not 19 + 99 = 118.
+                parsed = _words_to_year(number_words)
+                if parsed is None:
+                    parsed = _words_to_number(number_words)
                 if parsed is not None:
                     trailing = words[j - 1][len(words[j - 1].rstrip(".,?!;:")):]
                     result.append(f"{parsed}{trailing}")
@@ -479,5 +607,8 @@ class SpokenFormFormatter:
         current = _format_times(current)
         current = _format_dates(current)
         current = _format_currency(current)
+        # Percent runs before cardinals: it converts single number words that
+        # cardinal formatting deliberately leaves alone.
+        current = _format_percent(current)
         current = _format_cardinal_numbers(current)
         return current
