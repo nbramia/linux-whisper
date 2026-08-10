@@ -316,9 +316,32 @@ def _remove_fillers(text: str) -> str:
     return _FILLER_RE.sub("", text)
 
 
+# Repeated number words are almost never a stammer.  Spoken years repeat by
+# construction ("twenty twenty six" is 2026, "twenty twenty" is 2020), and
+# "fifty fifty" is an idiom.  Collapsing them silently destroyed every dictated
+# year in this decade before stage 4d ever saw the text.
+_NUMBER_WORDS_NO_COLLAPSE: frozenset[str] = frozenset({
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
+    "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen",
+    "sixteen", "seventeen", "eighteen", "nineteen", "twenty", "thirty",
+    "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
+    "hundred", "thousand", "million", "billion",
+})
+
+
 def _remove_repetitions(text: str) -> str:
-    """Collapse consecutive repeated words: 'I I I think' → 'I think'."""
-    return _REPETITION_RE.sub(r"\1", text)
+    """Collapse consecutive repeated words: 'I I I think' → 'I think'.
+
+    Number words are exempt — see :data:`_NUMBER_WORDS_NO_COLLAPSE`.
+    """
+
+    def _collapse(match: re.Match[str]) -> str:
+        word = match.group(1)
+        if word.lower() in _NUMBER_WORDS_NO_COLLAPSE:
+            return match.group(0)
+        return word
+
+    return _REPETITION_RE.sub(_collapse, text)
 
 
 def _normalise_whitespace(text: str) -> str:

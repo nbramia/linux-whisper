@@ -311,6 +311,15 @@ class PunctuationRestorer:
         for i, word_idx in enumerate(token_map):
             word = words[word_idx]
 
+            # Code-like tokens bypass the model entirely.  The model was trained
+            # on prose and will happily capitalise a filename or append a period
+            # to a path, which breaks it — exactly as the rule path did before
+            # the same guard was added there.  A model prediction is not more
+            # trustworthy than a rule when the input is not prose.
+            if _is_literal_token(word):
+                result_tokens.append(word)
+                continue
+
             # Capitalisation
             cap_label = int(np.argmax(caps_logits[i]))
             cap_kind = _CAP_LABELS.get(cap_label, "lower")

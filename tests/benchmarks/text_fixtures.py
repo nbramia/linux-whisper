@@ -68,9 +68,10 @@ POLISH_FIXTURES: list[TextFixture] = [
     # ── Self-corrections — these should wake stage 4c ─────────────────────
     TextFixture(
         id="self-correction-time",
+        # Same reason as self-correction-quantity: bare "four" is left alone.
         raw="lets meet at two actually make it four",
-        expected="Let's meet at 4.",
-        tags=("self-correction", "formatting"),
+        expected="Let's meet at four.",
+        tags=("self-correction",),
     ),
     TextFixture(
         id="self-correction-name",
@@ -80,9 +81,13 @@ POLISH_FIXTURES: list[TextFixture] = [
     ),
     TextFixture(
         id="self-correction-quantity",
+        # "fifteen" stays a word on purpose.  Single number words are not
+        # converted — see _format_cardinal_numbers — because "one of the things"
+        # would become "1 of the things".  The self-correction is what is being
+        # scored here, not the digit form.
         raw="we need about fifty units i mean fifteen units",
-        expected="We need about 15 units.",
-        tags=("self-correction", "formatting"),
+        expected="We need about fifteen units.",
+        tags=("self-correction",),
     ),
     TextFixture(
         id="self-correction-day",
