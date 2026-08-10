@@ -20,6 +20,27 @@ Read `architecture.md` for pipeline details, `vision.md` for design principles, 
 - Branch naming: `<type>/<issue>-<short-description>`.
 - **Maintain documentation as you go.** A change that alters behaviour, models, latency, or config updates `architecture.md`, `README.md`, and this file in the *same* PR — never as a follow-up.
 
+## Pull Requests and Merging
+
+- **Verification gate before opening a PR:** `python -m pytest tests/`,
+  `ruff check src/ tests/`, and `python -c "import linux_whisper"`. A change to
+  the CLI also runs `linux-whisper --help` and `linux-whisper config validate`.
+- **PR body:** a summary of what and why, a bullet list of changes,
+  `Closes #N` / `Refs #N`, the pasted test and lint output, and a
+  latency/memory impact line — state "no impact on latency budgets or memory
+  usage" explicitly when there is none.
+- **Size:** under 200 changed lines across 1–3 files is the target, 200–500 is
+  acceptable, and 500+ lines or 8+ files needs a justification in the
+  description. A new pipeline stage, a refactor that has to be atomic, or
+  generated code are good justifications.
+- **Issue acceptance criteria** always include the pytest and ruff gates, and
+  add a latency or memory criterion for anything touching audio, STT, or the
+  polish pipeline.
+- **Merging:** squash-merge and delete the branch. Use a regular merge only when
+  the individual commits tell a story worth keeping. Never merge a draft PR, a
+  PR with failing CI, or a branch whose suite does not pass — rebase on `main`
+  and re-run pytest and ruff after resolving conflicts.
+
 ## Dependency Rebuilds
 
 `llama-cpp-python` is built **from source with HIP** for gfx1151, not installed from a wheel:
