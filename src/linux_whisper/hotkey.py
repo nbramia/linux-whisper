@@ -19,6 +19,7 @@ Supported modes (set in ``Config.mode``):
 from __future__ import annotations
 
 import logging
+import os
 import select
 import threading
 import time
@@ -345,29 +346,99 @@ class HotkeyDaemon:
     # -- device management --------------------------------------------------
 
     @staticmethod
+    def _handle_is_current(dev: InputDevice) -> bool:
+        """True if *dev*'s fd still refers to the device now at ``dev.path``.
+
+        Compares inodes rather than probing the device, because **neither of the
+        obvious checks works**:
+
+        * ``select()`` never marks a destroyed device readable, so the
+          ``OSError`` from ``read()`` that would trigger recovery never fires.
+        * An ioctl on the stale fd still *succeeds* — the character device stays
+          alive as long as anyone holds it open, so ``capabilities()`` happily
+          returns the old device's data forever.
+
+        When a device is destroyed and recreated, devtmpfs allocates a **new
+        inode** for ``/dev/input/eventN`` even when the number is reused. That
+        is the only signal that reliably distinguishes "same device, idle" from
+        "replaced by an impostor at the same path".
+        """
+        try:
+            return os.fstat(dev.fd).st_ino == os.stat(dev.path).st_ino
+        except (OSError, ValueError):
+            return False
+
+    @staticmethod
+    def _device_identity(dev: InputDevice) -> tuple[str, str, str]:
+        """Stable identity for *dev*, used to spot a same-path replacement."""
+        return (
+            getattr(dev, "name", "") or "",
+            getattr(dev, "phys", "") or "",
+            getattr(dev, "uniq", "") or "",
+        )
+
+    @staticmethod
     def _rescan_devices(current: dict[str, InputDevice]) -> None:
-        """Add newly appeared devices and prune stale ones."""
+        """Refresh the tracked device set.
+
+        Keying purely on path is not sufficient.  Bluetooth keyboards and
+        virtual devices from key remappers are destroyed and recreated at the
+        *same* ``/dev/input/eventN`` number, so a path-only check treats the
+        replacement as already-tracked, discards the fresh handle, and keeps a
+        dead one forever.  The hotkey then stops working with no error logged
+        and no recovery short of a restart.
+        """
         found = _find_keyboard_devices()
-        found_paths = {dev.path for dev in found}
 
-        # Add new devices.
+        # Deduplicate by path first so a single scan cannot leak handles.
+        fresh_by_path: dict[str, InputDevice] = {}
         for dev in found:
-            if dev.path not in current:
-                logger.debug("Tracking new keyboard: %s (%s)", dev.path, dev.name)
-                current[dev.path] = dev
-            else:
-                # We already track this path — close the duplicate handle.
-                dev.close()
+            if dev.path in fresh_by_path:
+                HotkeyDaemon._safe_close(dev)
+                continue
+            fresh_by_path[dev.path] = dev
 
-        # Remove devices that vanished.
-        stale = [p for p in current if p not in found_paths]
-        for path in stale:
-            logger.debug("Removing stale device: %s", path)
-            try:
-                current[path].close()
-            except OSError:
-                pass
-            del current[path]
+        for path, fresh in fresh_by_path.items():
+            existing = current.get(path)
+
+            if existing is None:
+                logger.debug("Tracking new keyboard: %s (%s)", path, fresh.name)
+                current[path] = fresh
+                continue
+
+            current_handle = HotkeyDaemon._handle_is_current(existing)
+            same = HotkeyDaemon._device_identity(existing) == HotkeyDaemon._device_identity(
+                fresh
+            )
+            if current_handle and same:
+                # Genuinely the same live device — keep the handle we already
+                # have and drop the duplicate.
+                HotkeyDaemon._safe_close(fresh)
+                continue
+
+            logger.info(
+                "Replacing %s handle (%s): %s",
+                path,
+                "stale fd" if not current_handle else "device changed",
+                fresh.name,
+            )
+            HotkeyDaemon._safe_close(existing)
+            current[path] = fresh
+
+        # Remove devices whose path vanished entirely.
+        for path in [p for p in current if p not in fresh_by_path]:
+            logger.debug("Removing vanished device: %s", path)
+            HotkeyDaemon._safe_close(current.pop(path))
+
+    @staticmethod
+    def _safe_close(dev: InputDevice | None) -> None:
+        """Close *dev*, ignoring an already-closed or already-gone device."""
+        if dev is None:
+            return
+        try:
+            dev.close()
+        except (OSError, ValueError):
+            pass
 
     @staticmethod
     def _close_device(devices: dict[str, InputDevice], path: str) -> None:

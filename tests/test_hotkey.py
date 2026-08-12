@@ -590,3 +590,186 @@ class TestFindKeyboardDevices:
                 devices = _find_keyboard_devices()
 
         assert len(devices) == 0
+
+
+# ── Device rescan: stale-handle recovery ───────────────────────────────────
+
+
+class _FakeDevice:
+    """Minimal InputDevice stand-in for rescan tests.
+
+    ``fd_ino`` is the inode the held descriptor refers to; ``node_ino`` is the
+    inode currently at ``path``. They differ exactly when the device has been
+    destroyed and recreated at the same path — the case that broke the daemon.
+    """
+
+    def __init__(self, path, name="kbd", phys="usb-1", uniq="", fd_ino=1, node_ino=None):
+        self.path = path
+        self.name = name
+        self.phys = phys
+        self.uniq = uniq
+        self.fd = fd_ino  # stand-in; patched fstat/stat key off this
+        self.fd_ino = fd_ino
+        self.node_ino = fd_ino if node_ino is None else node_ino
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+def _patch_inodes(monkeypatch, devices):
+    """Route os.fstat/os.stat to the fake devices' inode bookkeeping."""
+    import os as _os
+
+    import linux_whisper.hotkey as hk
+
+    by_fd = {d.fd: d for d in devices}
+    # Last writer wins, mirroring devtmpfs: the newest node is what `path` resolves to.
+    by_path = {}
+    for d in devices:
+        by_path[d.path] = d
+
+    class _St:
+        def __init__(self, ino):
+            self.st_ino = ino
+
+    def fake_fstat(fd):
+        dev = by_fd.get(fd)
+        if dev is None:
+            raise OSError(9, "Bad file descriptor")
+        return _St(dev.fd_ino)
+
+    def fake_stat(path):
+        dev = by_path.get(path)
+        if dev is None:
+            raise OSError(2, "No such file or directory")
+        return _St(dev.node_ino)
+
+    monkeypatch.setattr(hk.os, "fstat", fake_fstat)
+    monkeypatch.setattr(hk.os, "stat", fake_stat)
+    assert _os is not None
+
+
+class TestRescanStaleHandles:
+    """A device recreated at the same path must replace the tracked handle.
+
+    Bluetooth keyboards and key-remapper virtual devices are destroyed and
+    recreated at the *same* /dev/input/eventN number. Keying only on path meant
+    the replacement looked already-tracked, the fresh handle was discarded, and
+    a dead one was kept forever — the hotkey stopped working with no error and
+    no recovery short of a restart.
+    """
+
+    @staticmethod
+    def _rescan(current, found, monkeypatch):
+        import linux_whisper.hotkey as hk
+
+        monkeypatch.setattr(hk, "_find_keyboard_devices", lambda: found)
+        _patch_inodes(monkeypatch, list(current.values()) + list(found))
+        hk.HotkeyDaemon._rescan_devices(current)
+
+    def test_dead_handle_at_same_path_is_replaced(self, monkeypatch):
+        # Held fd points at inode 1; the node at that path is now inode 2.
+        dead = _FakeDevice("/dev/input/event6", fd_ino=1, node_ino=2)
+        fresh = _FakeDevice("/dev/input/event6", fd_ino=2, node_ino=2)
+        current = {"/dev/input/event6": dead}
+
+        self._rescan(current, [fresh], monkeypatch)
+
+        assert current["/dev/input/event6"] is fresh
+        assert dead.closed is True
+        assert fresh.closed is False
+
+    def test_live_handle_at_same_path_is_kept(self, monkeypatch):
+        existing = _FakeDevice("/dev/input/event6", fd_ino=7)
+        duplicate = _FakeDevice("/dev/input/event6", fd_ino=7)
+        current = {"/dev/input/event6": existing}
+
+        self._rescan(current, [duplicate], monkeypatch)
+
+        # The duplicate handle must be closed, not leaked.
+        assert current["/dev/input/event6"] is existing
+        assert duplicate.closed is True
+        assert existing.closed is False
+
+    def test_different_device_at_same_path_is_replaced(self, monkeypatch):
+        # Same path, still "alive", but a different device entirely.
+        old = _FakeDevice("/dev/input/event17", name="XWayKeyz (virtual) Keyboard", fd_ino=3)
+        new = _FakeDevice(
+            "/dev/input/event17", name="XWayKeyz (virtual) paste-injection", fd_ino=3
+        )
+        current = {"/dev/input/event17": old}
+
+        self._rescan(current, [new], monkeypatch)
+
+        assert current["/dev/input/event17"] is new
+        assert old.closed is True
+
+    def test_new_device_is_tracked(self, monkeypatch):
+        fresh = _FakeDevice("/dev/input/event20")
+        current = {}
+        self._rescan(current, [fresh], monkeypatch)
+        assert current["/dev/input/event20"] is fresh
+
+    def test_vanished_device_is_dropped_and_closed(self, monkeypatch):
+        gone = _FakeDevice("/dev/input/event20")
+        current = {"/dev/input/event20": gone}
+        self._rescan(current, [], monkeypatch)
+        assert current == {}
+        assert gone.closed is True
+
+    def test_duplicate_paths_in_one_scan_do_not_leak(self, monkeypatch):
+        a = _FakeDevice("/dev/input/event6", fd_ino=5)
+        b = _FakeDevice("/dev/input/event6", fd_ino=5)
+        current = {}
+        self._rescan(current, [a, b], monkeypatch)
+        assert len(current) == 1
+        assert b.closed is True or a.closed is True
+
+    def test_rescan_survives_a_device_that_raises_on_close(self, monkeypatch):
+        class Nasty(_FakeDevice):
+            def close(self):
+                raise OSError("already gone")
+
+        dead = Nasty("/dev/input/event6", fd_ino=1, node_ino=2)
+        fresh = _FakeDevice("/dev/input/event6", fd_ino=2, node_ino=2)
+        current = {"/dev/input/event6": dead}
+
+        self._rescan(current, [fresh], monkeypatch)  # must not raise
+        assert current["/dev/input/event6"] is fresh
+
+
+class TestHandleFreshness:
+    """An ioctl probe cannot detect this — the stale fd keeps answering."""
+
+    def test_current_handle(self, monkeypatch):
+        from linux_whisper.hotkey import HotkeyDaemon
+
+        dev = _FakeDevice("/dev/input/event6", fd_ino=4)
+        _patch_inodes(monkeypatch, [dev])
+        assert HotkeyDaemon._handle_is_current(dev) is True
+
+    def test_replaced_node_is_detected(self, monkeypatch):
+        from linux_whisper.hotkey import HotkeyDaemon
+
+        dev = _FakeDevice("/dev/input/event6", fd_ino=4, node_ino=9)
+        _patch_inodes(monkeypatch, [dev])
+        assert HotkeyDaemon._handle_is_current(dev) is False
+
+    def test_vanished_node_is_detected(self, monkeypatch):
+        import linux_whisper.hotkey as hk
+        from linux_whisper.hotkey import HotkeyDaemon
+
+        dev = _FakeDevice("/dev/input/event6", fd_ino=4)
+        _patch_inodes(monkeypatch, [dev])
+        monkeypatch.setattr(
+            hk.os, "stat", lambda p: (_ for _ in ()).throw(OSError(2, "gone"))
+        )
+        assert HotkeyDaemon._handle_is_current(dev) is False
+
+    def test_identity_uses_name_phys_uniq(self):
+        from linux_whisper.hotkey import HotkeyDaemon
+
+        a = _FakeDevice("/dev/input/event6", name="kbd", phys="usb-1", uniq="AA")
+        b = _FakeDevice("/dev/input/event6", name="kbd", phys="usb-1", uniq="BB")
+        assert HotkeyDaemon._device_identity(a) != HotkeyDaemon._device_identity(b)
