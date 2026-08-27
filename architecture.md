@@ -485,7 +485,56 @@ The most robust long-term solution is implementing an IBus or Fcitx5 input metho
 
 ---
 
+## Recording Overlay
+
+A floating pill (200x40, rounded, 16 animated audio-level bars) that appears on
+recording start and disappears on stop — WisprFlow-style, so feedback lives
+where you're looking instead of the top bar. Renders via GTK3 + Cairo, kept
+isolated from asyncio and the real-time audio thread in its own daemon thread.
+
+**Why GTK3, not GTK4 layer-shell.** GTK4 removed `gtk_window_move()` outright
+and has no positioning API on Wayland without `wlr-layer-shell`, which Mutter
+(GNOME's compositor) does not implement — that rules out a GNOME layer-shell
+overlay at any GTK4 version. The one path that positions correctly, verified
+on GNOME 46 / Mutter: **GTK3 running through XWayland**, with
+`GDK_BACKEND=x11` forced only for the moment the overlay thread opens its
+display connection (never mutated process-wide — the backend is chosen once
+per process, so the override is restored immediately after), and
+`Gtk.WindowType.POPUP` for an override-redirect window.
+
+**Focus safety.** `Gtk.WindowType.POPUP` never takes input focus, and the
+window additionally calls `set_accept_focus(False)`, `set_can_focus(False)`,
+and `set_focus_on_map(False)`. This is load-bearing, not cosmetic: text
+injection (Stage 5) delivers to whatever window has focus, so an overlay that
+could steal focus would redirect dictated text into itself instead of the
+target application.
+
+**Positioning.** The target monitor is resolved from the **pointer**
+(`Gdk.Display.get_monitor_at_point()`), not window focus — `xdotool
+getactivewindow` fails on this desktop because the focused window is a native
+Wayland surface, so X11 focus queries can't resolve it. `move()` is
+re-asserted after `show_all()`, since the window manager can reposition the
+window on map. `overlay.position` (`center`, `bottom-center`, `top-center`)
+controls the vertical anchor; horizontal placement is always centered on the
+monitor.
+
+**Live levels.** `push_audio_level()` is called from the audio monitor loop
+in `app.py` (the same `asyncio` loop that drives `set_speech_active()` for
+the tray), pushing the peak amplitude of the last 100ms alongside the
+existing RMS-based speech detection. It is never called from the sounddevice
+callback — that thread runs at 32ms intervals and is a documented escalation
+boundary.
+
+**Failure mode.** If GTK 3.0 / PyGObject isn't installed, `_setup_overlay()`
+logs a WARNING naming the reason and the app continues without the pill (the
+system tray remains as a fallback indicator). This used to fail silently.
+
+---
+
 ## System Tray Integration
+
+The floating overlay above is the primary recording indicator; the tray
+remains for the context menu, mode/model switching, and latency stats.
 
 **Library:** `pystray` with AppIndicator backend (GNOME/Unity) or StatusNotifier backend (KDE).
 
@@ -549,6 +598,11 @@ inject:
 tray:
   enabled: true
   show_preview: false  # floating overlay with streaming transcript
+
+# Recording overlay (floating pill with audio level bars)
+overlay:
+  enabled: true
+  position: "center"  # center | bottom-center | top-center
 ```
 
 ---

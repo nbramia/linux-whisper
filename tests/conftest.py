@@ -128,6 +128,38 @@ def mock_audio_f32():
 
 
 @pytest.fixture()
+def mock_gtk(monkeypatch):
+    """Replace linux_whisper.overlay's GTK bindings with MagicMocks.
+
+    overlay.py talks to GTK3/Gdk directly (module-level `Gtk`/`Gdk`/`GLib`
+    names) rather than through an injectable interface, so tests that need
+    to exercise window-construction code paths patch those names instead of
+    relying on whatever GTK happens to be installed on the host — this
+    machine has a real GTK3 + a real display, but CI does not, and no test
+    may depend on either being present.
+    """
+    from unittest.mock import MagicMock
+
+    from linux_whisper import overlay as overlay_module
+
+    fake_gtk = MagicMock()
+    fake_gdk = MagicMock()
+    fake_glib = MagicMock()
+    # GLib.idle_add in real usage schedules a call on the GTK main loop;
+    # for tests, invoke synchronously so assertions don't need to pump a
+    # (nonexistent) event loop.
+    fake_glib.idle_add.side_effect = lambda fn, *a, **kw: fn(*a, **kw)
+
+    monkeypatch.setattr(overlay_module, "Gtk", fake_gtk)
+    monkeypatch.setattr(overlay_module, "Gdk", fake_gdk)
+    monkeypatch.setattr(overlay_module, "GLib", fake_glib)
+    monkeypatch.setattr(overlay_module, "_HAS_GTK", True)
+    monkeypatch.setattr(overlay_module, "_UNAVAILABLE_REASON", "")
+
+    return types.SimpleNamespace(Gtk=fake_gtk, Gdk=fake_gdk, GLib=fake_glib)
+
+
+@pytest.fixture()
 def mock_audio_pcm_bytes(mock_audio_f32):
     """Return a factory that creates 16-bit PCM audio bytes."""
     import numpy as np

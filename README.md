@@ -24,7 +24,7 @@ Local voice dictation for Linux. Press a hotkey, speak naturally with filler wor
 - **Pre-roll buffer** (750ms) captures audio before the hotkey press
 - **Text injection** auto-detects display server and compositor
 - **System tray** with state icons, model/mode switcher, snippets menu, latency stats
-- **Floating GTK4 pill overlay** with animated audio level bars
+- **Floating GTK3 pill overlay** (via XWayland) with animated audio level bars driven by live mic input — the primary recording indicator; positioned at `center` (default), `bottom-center`, or `top-center` via config, never steals input focus
 - **Full YAML configuration** with validation
 
 ## Architecture
@@ -223,6 +223,11 @@ tray:
   enabled: true
   show_preview: false
 
+# Floating recording pill — the primary recording indicator
+overlay:
+  enabled: true
+  position: "center"           # center | bottom-center | top-center
+
 # Voice snippets — trigger phrases that expand to saved text
 snippets:
   # "my email": "nathan@example.com"
@@ -251,6 +256,18 @@ linux-whisper [--version] [--config PATH] [-v|-vv] COMMAND
 | `listen-keys` | Show live key events from all input devices (diagnostic) |
 
 Verbosity: `-v` for INFO, `-vv` for DEBUG.
+
+## Recording Overlay
+
+A floating pill appears on the monitor under your pointer when recording
+starts, shows live audio-level bars driven by the actual microphone signal,
+and disappears when recording stops — the primary recording indicator,
+positioned per `overlay.position` in config. It runs on GTK3 via XWayland
+(GTK4 has no window-positioning API on Wayland, and GNOME's Mutter compositor
+doesn't implement `wlr-layer-shell`) and never takes input focus, so dictated
+text always lands in whatever application you're actually typing into. If
+GTK 3.0 / PyGObject isn't installed, startup logs a warning and the app runs
+without it — the system tray remains as a fallback indicator.
 
 ## System Tray
 
@@ -288,7 +305,7 @@ src/linux_whisper/
     hotkey.py           # evdev global hotkey daemon
     snippets.py         # Voice snippet matching (fuzzy, case-insensitive)
     state.py            # Async state machine (IDLE/RECORDING/PROCESSING/ERROR)
-    overlay.py          # GTK4 floating pill with audio level bars
+    overlay.py          # GTK3 (via XWayland) floating pill with audio level bars
     tray.py             # pystray system tray with icon generation
     stt/
         engine.py       # STTEngine protocol and factory

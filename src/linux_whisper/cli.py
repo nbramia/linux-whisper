@@ -112,6 +112,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             audio=config.audio,
             inject=config.inject,
             tray=TrayConfig(enabled=False),
+            overlay=config.overlay,
         )
 
     try:

@@ -165,3 +165,4 @@ The default STT backend is whisper.cpp large-v3-turbo on the ROCm GPU, in a subp
 | `focus.py` | Focused app detection (X11/Sway/Hyprland) for tone adaptation |
 | `snippets.py` | Voice snippet matching — fuzzy, bypasses polish pipeline |
 | `inject/injector.py` | Display server detection, 4 injection backends |
+| `overlay.py` | GTK3 (via XWayland) floating recording pill — primary recording indicator, never takes focus |

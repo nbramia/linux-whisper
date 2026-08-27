@@ -144,16 +144,25 @@ class App:
             logger.warning("pystray not available, running without system tray")
 
     async def _setup_overlay(self) -> None:
+        if not self.config.overlay.enabled:
+            logger.info("Overlay disabled by config")
+            return
         try:
             from linux_whisper.overlay import Overlay
 
-            self._overlay = Overlay()
-            if self._overlay.available:
-                logger.info("Overlay ready")
-            else:
-                self._overlay = None
-        except ImportError:
-            logger.debug("Overlay not available (GTK4 missing)")
+            overlay = Overlay(self.config.overlay)
+        except ImportError as exc:
+            logger.warning("Overlay unavailable: %s — running without recording pill", exc)
+            return
+
+        if overlay.available:
+            self._overlay = overlay
+            logger.info("Overlay ready")
+        else:
+            logger.warning(
+                "Overlay unavailable: %s — running without recording pill",
+                overlay.unavailable_reason,
+            )
 
     async def run(self) -> None:
         """Run the application until shutdown is requested."""
@@ -218,6 +227,7 @@ class App:
             audio=self.config.audio,
             inject=self.config.inject,
             tray=self.config.tray,
+            overlay=self.config.overlay,
             snippets=self.config.snippets,
         )
 
@@ -268,6 +278,7 @@ class App:
             audio=self.config.audio,
             inject=self.config.inject,
             tray=self.config.tray,
+            overlay=self.config.overlay,
             snippets=self.config.snippets,
         )
 
@@ -389,6 +400,9 @@ class App:
                         "audio: rms=%.5f peak=%.5f floor=%.5f speech=%s",
                         rms, peak, noise_floor, speech,
                     )
+
+                    if self._overlay:
+                        self._overlay.push_audio_level(peak)
 
                     if speech != last_speech:
                         last_speech = speech

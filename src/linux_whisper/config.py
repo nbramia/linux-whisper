@@ -79,6 +79,14 @@ class TrayConfig:
 
 
 @dataclass(frozen=True)
+class OverlayConfig:
+    enabled: bool = True
+    position: str = "center"  # center | bottom-center | top-center
+
+    VALID_POSITIONS = ("center", "bottom-center", "top-center")
+
+
+@dataclass(frozen=True)
 class Config:
     hotkey: str = "fn"
     mode: str = "auto"  # auto | hold | toggle | vad-auto
@@ -87,6 +95,7 @@ class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
     inject: InjectConfig = field(default_factory=InjectConfig)
     tray: TrayConfig = field(default_factory=TrayConfig)
+    overlay: OverlayConfig = field(default_factory=OverlayConfig)
     snippets: dict[str, str] = field(default_factory=dict)
 
     VALID_MODES = ("auto", "hold", "toggle", "vad-auto")
@@ -102,6 +111,7 @@ class Config:
             audio=_merge_dataclass(AudioConfig, data.get("audio", {})),
             inject=_merge_dataclass(InjectConfig, data.get("inject", {})),
             tray=_merge_dataclass(TrayConfig, data.get("tray", {})),
+            overlay=_merge_dataclass(OverlayConfig, data.get("overlay", {})),
             snippets=data.get("snippets") or {},
         )
 
@@ -136,6 +146,11 @@ class Config:
             errors.append(f"Unusual sample_rate {self.audio.sample_rate}")
         if not 0.0 < self.audio.vad_threshold < 1.0:
             errors.append(f"vad_threshold must be between 0 and 1, got {self.audio.vad_threshold}")
+        if self.overlay.position not in OverlayConfig.VALID_POSITIONS:
+            errors.append(
+                f"Invalid overlay.position '{self.overlay.position}', "
+                f"must be one of {OverlayConfig.VALID_POSITIONS}"
+            )
         return errors
 
     def save_default(self, path: Path | None = None) -> None:
