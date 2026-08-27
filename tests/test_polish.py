@@ -9,6 +9,7 @@ Tests cover:
 
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 from threading import Thread
@@ -256,15 +257,24 @@ class TestDisfluencyRemover:
         ("raw", "stripped_word"),
         [
             ("um I think we should go", "um"),
+            ("um, I think we should go", "um"),
             ("uh let's start", "uh"),
+            ("hmm let me think", "hmm"),
+            ("erm I forgot", "erm"),
             ("basically I need help", "basically"),
+            ("it was, like, really fast", "like"),
+            ("so we should go", "so"),
         ],
     )
     def test_other_fillers_still_stripped(self, remover, raw, stripped_word):
         # Proves the #42 fix is scoped to "okay"/"ok" — every other filler
         # in _FILLER_WORDS still strips exactly as before.
+        #
+        # Match on a word boundary rather than str.split(): a filler that
+        # survived with punctuation attached ("um,") is still a survivor,
+        # but split() tokenises it as "um," and would let the test pass.
         result = remover.process(raw)
-        assert stripped_word not in result.text.lower().split()
+        assert not re.search(rf"\b{stripped_word}\b", result.text, re.IGNORECASE)
 
     # Real-world dictation examples
 
