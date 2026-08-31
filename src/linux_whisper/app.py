@@ -203,10 +203,17 @@ class App:
             self._hotkey.start()
         if self._audio:
             await self._audio.start()
-        if self._tray:
-            self._tray.start()
+        # Overlay BEFORE tray, and not the other way round. Both build GTK3
+        # objects on their own threads (the tray's via pystray's appindicator
+        # backend), and GTK is not thread-safe: constructing them concurrently
+        # segfaults the process. Measured with tray-first, 4 consecutive
+        # restarts produced 8 SIGSEGVs and left the unit crash-looping.
+        # Overlay.start() blocks until its window exists, so going first
+        # serialises the two initialisations.
         if self._overlay:
             self._overlay.start()
+        if self._tray:
+            self._tray.start()
 
         logger.info("Ready — press %s to dictate", self.config.hotkey)
 

@@ -670,6 +670,31 @@ class TestHandleRecordingStop:
 # ---------------------------------------------------------------------------
 
 
+class TestStartOrder:
+    """GTK initialisation order. Both the overlay and the tray (via pystray's
+    appindicator backend) build GTK3 objects on their own threads, and GTK is
+    not thread-safe -- constructing them concurrently segfaults the process.
+    Measured with tray-first: 8 SIGSEGVs across 4 consecutive restarts, unit
+    crash-looping. Overlay-first: 0 across 6. Overlay.start() blocks until its
+    window exists, which serialises the two.
+    """
+
+    async def test_overlay_starts_before_tray(self):
+        app = _make_app()
+        order: list[str] = []
+        app._overlay = MagicMock()
+        app._overlay.start.side_effect = lambda *a, **k: order.append("overlay")
+        app._tray = MagicMock()
+        app._tray.start.side_effect = lambda *a, **k: order.append("tray")
+        app._hotkey = None
+        app._audio = None
+        app._shutdown_event.set()  # return immediately after startup
+
+        await app.run()
+
+        assert order == ["overlay", "tray"], order
+
+
 class TestFeedAudioLevels:
     async def test_pushes_audio_level_to_overlay_while_recording(self):
         app = _make_app()
