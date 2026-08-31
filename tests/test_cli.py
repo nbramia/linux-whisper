@@ -88,6 +88,27 @@ class TestConfigSubcommands:
         captured = capsys.readouterr()
         assert "valid" in captured.out.lower()
 
+    def test_config_validate_reports_malformed_section_cleanly(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        # `overlay: false` (a bare non-mapping value) is caught by
+        # _merge_dataclass and raises ValueError rather than being loaded as
+        # OverlayConfig(enabled=True). `config validate`'s whole purpose is
+        # reporting config problems without a crash — it must turn that
+        # into the same "Validation errors:" output as any other invalid
+        # value, not an unhandled traceback.
+        fake_path = tmp_path / "config.yaml"
+        fake_path.write_text("overlay: false\n")
+        monkeypatch.setattr("linux_whisper.cli.CONFIG_PATH", fake_path)
+        monkeypatch.setattr("linux_whisper.config.CONFIG_PATH", fake_path)
+
+        result = main(["config", "validate"])
+
+        assert result == 1
+        captured = capsys.readouterr()
+        assert "Validation errors:" in captured.out
+        assert "OverlayConfig" in captured.out
+
     def test_config_init(self, tmp_path, capsys, monkeypatch):
         # Patch CONFIG_PATH so init writes to our temp dir
         fake_path = tmp_path / "config.yaml"

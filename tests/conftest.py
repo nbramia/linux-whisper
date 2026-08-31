@@ -8,7 +8,9 @@ are not installed.
 
 from __future__ import annotations
 
+import itertools
 import sys
+import threading
 import types
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -138,6 +140,10 @@ class _FakeGLibSource:
     context (`Overlay._dispatch`, which calls `set_callback` then `attach`)
     and code that (incorrectly) mutates the window directly: only the former
     shows up as a recorded `attach()` call.
+
+    Nothing in `overlay.py` uses `idle_source_new`/`timeout_source_new`
+    anymore (see `_next_glib_source_id` below) — this is kept only in case a
+    future addition needs the lower-level Source API again.
     """
 
     def __init__(self) -> None:
@@ -158,6 +164,36 @@ class _FakeGLibSource:
 
     def destroy(self):
         self.destroyed = True
+
+
+class _FakeMainLoop:
+    """Stand-in for `GLib.MainLoop`, real enough for threading tests to mean
+    something: `run()` blocks the calling (overlay) thread until `quit()` is
+    called, rather than returning instantly the way a bare `MagicMock()`
+    would.
+
+    That blocking matters: without it, `Overlay._run_gtk()`'s teardown
+    (destroy the window, clear `self._window` — see the MAJOR finding on the
+    dangling window reference) would race every test that starts the
+    overlay and inspects it before calling `stop()` — a plain MagicMock
+    `run()` returns immediately, so the background thread can race straight
+    through teardown before the test's assertion runs at all. `quit()` is
+    safe to call from another thread, same as the real API, and is a no-op
+    if `run()` was never entered — matching real GLib, a stray `quit()`
+    doesn't raise.
+    """
+
+    def __init__(self, context: object = None) -> None:
+        self.context = context
+        self._quit_event = threading.Event()
+        self.run = MagicMock(side_effect=self._run)
+        self.quit = MagicMock(side_effect=self._quit)
+
+    def _run(self) -> None:
+        self._quit_event.wait(timeout=5.0)
+
+    def _quit(self) -> None:
+        self._quit_event.set()
 
 
 @pytest.fixture()
@@ -181,11 +217,45 @@ def mock_gtk(monkeypatch):
 
     # GLib.idle_source_new()/timeout_source_new() return a fresh fake source
     # each call; attach() runs the callback synchronously (see _FakeGLibSource)
-    # so tests don't need to pump a real main loop.
+    # so tests don't need to pump a real main loop. Nothing in overlay.py
+    # calls these anymore (it uses plain idle_add/timeout_add — see below,
+    # attached to the *default* main context, which is the whole point of
+    # the BLOCKER fix), but they're kept working in case something needs
+    # the lower-level Source API again.
     fake_glib.idle_source_new.side_effect = lambda: _FakeGLibSource()
     fake_glib.timeout_source_new.side_effect = lambda *a, **kw: _FakeGLibSource()
     fake_glib.SOURCE_REMOVE = False
     fake_glib.SOURCE_CONTINUE = True
+
+    # GLib.idle_add()/timeout_add() attach to the process-wide default main
+    # context (unlike idle_source_new()/timeout_source_new(), which need an
+    # explicit .attach(context)) — real GLib only invokes the callback once
+    # something actually pumps that context. Tests have no real loop
+    # pumping, so invoke synchronously here, same rationale as
+    # _FakeGLibSource.attach() above. Each call gets a distinct fake GLib
+    # source id (a plain incrementing int, like the real API) so
+    # GLib.source_remove() calls can be matched back to the timeout_add()
+    # call that produced them.
+    _next_glib_source_id = itertools.count(1)
+
+    def _fake_idle_add(fn, *args, **kwargs):
+        fn(*args)
+        return next(_next_glib_source_id)
+
+    def _fake_timeout_add(interval, fn, *args, **kwargs):
+        fn(*args)
+        return next(_next_glib_source_id)
+
+    fake_glib.idle_add.side_effect = _fake_idle_add
+    fake_glib.timeout_add.side_effect = _fake_timeout_add
+    fake_glib.source_remove.return_value = True
+
+    # GLib.MainLoop(context) — a real blocking stand-in (see _FakeMainLoop)
+    # so `_run_gtk`'s call to `loop.run()` behaves enough like the real
+    # thing for tests to exercise the start/stop lifecycle meaningfully,
+    # instead of the whole GTK thread completing (and tearing itself down)
+    # before the test even gets to assert anything about it.
+    fake_glib.MainLoop.side_effect = lambda context=None: _FakeMainLoop(context)
 
     # Gdk.Display.get_default() reports a class named "X11Display" — the
     # overlay's backend check (Overlay._run_gtk) matches on the substring

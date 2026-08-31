@@ -30,10 +30,38 @@ Setting it inside this module, even at the top of a function that runs
 before any window is built, is too late: importing this module to reach
 that function already ran the lines below first.
 
-Runs entirely in its own daemon thread with its own ``GLib.MainContext`` and
-``GLib.MainLoop`` — not the process-wide default context, which the tray's
-GTK loop also pumps — isolated from the asyncio event loop and the
-real-time audio callback thread.
+Runs entirely in its own daemon thread, holding its own ``GLib.MainLoop``.
+That loop is bound to the process-wide *default* ``GLib.MainContext`` —
+**not** a private one. A private context was tried first (to keep this
+overlay fully isolated from the tray's GTK loop) and broke rendering
+outright: GTK3's draw/expose dispatch is wired to the default context only,
+so a private context never delivers it. Verified empirically against a real
+window on a real display with the tray disabled: the animation timer fired
+at a correct 30fps and called ``queue_draw()`` 60 times, and the ``draw``
+handler was invoked zero times. Switching the same window back to the
+default context, with everything else unchanged, produced 45+ draws.
+
+The trade-off this leaves: the overlay and the system tray's GTK loop now
+share one ``GLib.MainContext``, so a GTK source attached here (the 30fps
+animation timer, the marshalled state-mutation calls below) may end up
+dispatched by whichever thread's ``MainLoop.run()`` is currently iterating
+that shared context — this overlay's own thread, or the tray's, if the tray
+is enabled. That is inherent to running two GLib loops in one process, and
+it is exposure the tray already introduces on its own; it is not something
+a second main loop object avoids. What *is* avoided by holding our own
+``GLib.MainLoop`` instance (instead of calling ``Gtk.main()``/
+``Gtk.main_quit()``) is the sharper bug that motivated this: ``stop()``
+quitting the tray's loop instead of (or as well as) this one.
+``GLib.MainLoop.quit()`` only quits that specific loop object, so this
+overlay's ``stop()`` cannot take the tray down with it. Every GTK-state
+mutation is still routed through ``GLib.idle_add()``/``GLib.timeout_add()``
+(see ``Overlay._dispatch()`` and ``_OverlayWindow._start_tick()``) rather
+than called directly across threads, so dispatch is at least consistently
+serialised through the context regardless of which thread services it.
+
+Isolated from the asyncio event loop and the real-time audio callback
+thread — both of those never touch GTK at all, only this dedicated thread
+does.
 """
 
 from __future__ import annotations
@@ -191,13 +219,12 @@ class _OverlayWindow:
     mock object cannot be used as a base class.
     """
 
-    def __init__(self, position: str, context: object) -> None:
+    def __init__(self, position: str) -> None:
         self._position = position
-        # The overlay's own GLib.MainContext (see Overlay._run_gtk) — used
-        # to attach the animation timer only while the pill is visible, so
-        # it doesn't tick at 30fps forever while hidden.
-        self._context = context
-        self._tick_source: object | None = None
+        # GLib source id from GLib.timeout_add() (see _start_tick) — attached
+        # to the default main context only while the pill is visible, so it
+        # doesn't tick at 30fps forever while hidden. None means "not ticking".
+        self._tick_source: int | None = None
 
         self._window = Gtk.Window(type=Gtk.WindowType.POPUP)
         self._window.set_title("linux-whisper-overlay")
@@ -284,20 +311,17 @@ class _OverlayWindow:
         x, y = compute_pill_position(*geom, self._position)
         self._window.move(x, y)
 
-    # -- animation timer, attached to this overlay's own context only while
-    #    the pill is visible — see MAJOR finding on cross-thread dispatch --
+    # -- animation timer, attached to the default main context (see module
+    #    docstring) only while the pill is visible --
 
     def _start_tick(self) -> None:
         if self._tick_source is not None:
             return
-        source = GLib.timeout_source_new(1000 // _FPS)
-        source.set_callback(self._tick)
-        source.attach(self._context)
-        self._tick_source = source
+        self._tick_source = GLib.timeout_add(1000 // _FPS, self._tick)
 
     def _stop_tick(self) -> None:
         if self._tick_source is not None:
-            self._tick_source.destroy()
+            GLib.source_remove(self._tick_source)
             self._tick_source = None
 
     def _tick(self) -> bool:
@@ -396,10 +420,11 @@ class Overlay:
     """Public API for the recording overlay.
 
     Thread-safe: all methods can be called from any thread. The GTK event
-    loop runs in a dedicated daemon thread on its own `GLib.MainContext` —
-    not the process-wide default context, which the system tray's GTK loop
-    also pumps — isolated from the asyncio loop and the real-time audio
-    callback thread.
+    loop runs in a dedicated daemon thread, holding its own `GLib.MainLoop`
+    bound to the process-wide default `GLib.MainContext` (see the module
+    docstring for why it must be the default context, and the trade-off that
+    comes with sharing it with the system tray's GTK loop) — isolated from
+    the asyncio loop and the real-time audio callback thread.
     """
 
     def __init__(self, config: OverlayConfig | None = None) -> None:
@@ -407,7 +432,6 @@ class Overlay:
         self._window: _OverlayWindow | None = None
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
-        self._context: object | None = None
         self._main_loop: object | None = None
 
     @property
@@ -451,10 +475,20 @@ class Overlay:
             return
 
         if self._main_loop is not None:
-            # GLib.MainLoop.quit() is documented MT-safe — no marshalling
-            # needed, and marshalling it would require the loop we're
-            # trying to quit to still be running to process the request.
-            self._main_loop.quit()
+            # Schedule the quit as an idle source on the default context
+            # rather than calling `MainLoop.quit()` directly. `_ready` is
+            # set (in `_run_gtk`) before the thread reaches `loop.run()`, so
+            # a caller that starts and immediately stops can reach this line
+            # before `run()` has actually started. GLib does not carry a
+            # pre-quit forward — `quit()` on a not-yet-running loop is a
+            # no-op, and the thread would then be parked in `run()` forever,
+            # with every later `start()` becoming a no-op because that
+            # thread is still alive. Queuing the quit as a pending source on
+            # the context `run()` is about to iterate has no such gap: the
+            # source exists the moment `idle_add()` returns, so it fires as
+            # soon as `run()` starts pumping, whatever the exact timing.
+            loop = self._main_loop
+            GLib.idle_add(loop.quit)
 
         self._thread.join(timeout=3.0)
         if self._thread.is_alive():
@@ -465,7 +499,6 @@ class Overlay:
         else:
             self._thread = None
             self._main_loop = None
-            self._context = None
         logger.info("Overlay stopped")
 
     def show(self) -> None:
@@ -498,26 +531,14 @@ class Overlay:
     def _dispatch(self, fn: object, *args: object) -> None:
         """Marshal a call onto the overlay's own GTK thread.
 
-        `GLib.idle_add()`/`GLib.timeout_add()` always attach to the
-        *process-wide default* main context, not the calling thread's — see
-        the module docstring. Since the overlay thread runs its own private
-        context (`_run_gtk`), a plain `idle_add()` call here would only ever
-        be serviced by whatever thread happens to be pumping the default
-        context (typically the system tray's), which is exactly the
-        cross-thread GTK hazard this class exists to avoid. Attach an
-        explicit idle source to the overlay's own context instead.
+        `GLib.idle_add()` attaches to the process-wide default main
+        context — see the module docstring for why that is deliberate here
+        (GTK3 draw dispatch only fires on the default context) and for the
+        trade-off it carries (the callback may run on whichever thread is
+        currently iterating that context, this overlay's own or the tray's).
+        Either way it is never a direct cross-thread call into GTK.
         """
-        context = self._context
-        if context is None:
-            return
-
-        def _run_once() -> bool:
-            fn(*args)
-            return GLib.SOURCE_REMOVE
-
-        source = GLib.idle_source_new()
-        source.set_callback(_run_once)
-        source.attach(context)
+        GLib.idle_add(fn, *args)
 
     def _run_gtk(self) -> None:
         """GTK setup and main loop — runs entirely on the overlay thread.
@@ -530,14 +551,10 @@ class Overlay:
         window would report requested-but-refused positions (see the module
         docstring's positioning caveat), which is worse than no pill at all.
         """
-        context = GLib.MainContext()
-        context.push_thread_default()
-        self._context = context
-
         window: _OverlayWindow | None = None
         loop: object | None = None
         try:
-            window = _OverlayWindow(self._config.position, context)
+            window = _OverlayWindow(self._config.position)
             backend = type(Gdk.Display.get_default()).__name__
             if "X11" not in backend:
                 raise RuntimeError(
@@ -545,7 +562,11 @@ class Overlay:
                     "GDK_BACKEND=x11 did not take effect before the display "
                     "opened (see App.setup() and this module's docstring)"
                 )
-            loop = GLib.MainLoop(context)
+            # Bind to the default main context (pass None), not a private
+            # one — see the module docstring: GTK3's draw/expose dispatch is
+            # only ever delivered through the default context, and a private
+            # context silently never renders anything.
+            loop = GLib.MainLoop(None)
         except Exception as exc:
             logger.warning("Overlay disabled: %s", exc)
             if window is not None:
@@ -560,7 +581,6 @@ class Overlay:
             self._ready.set()
 
         if loop is None:
-            context.pop_thread_default()
             return
 
         logger.debug("Overlay window created")
@@ -571,4 +591,4 @@ class Overlay:
         finally:
             if self._window is not None:
                 self._window.destroy()
-            context.pop_thread_default()
+                self._window = None

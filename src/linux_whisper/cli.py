@@ -218,7 +218,15 @@ def _cmd_config(args: argparse.Namespace) -> int:
         print(CONFIG_PATH)
         return 0
     elif config_command == "validate":
-        config = Config.load()
+        try:
+            config = Config.load()
+        except ValueError as exc:
+            # A malformed section (e.g. `overlay: false` instead of a
+            # mapping) is a config problem, same as anything Config.validate()
+            # would report — report it the same way instead of a traceback.
+            print("Validation errors:")
+            print(f"  - {exc}")
+            return 1
         errors = config.validate()
         if errors:
             print("Validation errors:")

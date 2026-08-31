@@ -171,7 +171,27 @@ def _merge_dataclass[T](cls: type[T], overrides: dict | None) -> T:
     A YAML section written with no mapping under it (e.g. a bare ``overlay:``
     key) parses to ``None``, not ``{}`` — treat that the same as "no
     overrides", not a crash.
+
+    A section given a concrete *non-mapping* value (e.g. ``overlay: false``
+    or ``tray: "off"``) is a different, more dangerous case. ``None`` and a
+    falsey non-mapping look the same under ``overrides or {}``, but they
+    don't mean the same thing: silently treating ``overlay: false`` as "no
+    overrides" merges in every field's *default*, including
+    ``enabled=True`` — the opposite of what a user writing ``overlay: false``
+    almost certainly intended, and it takes effect silently (it forces
+    ``GDK_BACKEND=x11`` and starts a GTK thread nobody asked for). Refuse to
+    guess: raise so the user gets a clear error instead of the inverse of
+    what they wrote. The fix on their end is the explicit form, e.g.
+    ``overlay:\n  enabled: false``.
     """
+    if overrides is not None and not isinstance(overrides, dict):
+        raise ValueError(
+            f"config section for {cls.__name__} must be a mapping (or "
+            f"omitted/blank for defaults), got {overrides!r} of type "
+            f"{type(overrides).__name__} — did you mean to write out its "
+            f"fields, e.g. 'enabled: false' nested under the section, "
+            f"instead of a bare value?"
+        )
     overrides = overrides or {}
     defaults = cls()
     fields = {f.name for f in cls.__dataclass_fields__.values()}

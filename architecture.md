@@ -537,18 +537,39 @@ controls the vertical anchor; horizontal placement is always centered on the
 monitor; `compute_pill_position()` clamps the result to the monitor's bounds
 so a monitor narrower or shorter than the pill can't push it off-screen.
 
-**Its own GLib main loop.** The overlay thread runs on a private
-`GLib.MainContext`/`GLib.MainLoop`, not the process-wide default context —
-which the system tray's own GTK loop also pumps. `GLib.idle_add()` and
-`GLib.timeout_add()` always attach to that shared default context regardless
-of which thread calls them, so using them here would let `show()`/`hide()`/
-the animation timer dispatch on the *tray's* thread instead of the overlay's
-whenever the tray happens to be pumping the context — a real, reproduced bug
-in an earlier revision. `Overlay._dispatch()` attaches an explicit
-`GLib.idle_source_new()` source to the overlay's own context instead, and
-`stop()` quits that same `GLib.MainLoop` object directly (`MainLoop.quit()`
-is documented thread-safe) rather than posting `Gtk.main_quit()` to the
-shared default loop.
+**Its own GLib main loop — on the shared default context.** The overlay
+thread holds its own `GLib.MainLoop`, but that loop is bound to the
+process-wide *default* `GLib.MainContext`, the same one the system tray's
+GTK loop pumps — not a private context. A private context was tried first,
+to keep the overlay fully isolated from the tray, and it broke rendering
+outright: GTK3's draw/expose events are wired to the default context only,
+so a private context never delivers them. Measured against a real window on
+the real display with the tray disabled: the animation timer fired at a
+correct 30fps and called `queue_draw()` 60 times, and `draw` fired zero
+times; switching the same window back to the default context, everything
+else unchanged, produced 45+ draws immediately. `show()`/`hide()`/
+`set_speech_active()` go through `GLib.idle_add()` and the animation timer
+through `GLib.timeout_add()` — both attach to the default context.
+
+The trade-off this leaves: a GTK source attached here may end up dispatched
+by whichever thread's `MainLoop.run()` is currently iterating the shared
+context — this overlay's own thread, or the tray's, if the tray is enabled.
+That's inherent to running two GLib loops in one process and is exposure the
+tray already introduces on its own; a second main-loop *object* doesn't
+avoid it, only serialises every mutation through the context consistently
+instead of calling GTK directly across threads. What holding a separate
+`GLib.MainLoop` instance *does* fix is `stop()` quitting the wrong loop:
+`MainLoop.quit()` only quits that specific object, so this overlay's
+`stop()` can never take the tray's loop down with it (the original bug,
+back when `stop()` posted `Gtk.main_quit()` to the shared default loop).
+`stop()` doesn't call `quit()` directly, though — `_ready` (which unblocks
+`start()`) is set before the thread reaches `loop.run()`, so a caller that
+starts and immediately stops can reach `stop()` before `run()` has actually
+started; GLib does not carry a pre-quit forward, so a direct `quit()` there
+would be lost and the thread would sit in `run()` forever. `stop()` instead
+schedules the quit via `GLib.idle_add(loop.quit)`, which queues on the
+context the instant it's called and fires as soon as `run()` starts pumping,
+whatever the exact timing.
 
 **Animation timer lifecycle.** The 30fps bar-animation timer is attached only
 while the pill is visible — `set_recording(True)` attaches it, `(False)`

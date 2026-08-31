@@ -131,13 +131,13 @@ class TestFocusSafety:
     def test_window_uses_override_redirect_popup_type(self, mock_gtk):
         from linux_whisper.overlay import _OverlayWindow
 
-        _OverlayWindow("center", MagicMock())
+        _OverlayWindow("center")
         mock_gtk.Gtk.Window.assert_called_once_with(type=mock_gtk.Gtk.WindowType.POPUP)
 
     def test_window_never_accepts_focus(self, mock_gtk):
         from linux_whisper.overlay import _OverlayWindow
 
-        window = _OverlayWindow("center", MagicMock())
+        window = _OverlayWindow("center")
         window._window.set_accept_focus.assert_called_once_with(False)
         window._window.set_can_focus.assert_called_once_with(False)
         window._window.set_focus_on_map.assert_called_once_with(False)
@@ -152,14 +152,14 @@ class TestOverlayWindowState:
     def test_set_recording_true_sets_visible_state(self, mock_gtk):
         from linux_whisper.overlay import _OverlayWindow
 
-        window = _OverlayWindow("center", MagicMock())
+        window = _OverlayWindow("center")
         window.set_recording(True)
         assert window._visible_state is True
 
     def test_set_recording_false_clears_speech_and_levels(self, mock_gtk):
         from linux_whisper.overlay import _OverlayWindow
 
-        window = _OverlayWindow("center", MagicMock())
+        window = _OverlayWindow("center")
         window.set_recording(True)
         window.set_speech_active(True)
         window.push_audio_level(0.9)
@@ -173,7 +173,7 @@ class TestOverlayWindowState:
     def test_push_audio_level_clamps_to_unit_range(self, mock_gtk):
         from linux_whisper.overlay import _OverlayWindow
 
-        window = _OverlayWindow("center", MagicMock())
+        window = _OverlayWindow("center")
         window.push_audio_level(5.0)
         window.push_audio_level(-5.0)
         assert window._audio_levels[-2] == 1.0
@@ -187,12 +187,28 @@ class TestOverlayWindowState:
 
 class TestOverlayLifecycle:
     def test_start_creates_window_and_thread(self, mock_gtk):
+        import time
+
         overlay = Overlay(OverlayConfig(position="bottom-center"))
         overlay.start()
         try:
             assert overlay._ready.is_set()
             assert overlay._window is not None
             mock_gtk.Gtk.Window.assert_called_once()
+
+            # `_ready`/`_window` are both set (in `_run_gtk`'s `finally`)
+            # *before* `loop.run()` is ever reached — deleting the
+            # production `loop.run()` call entirely would leave every
+            # assertion above passing regardless. The fake MainLoop's
+            # run() genuinely blocks (see conftest._FakeMainLoop) until
+            # stop() quits it, so poll briefly for run() to have been
+            # entered rather than joining the thread (which wouldn't
+            # return until stop()).
+            main_loop = overlay._main_loop
+            deadline = time.monotonic() + 1.0
+            while not main_loop.run.called and time.monotonic() < deadline:
+                time.sleep(0.005)
+            main_loop.run.assert_called_once()
         finally:
             overlay.stop()
 
@@ -200,12 +216,12 @@ class TestOverlayLifecycle:
         overlay = Overlay()
         overlay.start()
         try:
-            calls_before = mock_gtk.GLib.idle_source_new.call_count
+            calls_before = mock_gtk.GLib.idle_add.call_count
             overlay.show()
             # Not just "the state ended up right" — prove it got there via a
             # real dispatch onto the overlay's own context, not a direct
             # cross-thread call that would happen to pass this assertion too.
-            assert mock_gtk.GLib.idle_source_new.call_count > calls_before
+            assert mock_gtk.GLib.idle_add.call_count > calls_before
             assert overlay._window._visible_state is True
         finally:
             overlay.stop()
@@ -215,9 +231,9 @@ class TestOverlayLifecycle:
         overlay.start()
         try:
             overlay.show()
-            calls_before = mock_gtk.GLib.idle_source_new.call_count
+            calls_before = mock_gtk.GLib.idle_add.call_count
             overlay.hide()
-            assert mock_gtk.GLib.idle_source_new.call_count > calls_before
+            assert mock_gtk.GLib.idle_add.call_count > calls_before
             assert overlay._window._visible_state is False
         finally:
             overlay.stop()
@@ -226,9 +242,9 @@ class TestOverlayLifecycle:
         overlay = Overlay()
         overlay.start()
         try:
-            calls_before = mock_gtk.GLib.idle_source_new.call_count
+            calls_before = mock_gtk.GLib.idle_add.call_count
             overlay.set_speech_active(True)
-            assert mock_gtk.GLib.idle_source_new.call_count > calls_before
+            assert mock_gtk.GLib.idle_add.call_count > calls_before
             assert overlay._window._speech_active is True
         finally:
             overlay.stop()
@@ -382,9 +398,9 @@ class TestAnimationTimerLifecycle:
         overlay = Overlay()
         overlay.start()
         try:
-            calls_before = mock_gtk.GLib.timeout_source_new.call_count
+            calls_before = mock_gtk.GLib.timeout_add.call_count
             overlay.show()
-            assert mock_gtk.GLib.timeout_source_new.call_count > calls_before
+            assert mock_gtk.GLib.timeout_add.call_count > calls_before
             assert overlay._window._tick_source is not None
         finally:
             overlay.stop()
@@ -394,9 +410,9 @@ class TestAnimationTimerLifecycle:
         overlay.start()
         try:
             overlay.show()
-            source = overlay._window._tick_source
+            source_id = overlay._window._tick_source
             overlay.hide()
-            assert source.destroyed is True
+            mock_gtk.GLib.source_remove.assert_called_once_with(source_id)
             assert overlay._window._tick_source is None
         finally:
             overlay.stop()
@@ -424,7 +440,7 @@ class TestPushAudioLevelNonBlocking:
     def test_drops_sample_instead_of_blocking_when_lock_is_held(self, mock_gtk):
         from linux_whisper.overlay import _OverlayWindow
 
-        window = _OverlayWindow("center", MagicMock())
+        window = _OverlayWindow("center")
         window._lock.acquire()  # simulate a tick in progress on the GTK thread
         try:
             import time
@@ -443,7 +459,7 @@ class TestPushAudioLevelNonBlocking:
     def test_still_records_the_sample_when_the_lock_is_free(self, mock_gtk):
         from linux_whisper.overlay import _OverlayWindow
 
-        window = _OverlayWindow("center", MagicMock())
+        window = _OverlayWindow("center")
         window.push_audio_level(0.9)
         assert window._audio_levels[-1] == pytest.approx(0.9)
 
@@ -492,3 +508,116 @@ class TestStopUsesItsOwnMainLoop:
         # The handle must be kept, not discarded, so a stuck thread stays
         # observable instead of vanishing untracked.
         assert overlay._thread is not None
+
+
+# ---------------------------------------------------------------------------
+# BLOCKER (round 2) — a private GLib.MainContext never receives GTK3's
+# draw/expose dispatch, so the pill silently never rendered even though
+# queue_draw() fired at 30fps. The loop must bind to the *default* context,
+# and sources must go through plain idle_add()/timeout_add(), never an
+# explicit Source attached to a private GLib.MainContext instance.
+#
+# Mocks cannot prove GTK actually *delivers* draws for a given context —
+# only a real display can (verified manually on the real display, see the
+# PR description for draw counts with the tray on and off). What this can
+# prove is the mechanism: nothing here constructs a private context, and
+# the main loop is explicitly bound to the default one.
+# ---------------------------------------------------------------------------
+
+
+class TestUsesDefaultMainContextNotAPrivateOne:
+    def test_main_loop_binds_to_default_context_not_a_private_one(self, mock_gtk):
+        overlay = Overlay()
+        overlay.start()
+        try:
+            # GLib.MainContext() is how a *private* context is constructed;
+            # the regression is exactly "this got called".
+            mock_gtk.GLib.MainContext.assert_not_called()
+            # None tells GLib.MainLoop to bind to the global default context.
+            mock_gtk.GLib.MainLoop.assert_called_once_with(None)
+        finally:
+            overlay.stop()
+
+    def test_animation_timer_uses_timeout_add_not_a_private_context_source(self, mock_gtk):
+        overlay = Overlay()
+        overlay.start()
+        try:
+            overlay.show()
+            mock_gtk.GLib.timeout_source_new.assert_not_called()
+            assert mock_gtk.GLib.timeout_add.called
+        finally:
+            overlay.stop()
+
+    def test_dispatch_uses_idle_add_not_a_private_context_source(self, mock_gtk):
+        overlay = Overlay()
+        overlay.start()
+        try:
+            overlay.show()
+            mock_gtk.GLib.idle_source_new.assert_not_called()
+            assert mock_gtk.GLib.idle_add.called
+        finally:
+            overlay.stop()
+
+
+# ---------------------------------------------------------------------------
+# MAJOR (round 2) — start()+stop() in immediate succession must not leave
+# the GTK thread stuck in loop.run() forever.
+# ---------------------------------------------------------------------------
+
+
+class TestStopRaceAgainstNotYetRunningLoop:
+    """`_ready` (which unblocks `start()`) is set in `_run_gtk`'s `finally`
+    *before* the thread reaches `loop.run()`. A caller that stops
+    immediately after start() returns can therefore reach `stop()` before
+    `run()` has actually started. `MainLoop.quit()` called on a loop that
+    isn't running yet is silently lost — GLib does not carry a pre-quit
+    forward — so a direct `loop.quit()` call here would risk parking the
+    daemon thread in `run()` forever, and every later `start()` becoming a
+    no-op because that thread is still alive. `stop()` must instead queue
+    the quit as a source on the context `run()` is about to iterate, which
+    has no such gap.
+    """
+
+    def test_stop_schedules_the_quit_through_idle_add_not_a_direct_call(self, mock_gtk):
+        overlay = Overlay()
+        overlay.start()
+        loop = overlay._main_loop
+        assert loop is not None
+
+        calls_before = mock_gtk.GLib.idle_add.call_count
+        overlay.stop()
+
+        assert mock_gtk.GLib.idle_add.call_count > calls_before
+        mock_gtk.GLib.idle_add.assert_any_call(loop.quit)
+
+
+# ---------------------------------------------------------------------------
+# MAJOR (round 2) — teardown must clear the window reference, not just
+# destroy the underlying GTK window.
+# ---------------------------------------------------------------------------
+
+
+class TestTeardownClearsTheWindowReference:
+    def test_window_reference_is_cleared_after_stop(self, mock_gtk):
+        overlay = Overlay()
+        overlay.start()
+        assert overlay._window is not None
+
+        overlay.stop()
+
+        assert overlay._window is None
+
+    def test_public_methods_are_safe_noops_after_stop(self, mock_gtk):
+        """Once stopped, public methods must not dispatch against the
+        destroyed window — a restart or a concurrent show() call landing
+        after stop() must not resurrect a reference to it."""
+        overlay = Overlay()
+        overlay.start()
+        overlay.stop()
+
+        calls_before = mock_gtk.GLib.idle_add.call_count
+        overlay.show()
+        overlay.hide()
+        overlay.set_speech_active(True)
+        overlay.push_audio_level(0.5)
+        assert mock_gtk.GLib.idle_add.call_count == calls_before

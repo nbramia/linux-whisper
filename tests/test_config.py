@@ -335,6 +335,33 @@ class TestMergeDataclass:
         result = _merge_dataclass(STTConfig, None)
         assert result == STTConfig()
 
+    def test_falsey_non_mapping_override_raises_instead_of_silently_enabling(self):
+        # `overlay: false` in YAML parses to `{"overlay": False}`, not
+        # `{"overlay": None}` or `{"overlay": {}}`. `False or {}` == `{}`,
+        # so treating every falsey value the same as "absent" would merge
+        # in every default — including OverlayConfig's `enabled=True` — the
+        # opposite of what a user writing `overlay: false` almost certainly
+        # meant, and silently (it forces GDK_BACKEND=x11 and starts a GTK
+        # thread nobody asked for). Must raise instead of guessing.
+        with pytest.raises(ValueError, match="OverlayConfig"):
+            _merge_dataclass(OverlayConfig, False)
+
+    def test_other_non_mapping_overrides_also_raise(self):
+        # Any non-mapping value, not just False, is malformed input the
+        # same way — a bare scalar or a list can't sensibly become
+        # per-field overrides.
+        with pytest.raises(ValueError, match="TrayConfig"):
+            _merge_dataclass(TrayConfig, "off")
+        with pytest.raises(ValueError, match="TrayConfig"):
+            _merge_dataclass(TrayConfig, [1, 2, 3])
+
+    def test_config_from_dict_surfaces_the_falsey_section_error(self):
+        # The same danger, exercised through the real entry point: loading
+        # a config with `overlay: false` must not quietly produce
+        # OverlayConfig(enabled=True).
+        with pytest.raises(ValueError, match="OverlayConfig"):
+            Config.from_dict({"overlay": False})
+
 
 # ── _dataclass_to_dict ──────────────────────────────────────────────────────
 
