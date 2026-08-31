@@ -27,6 +27,8 @@ from linux_whisper.config import PolishConfig
 from linux_whisper.polish.disfluency import (
     DisfluencyRemover,
     DisfluencyResult,
+    _AMBIGUOUS_FILLERS,
+    _FILLER_WORDS,
     _detect_self_corrections,
     _normalise_whitespace,
     _remove_fillers,
@@ -43,12 +45,24 @@ class TestRemoveFillers:
     def test_removes_uh(self):
         assert "uh" not in _remove_fillers("uh I think").lower()
 
-    def test_removes_like(self):
+    def test_keeps_like_without_context_cue(self):
+        # "like" here is plain content ("similar to"/verb usage), not a
+        # discourse filler — no comma, no adjacency to an unambiguous filler,
+        # not utterance-initial/final. Issue #43: ambiguous fillers are only
+        # stripped when context marks them as disfluent.
         result = _remove_fillers("I was like going to the store")
-        assert "like" not in result.split()
+        assert "like" in result.split()
 
-    def test_removes_basically(self):
-        result = _remove_fillers("basically I need help")
+    def test_removes_comma_bounded_like(self):
+        result = _remove_fillers("It was, like, really fast.")
+        assert "like" not in result.lower()
+
+    def test_keeps_basically_without_context_cue(self):
+        result = _remove_fillers("I need basically help")
+        assert "basically" in result.lower()
+
+    def test_removes_utterance_initial_basically_with_comma(self):
+        result = _remove_fillers("Basically, I need help.")
         assert "basically" not in result.lower()
 
     def test_removes_you_know(self):
@@ -73,9 +87,16 @@ class TestRemoveFillers:
         assert "going" in result
         assert "there" in result
 
-    def test_removes_well(self):
-        result = _remove_fillers("well I think so")
-        assert "well" not in result.split()
+    def test_keeps_well_without_context_cue(self):
+        # "The well is dry." / "It went so well." — "well" as plain content
+        # (noun/adverb) is not utterance-initial+comma, comma-bounded,
+        # adjacent to an unambiguous filler, or utterance-final+comma.
+        result = _remove_fillers("It went so well")
+        assert "well" in result.split()
+
+    def test_removes_utterance_initial_well_with_comma(self):
+        result = _remove_fillers("Well, maybe.")
+        assert "well" not in result.lower()
 
     def test_keeps_okay(self):
         # "okay" is content, not a filler — see issue #42. Deleting it
@@ -99,6 +120,97 @@ class TestRemoveFillers:
     def test_preserves_non_filler_content(self):
         text = "the quick brown fox jumps over the lazy dog"
         assert _remove_fillers(text).strip() == text
+
+
+class TestContextualAmbiguousFillers:
+    """Issue #43: ambiguous fillers (like, right, so, well, actually,
+    basically, literally, anyway, anyways) are only stripped when context
+    marks them as disfluent, never unconditionally.
+    """
+
+    # The six reproduction cases from the issue — each retains its content
+    # word because none of them carry a context cue (comma or adjacency to
+    # an unambiguous filler).
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("I like this design.", "I like this design."),
+            ("You are right about that.", "You are right about that."),
+            ("Turn right at the light.", "Turn right at the light."),
+            ("It went so well.", "It went so well."),
+            ("The well is dry.", "The well is dry."),
+            ("That is actually true.", "That is actually true."),
+        ],
+    )
+    def test_reproduction_cases_retain_content_word(self, raw, expected):
+        assert _remove_fillers(raw) == expected
+
+    # Genuine fillers still strip when context marks them as disfluent.
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("So, I think we should go.", "I think we should go."),
+            ("It was, like, really fast.", "It was really fast."),
+            ("um, like, maybe", "maybe"),
+        ],
+    )
+    def test_context_marked_fillers_still_strip(self, raw, expected):
+        assert _remove_fillers(raw).strip() == expected
+
+    # Each of the four context rules from the design, exercised directly.
+
+    def test_utterance_initial_followed_by_comma_is_filler(self):
+        result = _remove_fillers("So, we should leave now.")
+        assert "so" not in result.lower()
+
+    def test_bounded_by_commas_both_sides_is_filler(self):
+        result = _remove_fillers("It is, right, the best option.")
+        assert not re.search(r"\bright\b", result, re.IGNORECASE)
+
+    def test_adjacent_to_unambiguous_filler_is_filler(self):
+        result = _remove_fillers("um like I think that works")
+        assert "like" not in result.split()
+
+    def test_utterance_final_preceded_by_comma_is_filler(self):
+        result = _remove_fillers("That is the plan, anyway.")
+        assert "anyway" not in result.lower()
+
+    def test_utterance_initial_without_comma_is_not_filler(self):
+        # No comma cue — "Right" opens a sentence as content ("Correct,
+        # let's continue" vs. plain agreement), not a discourse filler.
+        result = _remove_fillers("Right now I need to leave.")
+        assert "right" in result.lower()
+
+    def test_mid_sentence_without_comma_is_not_filler(self):
+        result = _remove_fillers("I think it is literally the best plan.")
+        assert "literally" in result.lower()
+
+    # Whole-utterance backstop: filler removal can never empty an utterance
+    # that contained at least one word. Cover every filler (unambiguous and
+    # ambiguous) alone and with terminal punctuation.
+
+    _all_filler_words = [w.rstrip("+") for w in _FILLER_WORDS] + list(_AMBIGUOUS_FILLERS)
+
+    @pytest.mark.parametrize("word", _all_filler_words)
+    @pytest.mark.parametrize("suffix", ["", ".", ",", "?"])
+    def test_backstop_never_empties_a_single_filler_word(self, word, suffix):
+        raw = f"{word}{suffix}"
+        result = _remove_fillers(raw)
+        assert any(ch.isalnum() for ch in result), (
+            f"{raw!r} -> {result!r} contains no word characters"
+        )
+
+    @pytest.mark.parametrize("word", _all_filler_words)
+    def test_backstop_never_empties_all_fillers_utterance(self, word):
+        # An utterance made entirely of the same filler, repeated with
+        # commas, so every context rule would otherwise fire.
+        raw = f"{word}, {word}, {word}."
+        result = _remove_fillers(raw)
+        assert any(ch.isalnum() for ch in result), (
+            f"{raw!r} -> {result!r} contains no word characters"
+        )
 
 
 class TestRemoveRepetitions:
@@ -218,8 +330,11 @@ class TestDisfluencyRemover:
         assert "I want to go home" == result.text
 
     def test_combined_fillers_and_repetitions(self, remover):
+        # "like" here has no context cue (no comma, not adjacent to an
+        # unambiguous filler) — issue #43 keeps it as content. Only "um"
+        # (unambiguous) and the "the the" repetition are removed.
         result = remover.process("um the the cat was like sitting there")
-        assert "the cat was sitting there" == result.text
+        assert "the cat was like sitting there" == result.text
 
     def test_self_correction_detected(self, remover):
         result = remover.process("meet at 3 actually meet at 5")
@@ -261,20 +376,36 @@ class TestDisfluencyRemover:
             ("uh let's start", "uh"),
             ("hmm let me think", "hmm"),
             ("erm I forgot", "erm"),
-            ("basically I need help", "basically"),
+            ("Basically, I need help.", "basically"),
             ("it was, like, really fast", "like"),
-            ("so we should go", "so"),
         ],
     )
     def test_other_fillers_still_stripped(self, remover, raw, stripped_word):
-        # Proves the #42 fix is scoped to "okay"/"ok" — every other filler
-        # in _FILLER_WORDS still strips exactly as before.
+        # Proves the #42 fix is scoped to "okay"/"ok" — every other
+        # unambiguous filler (um/uh/hmm/erm) still strips unconditionally as
+        # before, and every ambiguous filler (basically/like) still strips
+        # when its context marks it as disfluent (issue #43).
         #
         # Match on a word boundary rather than str.split(): a filler that
         # survived with punctuation attached ("um,") is still a survivor,
         # but split() tokenises it as "um," and would let the test pass.
         result = remover.process(raw)
         assert not re.search(rf"\b{stripped_word}\b", result.text, re.IGNORECASE)
+
+    def test_bare_so_is_no_longer_stripped(self, remover):
+        # Issue #43, intentional behaviour change from #45's baseline: "so"
+        # used to be stripped unconditionally by the flat filler regex. With
+        # no comma cue, no adjacency to an unambiguous filler, and not in a
+        # position that reads as a discourse marker, it is ordinary content
+        # ("therefore") and must survive.
+        result = remover.process("so we should go")
+        assert "so" in result.text.lower().split()
+
+    def test_utterance_initial_so_with_comma_still_stripped(self, remover):
+        # The disfluency-marking use of "so" ("So, I think we should go.")
+        # is unaffected by the above — it still strips.
+        result = remover.process("So, we should go.")
+        assert "so" not in re.sub(r"[^\w\s]", "", result.text).lower().split()
 
     # Real-world dictation examples
 
@@ -297,9 +428,12 @@ class TestDisfluencyRemover:
         assert result.has_self_corrections is True
 
     def test_real_dictation_numbers(self, remover):
+        # "like" has no context cue here (no comma, not adjacent to an
+        # unambiguous filler) — issue #43 keeps it as content ("about three
+        # hundred and fifty"). Only "um" (unambiguous) is removed.
         text = "um the total is like three hundred and fifty"
         result = remover.process(text)
-        assert "the total is three hundred and fifty" == result.text
+        assert "the total is like three hundred and fifty" == result.text
 
 
 # =====================================================================

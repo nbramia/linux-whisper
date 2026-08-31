@@ -54,7 +54,7 @@ Press hotkey         Capture audio        Transcribe            Polish text     
 
 The polish pipeline uses a hybrid approach:
 
-- **Stage 4a** -- BERT token classifier (or regex fallback) removes filler words ("um", "uh", "like"), repetitions, and false starts. Cannot hallucinate.
+- **Stage 4a** -- BERT token classifier (or regex fallback) removes filler words, repetitions, and false starts. Unambiguous fillers ("um", "uh", "hmm") are always stripped; ordinary words that only sometimes function as fillers ("like", "so", "right", "well", "actually", "basically", "literally", "anyway") are stripped only when context marks them as disfluent (comma-bounded, adjacent to an unambiguous filler, or utterance-initial/final with a comma) — otherwise they're kept as content. Cannot hallucinate.
 - **Stage 4b** -- ELECTRA classifier (or rule-based fallback) adds punctuation and fixes capitalization. Cannot hallucinate.
 - **Stage 4d** -- Rule-based formatter converts spoken numbers, dates, times, currency, emails, and phone numbers to their written forms.
 - **Stage 4c** -- Qwen3-4B-Instruct-2507 LLM via llama-cpp resolves self-corrections ("at 2, actually 4" becomes "at 4"). Only invoked when Stage 4a flags self-correction patterns. Context-aware: adapts tone based on the focused application. Lazy-loaded to save ~2.5GB RAM when not needed. Has a 3-second timeout and a 2x length hallucination guard.

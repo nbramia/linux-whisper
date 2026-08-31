@@ -63,6 +63,7 @@ _FILLER_PHRASES: list[str] = [
     r"to\s+be\s+honest",
 ]
 
+# Unambiguous fillers: not English words, always safe to strip anywhere.
 _FILLER_WORDS: list[str] = [
     "um+",
     "uh+",
@@ -74,6 +75,17 @@ _FILLER_WORDS: list[str] = [
     "mm+",
     "mhm+",
     "erm+",
+]
+
+# Ambiguous fillers: ordinary English words that *sometimes* function as
+# discourse fillers ("So, I think..." / "It was, like, really fast.") but are
+# just as often plain content ("I like this design.", "Turn right at the
+# light."). Whether a given occurrence is a filler is a contextual judgement
+# — see `_remove_ambiguous_fillers()` below and issue #43. This mirrors the
+# `_is_literal_token()` precedent in `polish/punctuation.py`: a rule that is
+# right in general and wrong on a recognisable subset gets a predicate, not a
+# flat pattern.
+_AMBIGUOUS_FILLERS: list[str] = [
     "like",
     "basically",
     "actually",
@@ -84,14 +96,17 @@ _FILLER_WORDS: list[str] = [
     "anyway",
     "anyways",
 ]
+_AMBIGUOUS_FILLER_SET: frozenset[str] = frozenset(w.lower() for w in _AMBIGUOUS_FILLERS)
 
-# Build a single compiled pattern for fillers.
+# Characters stripped from a token's edges to compare its bare word form.
+_EDGE_PUNCT = ".,!?;:\"'()[]{}"
+
+# Build compiled patterns.
 _phrase_alts = "|".join(_FILLER_PHRASES)
 _word_alts = "|".join(_FILLER_WORDS)
-_FILLER_RE = re.compile(
-    rf"(?<!['\w])(?:{_phrase_alts}|{_word_alts})(?!['\w])",
-    re.IGNORECASE,
-)
+_FILLER_PHRASE_RE = re.compile(rf"(?<!['\w])(?:{_phrase_alts})(?!['\w])", re.IGNORECASE)
+_FILLER_WORD_RE = re.compile(rf"(?<!['\w])(?:{_word_alts})(?!['\w])", re.IGNORECASE)
+_UNAMBIGUOUS_WORD_RE = re.compile(rf"^(?:{_word_alts})$", re.IGNORECASE)
 
 # Word-level repetitions: "I I I think" → "I think", "the the" → "the".
 _REPETITION_RE = re.compile(
@@ -309,9 +324,109 @@ def _detect_self_corrections(text: str) -> bool:
     return False
 
 
+def _bare_word(token: str) -> str:
+    """Strip leading/trailing punctuation from *token* for word comparison."""
+    return token.strip(_EDGE_PUNCT)
+
+
+def _is_unambiguous_filler(bare: str) -> bool:
+    """True if *bare* is one of the non-word fillers (um, uh, hmm, ...)."""
+    return bool(bare) and _UNAMBIGUOUS_WORD_RE.fullmatch(bare) is not None
+
+
+def _remove_ambiguous_fillers(text: str) -> str:
+    """Strip an ambiguous filler only where context marks it as disfluent.
+
+    An ambiguous word (e.g. "like", "so", "right") is content by default —
+    stripping it unconditionally deletes ordinary English ("I like this
+    design." -> "I this design.", issue #43). It is only treated as a filler
+    when *any* of these context cues hold:
+
+    - it is utterance-initial and followed by a comma ("So, I think...");
+    - it is bounded by commas on both sides ("..., like, ...");
+    - it is immediately adjacent to an unambiguous filler ("um, like, ...");
+    - it is utterance-final and preceded by a comma ("..., right.").
+
+    This operates on the ORIGINAL token list (before unambiguous fillers are
+    stripped) so the adjacency cue still sees "um"/"uh"/etc. as a neighbour.
+    """
+    tokens = text.split()
+    n = len(tokens)
+    if n == 0:
+        return text
+
+    bares = [_bare_word(t) for t in tokens]
+    ends_comma = [t.endswith(",") for t in tokens]
+
+    remove = [False] * n
+    clear_preceding_comma = [False] * n
+
+    for i in range(n):
+        if bares[i].lower() not in _AMBIGUOUS_FILLER_SET:
+            continue
+
+        preceded_by_comma = i > 0 and ends_comma[i - 1]
+        followed_by_comma = ends_comma[i]
+        prev_bare = bares[i - 1] if i > 0 else ""
+        next_bare = bares[i + 1] if i + 1 < n else ""
+        adjacent_unambiguous = _is_unambiguous_filler(prev_bare) or _is_unambiguous_filler(
+            next_bare
+        )
+        is_initial = i == 0
+        is_final = i == n - 1
+
+        is_filler = (
+            (is_initial and followed_by_comma)
+            or (preceded_by_comma and followed_by_comma)
+            or adjacent_unambiguous
+            or (is_final and preceded_by_comma)
+        )
+        if is_filler:
+            remove[i] = True
+            if preceded_by_comma:
+                clear_preceding_comma[i] = True
+
+    if not any(remove):
+        return text
+
+    output: list[str] = []
+    for i, token in enumerate(tokens):
+        if remove[i]:
+            # The comma pairing with this filler was marking the aside it
+            # introduced ("It was, like, really fast."); with the filler
+            # gone the comma is an orphan and must go too, or the sentence
+            # reads as if it were cut off ("It was, really fast.").
+            if clear_preceding_comma[i] and output and output[-1].endswith(","):
+                output[-1] = output[-1][:-1]
+            continue
+        output.append(token)
+
+    return " ".join(output)
+
+
+def _has_word_char(text: str) -> bool:
+    """True if *text* contains at least one alphanumeric character."""
+    return any(ch.isalnum() for ch in text)
+
+
 def _remove_fillers(text: str) -> str:
-    """Strip filler words / discourse markers from *text*."""
-    return _FILLER_RE.sub("", text)
+    """Strip filler words / discourse markers from *text*.
+
+    Unambiguous fillers (um, uh, hmm, ...) are stripped anywhere.  Ambiguous
+    fillers (like, so, right, ...) are stripped only when context marks them
+    as disfluent — see `_remove_ambiguous_fillers()`.
+
+    Hard backstop: if removal would reduce non-empty, non-punctuation-only
+    input to empty or punctuation-only text, the input is returned unchanged.
+    No dictation may ever inject nothing when the STT produced words.
+    """
+    without_phrases = _FILLER_PHRASE_RE.sub("", text)
+    without_ambiguous = _remove_ambiguous_fillers(without_phrases)
+    cleaned = _FILLER_WORD_RE.sub("", without_ambiguous)
+
+    if _has_word_char(text) and not _has_word_char(cleaned):
+        return text
+    return cleaned
 
 
 # Repeated number words are almost never a stammer.  Spoken years repeat by
