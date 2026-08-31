@@ -79,6 +79,14 @@ class TrayConfig:
 
 
 @dataclass(frozen=True)
+class OverlayConfig:
+    enabled: bool = True
+    position: str = "center"  # center | bottom-center | top-center
+
+    VALID_POSITIONS = ("center", "bottom-center", "top-center")
+
+
+@dataclass(frozen=True)
 class Config:
     hotkey: str = "fn"
     mode: str = "auto"  # auto | hold | toggle | vad-auto
@@ -87,6 +95,7 @@ class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
     inject: InjectConfig = field(default_factory=InjectConfig)
     tray: TrayConfig = field(default_factory=TrayConfig)
+    overlay: OverlayConfig = field(default_factory=OverlayConfig)
     snippets: dict[str, str] = field(default_factory=dict)
 
     VALID_MODES = ("auto", "hold", "toggle", "vad-auto")
@@ -102,6 +111,7 @@ class Config:
             audio=_merge_dataclass(AudioConfig, data.get("audio", {})),
             inject=_merge_dataclass(InjectConfig, data.get("inject", {})),
             tray=_merge_dataclass(TrayConfig, data.get("tray", {})),
+            overlay=_merge_dataclass(OverlayConfig, data.get("overlay", {})),
             snippets=data.get("snippets") or {},
         )
 
@@ -136,6 +146,11 @@ class Config:
             errors.append(f"Unusual sample_rate {self.audio.sample_rate}")
         if not 0.0 < self.audio.vad_threshold < 1.0:
             errors.append(f"vad_threshold must be between 0 and 1, got {self.audio.vad_threshold}")
+        if self.overlay.position not in OverlayConfig.VALID_POSITIONS:
+            errors.append(
+                f"Invalid overlay.position '{self.overlay.position}', "
+                f"must be one of {OverlayConfig.VALID_POSITIONS}"
+            )
         return errors
 
     def save_default(self, path: Path | None = None) -> None:
@@ -150,8 +165,34 @@ class Config:
         logger.info("Wrote default config to %s", path)
 
 
-def _merge_dataclass[T](cls: type[T], overrides: dict) -> T:
-    """Create a dataclass instance, merging overrides with defaults."""
+def _merge_dataclass[T](cls: type[T], overrides: dict | None) -> T:
+    """Create a dataclass instance, merging overrides with defaults.
+
+    A YAML section written with no mapping under it (e.g. a bare ``overlay:``
+    key) parses to ``None``, not ``{}`` — treat that the same as "no
+    overrides", not a crash.
+
+    A section given a concrete *non-mapping* value (e.g. ``overlay: false``
+    or ``tray: "off"``) is a different, more dangerous case. ``None`` and a
+    falsey non-mapping look the same under ``overrides or {}``, but they
+    don't mean the same thing: silently treating ``overlay: false`` as "no
+    overrides" merges in every field's *default*, including
+    ``enabled=True`` — the opposite of what a user writing ``overlay: false``
+    almost certainly intended, and it takes effect silently (it forces
+    ``GDK_BACKEND=x11`` and starts a GTK thread nobody asked for). Refuse to
+    guess: raise so the user gets a clear error instead of the inverse of
+    what they wrote. The fix on their end is the explicit form, e.g.
+    ``overlay:\n  enabled: false``.
+    """
+    if overrides is not None and not isinstance(overrides, dict):
+        raise ValueError(
+            f"config section for {cls.__name__} must be a mapping (or "
+            f"omitted/blank for defaults), got {overrides!r} of type "
+            f"{type(overrides).__name__} — did you mean to write out its "
+            f"fields, e.g. 'enabled: false' nested under the section, "
+            f"instead of a bare value?"
+        )
+    overrides = overrides or {}
     defaults = cls()
     fields = {f.name for f in cls.__dataclass_fields__.values()}
     kwargs = {}

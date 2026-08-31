@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -13,6 +15,7 @@ from linux_whisper.config import (
     AudioConfig,
     Config,
     InjectConfig,
+    OverlayConfig,
     PolishConfig,
     STTConfig,
     TrayConfig,
@@ -35,6 +38,7 @@ def _make_config(**overrides) -> Config:
         audio=AudioConfig(auto_gain=True),
         inject=InjectConfig(method="auto"),
         tray=TrayConfig(enabled=False),
+        overlay=OverlayConfig(enabled=False),
         snippets={},
     )
     defaults.update(overrides)
@@ -156,6 +160,110 @@ class TestSetup:
 
         # State machine should have a listener now
         assert len(app.state._listeners) == 1
+
+    async def test_setup_forces_x11_backend_before_tray_starts_when_overlay_enabled(
+        self, monkeypatch
+    ):
+        """BLOCKER regression guard: the tray starts its GTK3 thread before
+        the overlay does (setup() calls _setup_tray() before
+        _setup_overlay(); run() starts tray before overlay), and PyGObject
+        locks in the GDK backend as a side effect of importing `Gdk`/`Gtk` —
+        verified against a real display, this happens even before any
+        window is built. Setting GDK_BACKEND=x11 must happen as a bare
+        os.environ write before _setup_tray() runs (and before importing
+        `linux_whisper.overlay` or `linux_whisper.tray` at all) — calling a
+        helper that lives inside overlay.py would already be too late,
+        because importing overlay.py to reach it would run its top-level
+        `from gi.repository import Gdk` first. See app.py's setup()."""
+        monkeypatch.delenv("GDK_BACKEND", raising=False)
+        app = _make_app(_make_config(overlay=OverlayConfig(enabled=True)))
+        order: list[tuple[str, str | None]] = []
+
+        async def _record_tray():
+            order.append(("_setup_tray", os.environ.get("GDK_BACKEND")))
+
+        for m in [
+            "_setup_audio",
+            "_setup_stt",
+            "_setup_polish",
+            "_setup_snippets",
+            "_setup_injector",
+            "_setup_hotkey",
+            "_setup_overlay",
+        ]:
+            setattr(app, m, AsyncMock())
+        app._setup_tray = _record_tray
+
+        await app.setup()
+
+        # By the time _setup_tray() ran, the env var was already "x11".
+        assert order == [("_setup_tray", "x11")]
+
+    async def test_setup_does_not_force_x11_backend_when_overlay_disabled(self, monkeypatch):
+        monkeypatch.delenv("GDK_BACKEND", raising=False)
+        app = _make_app(_make_config(overlay=OverlayConfig(enabled=False)))
+        for m in [
+            "_setup_audio",
+            "_setup_stt",
+            "_setup_polish",
+            "_setup_snippets",
+            "_setup_injector",
+            "_setup_hotkey",
+            "_setup_tray",
+            "_setup_overlay",
+        ]:
+            setattr(app, m, AsyncMock())
+
+        await app.setup()
+
+        assert "GDK_BACKEND" not in os.environ
+
+
+# ---------------------------------------------------------------------------
+# 2b. App._setup_overlay()
+# ---------------------------------------------------------------------------
+
+
+class TestSetupOverlay:
+    """The overlay used to fail silently (self._overlay = None, no log) when
+    unavailable — that silence is what let it rot undetected for five
+    months. These tests guard the three states an operator needs visible:
+    disabled by config, enabled-but-unavailable (must WARN with a reason),
+    and enabled-and-available."""
+
+    async def test_disabled_by_config_sets_no_overlay(self, caplog):
+        app = _make_app(_make_config(overlay=OverlayConfig(enabled=False)))
+        with caplog.at_level(logging.INFO):
+            await app._setup_overlay()
+
+        assert app._overlay is None
+        assert any("disabled" in r.message.lower() for r in caplog.records)
+
+    async def test_enabled_but_unavailable_logs_warning_with_reason(self, monkeypatch, caplog):
+        import linux_whisper.overlay as overlay_module
+
+        monkeypatch.setattr(overlay_module, "_HAS_GTK", False)
+        monkeypatch.setattr(
+            overlay_module, "_UNAVAILABLE_REASON", "GTK 3.0 unavailable: no gi (test)"
+        )
+
+        app = _make_app(_make_config(overlay=OverlayConfig(enabled=True)))
+        with caplog.at_level(logging.WARNING):
+            await app._setup_overlay()
+
+        assert app._overlay is None
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert warnings, "expected a WARNING when the overlay is unavailable"
+        assert any("GTK 3.0 unavailable: no gi (test)" in r.message for r in warnings)
+
+    async def test_enabled_and_available_sets_overlay(self, mock_gtk, caplog):
+        app = _make_app(_make_config(overlay=OverlayConfig(enabled=True, position="top-center")))
+        with caplog.at_level(logging.INFO):
+            await app._setup_overlay()
+
+        assert app._overlay is not None
+        assert app._overlay.available is True
+        assert any("Overlay ready" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------
@@ -556,6 +664,83 @@ class TestHandleRecordingStop:
 
 
 # ---------------------------------------------------------------------------
+# 4b. _feed_audio_levels() — the overlay's bars were driven by math.sin()
+# because push_audio_level() was never wired to anything real. This is the
+# regression guard: the audio monitor loop must push real levels.
+# ---------------------------------------------------------------------------
+
+
+class TestFeedAudioLevels:
+    async def test_pushes_audio_level_to_overlay_while_recording(self):
+        app = _make_app()
+        app._overlay = MagicMock()
+        app._audio = MagicMock()
+        app._audio.get_pre_roll.return_value = np.array([0.5, -0.5, 0.3], dtype=np.float32)
+
+        await app.state.transition(AppState.RECORDING)
+
+        async def _stop_after_one_iteration(*_args, **_kwargs):
+            # End the loop after a single pass by leaving the RECORDING state.
+            await app.state.transition(AppState.IDLE)
+
+        with patch("asyncio.sleep", new=AsyncMock(side_effect=_stop_after_one_iteration)):
+            await app._feed_audio_levels()
+
+        # Not just "called" — the actual peak amplitude of the sample
+        # (max(abs([0.5, -0.5, 0.3])) == 0.5) must reach the overlay, or a
+        # regression could feed it a constant/wrong value and this would
+        # still pass.
+        app._overlay.push_audio_level.assert_called_once_with(pytest.approx(0.5))
+
+    async def test_recording_start_wires_up_the_feed_loop_end_to_end(self):
+        """Regression guard for the actual bug (push_audio_level() wired to
+        nothing): goes through the real recording-start path — the one the
+        hotkey daemon triggers — rather than calling _feed_audio_levels()
+        directly, so a break in the `_handle_recording_start` wiring itself
+        (e.g. someone removing the `ensure_future` call) would fail this."""
+        app = _make_app()
+        app._overlay = MagicMock()
+        app._audio = MagicMock()
+        app._audio.get_pre_roll.return_value = np.array([0.2, -0.9, 0.4], dtype=np.float32)
+
+        async def _stop_after_one_iteration(*_args, **_kwargs):
+            await app.state.transition(AppState.IDLE)
+
+        with patch("asyncio.sleep", new=AsyncMock(side_effect=_stop_after_one_iteration)):
+            await app._handle_recording_start()
+            # _handle_recording_start schedules _feed_audio_levels via
+            # ensure_future rather than awaiting it directly — let it run.
+            pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+            await asyncio.gather(*pending)
+
+        app._overlay.show.assert_called_once()
+        app._overlay.push_audio_level.assert_called_once_with(pytest.approx(0.9))
+
+    async def test_does_not_push_when_no_overlay(self):
+        app = _make_app()
+        app._overlay = None
+        app._audio = MagicMock()
+        app._audio.get_pre_roll.return_value = np.array([0.5, -0.5, 0.3], dtype=np.float32)
+
+        await app.state.transition(AppState.RECORDING)
+
+        async def _stop_after_one_iteration(*_args, **_kwargs):
+            await app.state.transition(AppState.IDLE)
+
+        with patch("asyncio.sleep", new=AsyncMock(side_effect=_stop_after_one_iteration)):
+            # Should not raise even though there's no overlay to push to.
+            await app._feed_audio_levels()
+
+    async def test_noop_without_audio(self):
+        app = _make_app()
+        app._audio = None
+        app._overlay = MagicMock()
+        # Should return immediately without touching the overlay.
+        await app._feed_audio_levels()
+        app._overlay.push_audio_level.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # 5. _record_latency()
 # ---------------------------------------------------------------------------
 
@@ -767,6 +952,7 @@ class TestConfigReconstruction:
             audio=AudioConfig(auto_gain=True, sample_rate=16000),
             inject=InjectConfig(method="clipboard"),
             tray=TrayConfig(enabled=True),
+            overlay=OverlayConfig(enabled=True, position="bottom-center"),
             snippets={"test": "value"},
         )
         app = _make_app(config)
@@ -792,6 +978,7 @@ class TestConfigReconstruction:
         assert app.config.audio.auto_gain is True
         assert app.config.inject.method == "clipboard"
         assert app.config.tray.enabled is True
+        assert app.config.overlay.position == "bottom-center"
         assert app.config.snippets == {"test": "value"}
 
     async def test_model_change_preserves_stt_threads(self):

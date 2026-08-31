@@ -11,6 +11,7 @@ from linux_whisper.config import (
     AudioConfig,
     Config,
     InjectConfig,
+    OverlayConfig,
     PolishConfig,
     STTConfig,
     TrayConfig,
@@ -68,6 +69,11 @@ class TestDefaults:
         assert t.enabled is True
         assert t.show_preview is False
 
+    def test_overlay_defaults(self):
+        o = OverlayConfig()
+        assert o.enabled is True
+        assert o.position == "center"
+
 
 # ── from_dict ───────────────────────────────────────────────────────────────
 
@@ -122,6 +128,15 @@ class TestFromDict:
     def test_snippets_missing_defaults_to_empty(self):
         cfg = Config.from_dict({})
         assert cfg.snippets == {}
+
+    def test_overlay_from_dict(self):
+        cfg = Config.from_dict({"overlay": {"enabled": False, "position": "top-center"}})
+        assert cfg.overlay.enabled is False
+        assert cfg.overlay.position == "top-center"
+
+    def test_overlay_missing_defaults(self):
+        cfg = Config.from_dict({})
+        assert cfg.overlay == OverlayConfig()
 
     def test_polish_all_disabled(self):
         cfg = Config.from_dict({
@@ -187,6 +202,17 @@ class TestValidation:
         errors = cfg.validate()
         assert not any("vad_threshold" in e for e in errors)
 
+    def test_invalid_overlay_position(self):
+        cfg = Config.from_dict({"overlay": {"position": "middle"}})
+        errors = cfg.validate()
+        assert any("overlay.position" in e for e in errors)
+
+    @pytest.mark.parametrize("position", ["center", "bottom-center", "top-center"])
+    def test_valid_overlay_positions_accepted(self, position):
+        cfg = Config.from_dict({"overlay": {"position": position}})
+        errors = cfg.validate()
+        assert not any("overlay.position" in e for e in errors), f"position {position} rejected"
+
     def test_multiple_errors(self):
         cfg = Config.from_dict({
             "mode": "invalid",
@@ -227,6 +253,28 @@ class TestLoad:
         cfg = Config.load(path)
         assert cfg.mode == "vad-auto"
         assert cfg.hotkey == "fn"  # default
+
+    def test_overlay_round_trips_through_yaml(self, tmp_config_dir: Path):
+        path = tmp_config_dir / "overlay.yaml"
+        with open(path, "w") as f:
+            yaml.dump({"overlay": {"enabled": False, "position": "top-center"}}, f)
+        cfg = Config.load(path)
+        assert cfg.overlay.enabled is False
+        assert cfg.overlay.position == "top-center"
+        assert cfg.validate() == []
+
+    def test_bare_overlay_section_gives_defaults_instead_of_crashing(
+        self, tmp_config_dir: Path
+    ):
+        # `overlay:` with nothing indented under it parses to
+        # {"overlay": None}, not {"overlay": {}} — this used to raise
+        # AttributeError: 'NoneType' object has no attribute 'get' before
+        # validation ever ran.
+        path = tmp_config_dir / "bare_overlay.yaml"
+        path.write_text("overlay:\nhotkey: fn\n")
+        cfg = Config.load(path)
+        assert cfg.overlay == OverlayConfig()
+        assert cfg.validate() == []
 
 
 # ── save_default ────────────────────────────────────────────────────────────
@@ -281,6 +329,39 @@ class TestMergeDataclass:
         result = _merge_dataclass(STTConfig, {"VALID_BACKENDS": ("fake",)})
         assert result.backend == "whisper-cpp"
 
+    def test_none_overrides_falls_back_to_defaults(self):
+        # A YAML section written with no mapping under it (e.g. a bare
+        # "overlay:" key) parses to None, not {} — this must not crash.
+        result = _merge_dataclass(STTConfig, None)
+        assert result == STTConfig()
+
+    def test_falsey_non_mapping_override_raises_instead_of_silently_enabling(self):
+        # `overlay: false` in YAML parses to `{"overlay": False}`, not
+        # `{"overlay": None}` or `{"overlay": {}}`. `False or {}` == `{}`,
+        # so treating every falsey value the same as "absent" would merge
+        # in every default — including OverlayConfig's `enabled=True` — the
+        # opposite of what a user writing `overlay: false` almost certainly
+        # meant, and silently (it forces GDK_BACKEND=x11 and starts a GTK
+        # thread nobody asked for). Must raise instead of guessing.
+        with pytest.raises(ValueError, match="OverlayConfig"):
+            _merge_dataclass(OverlayConfig, False)
+
+    def test_other_non_mapping_overrides_also_raise(self):
+        # Any non-mapping value, not just False, is malformed input the
+        # same way — a bare scalar or a list can't sensibly become
+        # per-field overrides.
+        with pytest.raises(ValueError, match="TrayConfig"):
+            _merge_dataclass(TrayConfig, "off")
+        with pytest.raises(ValueError, match="TrayConfig"):
+            _merge_dataclass(TrayConfig, [1, 2, 3])
+
+    def test_config_from_dict_surfaces_the_falsey_section_error(self):
+        # The same danger, exercised through the real entry point: loading
+        # a config with `overlay: false` must not quietly produce
+        # OverlayConfig(enabled=True).
+        with pytest.raises(ValueError, match="OverlayConfig"):
+            Config.from_dict({"overlay": False})
+
 
 # ── _dataclass_to_dict ──────────────────────────────────────────────────────
 
@@ -318,6 +399,11 @@ class TestDataclassToDict:
     def test_non_dataclass_passthrough(self):
         assert _dataclass_to_dict(42) == 42
         assert _dataclass_to_dict("hello") == "hello"
+
+    def test_overlay_round_trip(self):
+        cfg = Config.from_dict({"overlay": {"enabled": False, "position": "bottom-center"}})
+        d = _dataclass_to_dict(cfg)
+        assert d["overlay"] == {"enabled": False, "position": "bottom-center"}
 
 
 # ── Frozen dataclass ───────────────────────────────────────────────────────

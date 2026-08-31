@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 import time
 from typing import TYPE_CHECKING
@@ -59,6 +60,23 @@ class App:
             for e in errors:
                 logger.error("Config error: %s", e)
             raise ValueError(f"Invalid configuration: {'; '.join(errors)}")
+
+        # Must run before this process imports ANYTHING GTK-related — this
+        # bare os.environ write, not a call into a helper in overlay.py or
+        # tray.py. Verified against a real GNOME/Wayland session: PyGObject
+        # resolves and locks in the GDK backend as a side effect of
+        # `from gi.repository import Gdk` (or Gtk) itself, at IMPORT time —
+        # not lazily at first Gtk.init()/window-construction, which is what
+        # "GDK picks its backend once, on first display access" would
+        # suggest. `overlay.py` and `tray.py` (via pystray) both import
+        # Gdk/Gtk at module scope and are only imported lazily, below, by
+        # `_setup_tray()`/`_setup_overlay()` — so importing either of them
+        # just to reach a helper function would already have locked the
+        # backend to native Wayland before that helper's body ever ran.
+        # Do not "simplify" this into a call to a function that lives in
+        # overlay.py — that was tried and measurably did not work.
+        if self.config.overlay.enabled:
+            os.environ["GDK_BACKEND"] = "x11"
 
         # STT must init before audio: pywhispercpp's ROCm/HIP C extension
         # segfaults if sounddevice (portaudio) is already loaded. Preloading
@@ -144,16 +162,25 @@ class App:
             logger.warning("pystray not available, running without system tray")
 
     async def _setup_overlay(self) -> None:
+        if not self.config.overlay.enabled:
+            logger.info("Overlay disabled by config")
+            return
         try:
             from linux_whisper.overlay import Overlay
 
-            self._overlay = Overlay()
-            if self._overlay.available:
-                logger.info("Overlay ready")
-            else:
-                self._overlay = None
-        except ImportError:
-            logger.debug("Overlay not available (GTK4 missing)")
+            overlay = Overlay(self.config.overlay)
+        except ImportError as exc:
+            logger.warning("Overlay unavailable: %s — running without recording pill", exc)
+            return
+
+        if overlay.available:
+            self._overlay = overlay
+            logger.info("Overlay ready")
+        else:
+            logger.warning(
+                "Overlay unavailable: %s — running without recording pill",
+                overlay.unavailable_reason,
+            )
 
     async def run(self) -> None:
         """Run the application until shutdown is requested."""
@@ -218,6 +245,7 @@ class App:
             audio=self.config.audio,
             inject=self.config.inject,
             tray=self.config.tray,
+            overlay=self.config.overlay,
             snippets=self.config.snippets,
         )
 
@@ -268,6 +296,7 @@ class App:
             audio=self.config.audio,
             inject=self.config.inject,
             tray=self.config.tray,
+            overlay=self.config.overlay,
             snippets=self.config.snippets,
         )
 
@@ -389,6 +418,9 @@ class App:
                         "audio: rms=%.5f peak=%.5f floor=%.5f speech=%s",
                         rms, peak, noise_floor, speech,
                     )
+
+                    if self._overlay:
+                        self._overlay.push_audio_level(peak)
 
                     if speech != last_speech:
                         last_speech = speech
