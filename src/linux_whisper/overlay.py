@@ -110,6 +110,9 @@ _BAR_MAX_HEIGHT = 28
 _MARGIN = 48  # pixels from the edge of the monitor for top/bottom placement
 _FPS = 30
 _LEVEL_HISTORY = 32  # frames of audio level history for smoothing
+_IDLE_LEVEL = 0.06   # resting bar height when the mic is quiet
+_BAR_ATTACK = 0.55   # rise quickly toward a louder sample
+_BAR_RELEASE = 0.18  # fall back gently, so speech reads as continuous
 
 # cairo operator constants, spelled out numerically to avoid a hard `import
 # cairo` dependency purely for two constants (pycairo ships with PyGObject's
@@ -343,21 +346,31 @@ class _OverlayWindow:
         """Update bar heights from audio level history."""
         with self._lock:
             levels = list(self._audio_levels)
-            speech = self._speech_active
             self._phase += 0.1
 
-        if speech:
-            n = len(levels)
-            for i in range(_BAR_COUNT):
-                idx = min(int((i / _BAR_COUNT) * n), n - 1)
-                target = levels[idx]
-                wave = 0.15 * math.sin(self._phase + i * 0.4)
-                target = max(0.05, min(1.0, target + wave))
-                self._bar_heights[i] += (target - self._bar_heights[i]) * 0.3
-        else:
-            for i in range(_BAR_COUNT):
-                breath = 0.08 + 0.04 * math.sin(self._phase * 0.5 + i * 0.3)
-                self._bar_heights[i] += (breath - self._bar_heights[i]) * 0.1
+        # Bars always follow the measured level. They used to be driven by the
+        # `speech` flag instead -- audio-reactive while it was true, and a
+        # decorative sine "breathing" animation whenever it was false. Since
+        # that flag went permanently false a few seconds into any continuous
+        # utterance, the pill spent most of a dictation animating something
+        # unrelated to the microphone. `speech` now only picks the colour.
+        n = len(levels)
+        for i in range(_BAR_COUNT):
+            # Oldest sample at the left edge, newest at the right, so the pill
+            # reads as a waveform scrolling past.
+            idx = min(int((i / _BAR_COUNT) * n), n - 1)
+            target = levels[idx]
+
+            if target < _IDLE_LEVEL:
+                # Near-silence: a low shimmer, so the pill still looks live
+                # while you are thinking rather than sitting completely flat.
+                target = _IDLE_LEVEL + 0.03 * math.sin(self._phase * 0.5 + i * 0.3)
+
+            # Fast attack, slower release -- a meter that rises instantly and
+            # falls gently tracks speech far better than symmetric smoothing.
+            current = self._bar_heights[i]
+            rate = _BAR_ATTACK if target > current else _BAR_RELEASE
+            self._bar_heights[i] += (target - current) * rate
 
     def _draw(self, widget: object, cr: object) -> bool:
         """Draw the pill with audio level bars."""

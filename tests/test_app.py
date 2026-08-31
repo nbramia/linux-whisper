@@ -686,11 +686,14 @@ class TestFeedAudioLevels:
         with patch("asyncio.sleep", new=AsyncMock(side_effect=_stop_after_one_iteration)):
             await app._feed_audio_levels()
 
-        # Not just "called" — the actual peak amplitude of the sample
-        # (max(abs([0.5, -0.5, 0.3])) == 0.5) must reach the overlay, or a
-        # regression could feed it a constant/wrong value and this would
-        # still pass.
-        app._overlay.push_audio_level.assert_called_once_with(pytest.approx(0.5))
+        # A loud sample well above the ambient floor must arrive as a near-full
+        # bar. The overlay is fed a level normalised in dB above the noise
+        # floor, not raw amplitude: ordinary speech only reaches ~0.02-0.06 rms
+        # on a real mic, so raw amplitude left the bars flat.
+        app._overlay.push_audio_level.assert_called_once()
+        (level,) = app._overlay.push_audio_level.call_args.args
+        assert 0.0 <= level <= 1.0
+        assert level > 0.9, f"loud audio should nearly fill the bar, got {level}"
 
     async def test_recording_start_wires_up_the_feed_loop_end_to_end(self):
         """Regression guard for the actual bug (push_audio_level() wired to
@@ -717,7 +720,64 @@ class TestFeedAudioLevels:
         # _on_recording_start so visible feedback does not wait on the event
         # loop (see test_show_happens_on_the_hotkey_thread_before_stt).
         app._overlay.show.assert_not_called()
-        app._overlay.push_audio_level.assert_called_once_with(pytest.approx(0.9))
+        app._overlay.push_audio_level.assert_called_once()
+        (level,) = app._overlay.push_audio_level.call_args.args
+        assert 0.0 <= level <= 1.0 and level > 0.9
+
+    async def test_speech_stays_detected_through_a_long_utterance(self):
+        """The noise floor must not learn your voice.
+
+        It used to adapt on every sample regardless of whether speech was
+        present, so during continuous talking it climbed toward the speech
+        level and the `rms > floor * 3` test went false and stayed false.
+        Simulated at a steady rms of 0.05 the old detector flipped to "no
+        speech" at t=6.9s and never came back. This drives ~20s of continuous
+        speech and asserts it never gets switched off.
+        """
+        app = _make_app()
+        app._overlay = MagicMock()
+        app._audio = MagicMock()
+        # Steady tone at a normal speaking level, well above ambient.
+        app._audio.get_pre_roll.return_value = np.full(1600, 0.05, dtype=np.float32)
+
+        await app.state.transition(AppState.RECORDING)
+
+        iterations = 600  # 20s at 30Hz
+
+        async def _advance(*_args, **_kwargs):
+            nonlocal iterations
+            iterations -= 1
+            if iterations <= 0:
+                await app.state.transition(AppState.IDLE)
+
+        with patch("asyncio.sleep", new=AsyncMock(side_effect=_advance)):
+            await app._feed_audio_levels()
+
+        # set_speech_active is only called on a change. Speech should latch on
+        # once and never be turned back off while the level is held steady.
+        calls = [c.args[0] for c in app._overlay.set_speech_active.call_args_list]
+        assert calls == [True], f"speech toggled during a steady utterance: {calls}"
+
+    async def test_silence_is_not_reported_as_speech(self):
+        app = _make_app()
+        app._overlay = MagicMock()
+        app._audio = MagicMock()
+        app._audio.get_pre_roll.return_value = np.full(1600, 0.0015, dtype=np.float32)
+
+        await app.state.transition(AppState.RECORDING)
+        remaining = 100
+
+        async def _advance(*_args, **_kwargs):
+            nonlocal remaining
+            remaining -= 1
+            if remaining <= 0:
+                await app.state.transition(AppState.IDLE)
+
+        with patch("asyncio.sleep", new=AsyncMock(side_effect=_advance)):
+            await app._feed_audio_levels()
+
+        calls = [c.args[0] for c in app._overlay.set_speech_active.call_args_list]
+        assert True not in calls, f"ambient silence reported as speech: {calls}"
 
     async def test_show_happens_on_the_hotkey_thread_before_stt(self):
         """The pill must be shown from the synchronous hotkey path, BEFORE
