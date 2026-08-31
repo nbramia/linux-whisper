@@ -99,13 +99,14 @@ _AMBIGUOUS_FILLERS: list[str] = [
 _AMBIGUOUS_FILLER_SET: frozenset[str] = frozenset(w.lower() for w in _AMBIGUOUS_FILLERS)
 
 # Characters stripped from a token's edges to compare its bare word form.
-_EDGE_PUNCT = ".,!?;:\"'()[]{}"
-
-# Pronoun-ish words that plausibly open a clause. Used only to narrow the
-# leading-adjacency context cue in `_classify_ambiguous_fillers()` below.
-_CLAUSE_LEAD_WORDS: frozenset[str] = frozenset(
-    {"i", "we", "you", "he", "she", "it", "they", "there", "that", "this"}
-)
+# Includes unicode curly quotes and the single-character ellipsis (…) in
+# addition to their ASCII equivalents — STT output uses both, and a token
+# like "um…" must strip down to the bare word "um" just as "um..." does
+# (issue #43 review, P3). Without these, a filler glued to unicode
+# punctuation neither gets recognised as a filler nor leaves an orphan,
+# because the whole raw token (word + attached punctuation) is dropped as a
+# unit once it IS recognised — see `_remove_fillers()`.
+_EDGE_PUNCT = ".,!?;:\"'()[]{}‘’“”…"
 
 # Build compiled patterns.
 _phrase_alts = "|".join(_FILLER_PHRASES)
@@ -297,7 +298,7 @@ class DisfluencyRemover:
         # otherwise the word is kept as content regardless of the model's
         # prediction (issue #43 review, finding 3).
         bares = [_bare_word(t) for t in tokens]
-        context_marks_filler, _clear_preceding_comma = _classify_ambiguous_fillers(
+        context_marks_filler, clear_preceding_comma = _classify_ambiguous_fillers(
             tokens, bares
         )
 
@@ -305,22 +306,42 @@ class DisfluencyRemover:
         kept: list[str] = []
 
         for i, word_idx in enumerate(token_map):
-            label = int(np.argmax(logits[i]))
             word = tokens[word_idx]
+            bare = bares[word_idx]
+
+            # Unambiguous fillers (um, uh, hmm, ...) are always stripped,
+            # anywhere, on the regex path — no context cue required. The
+            # ONNX path must give the same guarantee rather than deferring
+            # to the model: a KEEP label (or a tokenisation quirk that
+            # dropped the attached punctuation from the vocab lookup) must
+            # not let one through (issue #43 review, O2).
+            if _is_unambiguous_filler(bare):
+                continue
+
+            label = int(np.argmax(logits[i]))
             if label == _LABEL_KEEP:
                 kept.append(word)
-            elif label == _LABEL_REPAIR:
+                continue
+            if label == _LABEL_REPAIR:
                 kept.append(word)
                 has_self_corrections = True
-            else:
-                # _LABEL_REMOVE (and any unrecognised label): the model wants
-                # to drop this token. Override that for ambiguous vocabulary
-                # with no context cue — otherwise this is the exact bug issue
-                # #43 fixes on the regex path, still live here.
-                bare = bares[word_idx]
-                if bare.lower() in _AMBIGUOUS_FILLER_SET and not context_marks_filler[word_idx]:
-                    kept.append(word)
-                # else: genuine removal — skip the token
+                continue
+
+            # _LABEL_REMOVE (and any unrecognised label): the model wants
+            # to drop this token. Override that for ambiguous vocabulary
+            # with no context cue — otherwise this is the exact bug issue
+            # #43 fixes on the regex path, still live here.
+            if bare.lower() in _AMBIGUOUS_FILLER_SET and not context_marks_filler[word_idx]:
+                kept.append(word)
+                continue
+
+            # Genuine removal. If this was a comma-bounded ambiguous filler
+            # ("It was, like, really fast."), the comma on the previously
+            # kept word was only pairing with it and is now an orphan —
+            # same fix as the regex path (issue #43 review, O1).
+            if clear_preceding_comma[word_idx] and kept and kept[-1].endswith(","):
+                kept[-1] = kept[-1][:-1]
+            # else: genuine removal — skip the token
 
         cleaned = " ".join(kept)
         cleaned = _normalise_whitespace(cleaned)
@@ -394,14 +415,23 @@ def _classify_ambiguous_fillers(
 
     - it is utterance-initial and followed by a comma ("So, I think...");
     - it is bounded by commas on both sides ("..., like, ...");
-    - it immediately follows a *leading* run of unambiguous fillers at the
-      very start of the utterance, AND the next word looks like the start of
-      a clause ("um so I was thinking..." -> "so" is a filler; "um right
-      turn at the light" -> "right" is content, because "turn" doesn't open
-      a clause). Plain mid-sentence adjacency to a filler is not on its own
-      a cue ("it was uh so good" keeps "so" — issue #43 review, finding 1:
-      unqualified adjacency is too broad and deletes content).
     - it is utterance-final and preceded by a comma ("..., right.").
+
+    An earlier revision of this rule also fired on plain adjacency to a
+    *leading* run of unambiguous fillers when the following word looked like
+    a clause-starting pronoun ("um so I was..." -> "so" stripped). Issue #43
+    review, P1/P2 dropped that cue: it deleted genuine content whenever a
+    pronoun happened to follow ("um literally I translated it word for
+    word" stripped "literally", a real adverb, not a filler), and it was
+    inconsistent whenever one didn't ("um so we should go" stripped "so" but
+    "um so the build is broken" kept it — the exact same construction,
+    different outcome, for no reason a user could predict). A regex cannot
+    reliably tell "so" the filler from "so" the adverb by checking what part
+    of speech the next word merely looks like; that is a job for the BERT
+    classifier (issue #36), not another hand-tuned word list layered on this
+    one. Until then the conservative behaviour — keep the word — is
+    correct, and every ambiguous word now goes through the exact same three
+    comma-based cues regardless of what precedes it.
 
     *tokens* and *bares* MUST be the ORIGINAL token stream — before filler
     phrases such as "you know" are removed. Classifying against
@@ -434,12 +464,6 @@ def _classify_ambiguous_fillers(
 
     ends_comma = ["," in _trailing_punct(t) for t in tokens]
 
-    # Length of the run of unambiguous fillers anchored at the very start of
-    # the utterance (0 if the utterance doesn't open with one).
-    leading_run = 0
-    while leading_run < n and _is_unambiguous_filler(bares[leading_run]):
-        leading_run += 1
-
     for i in range(n):
         if bares[i].lower() not in _AMBIGUOUS_FILLER_SET:
             continue
@@ -448,16 +472,10 @@ def _classify_ambiguous_fillers(
         followed_by_comma = ends_comma[i]
         is_initial = i == 0
         is_final = i == n - 1
-        next_bare = bares[i + 1].lower() if i + 1 < n else ""
-
-        leading_adjacent = (
-            leading_run > 0 and i == leading_run and next_bare in _CLAUSE_LEAD_WORDS
-        )
 
         is_filler = (
             (is_initial and followed_by_comma)
             or (preceded_by_comma and followed_by_comma)
-            or leading_adjacent
             or (is_final and preceded_by_comma)
         )
         if is_filler:
@@ -468,25 +486,87 @@ def _classify_ambiguous_fillers(
     return remove, clear_preceding_comma
 
 
-def _phrase_removed_mask(tokens: list[str]) -> list[bool]:
+def _phrase_removed_mask(tokens: list[str]) -> tuple[list[bool], dict[int, str]]:
     """Mark tokens that fall inside a matched filler phrase ("you know", ...).
 
     Matches against ``" ".join(tokens)``, the canonical single-spaced form of
-    the ORIGINAL token stream, so character offsets map cleanly back onto
-    token boundaries.
+    the ORIGINAL token stream, so character offsets map onto token
+    boundaries.
+
+    A phrase match does not always *start* on a token boundary: the regex's
+    lookbehind only requires the preceding character not be a word character
+    or apostrophe, so punctuation glued to the previous word with no space
+    ("I was,you know thinking") lets the match begin mid-token, inside
+    "was,you". The previous version of this function assumed every match
+    started at a token boundary and recovered the token index by re-running
+    `str.split()` on the string prefix before the match — which (a) silently
+    mis-locates a mid-token match (it treats the partial "was," as if it
+    were the complete token, off-by-one against the real tokens that
+    follow), deleting a content token instead of the filler while leaving
+    the filler word itself untouched, and (b) re-splits that growing prefix
+    on *every* match, making phrase removal O(n^2) on inputs with many
+    matches (issue #43 review, R1 and R2).
+
+    Token start offsets are computed once in a single linear pass instead,
+    and a match landing mid-token has its retained (non-phrase) substring
+    recorded in the returned *partial* map rather than dropping the whole
+    token — so "was,you" correctly becomes "was," (the "you" consumed by
+    the phrase, the comma and "was" kept) rather than losing "was," outright
+    or leaving "you" behind.
+
+    Returns ``(mask, partial)``: `mask[i]` is True if `tokens[i]` falls
+    *entirely* inside a matched phrase and should be dropped; `partial`
+    maps the index of any token only *partially* covered by a match to the
+    substring of that token which survives.
     """
     n = len(tokens)
     mask = [False] * n
+    partial: dict[int, str] = {}
     if n == 0:
-        return mask
+        return mask, partial
+
+    starts = [0] * n
+    pos = 0
+    for i, t in enumerate(tokens):
+        starts[i] = pos
+        pos += len(t) + 1  # token text plus the joining space
 
     joined = " ".join(tokens)
+
+    def _token_at(offset: int) -> int:
+        """Binary search: index of the token whose span contains *offset*."""
+        lo, hi = 0, n - 1
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if starts[mid] <= offset:
+                lo = mid
+            else:
+                hi = mid - 1
+        return lo
+
     for m in _FILLER_PHRASE_RE.finditer(joined):
-        start_idx = len(joined[: m.start()].split())
-        n_words = len(m.group(0).split())
-        for i in range(start_idx, min(start_idx + n_words, n)):
+        start_tok = _token_at(m.start())
+        end_tok = _token_at(m.end() - 1)
+
+        if m.start() > starts[start_tok]:
+            # Match starts mid-token — keep the token's pre-match prefix.
+            prefix = tokens[start_tok][: m.start() - starts[start_tok]]
+            partial[start_tok] = prefix
+        else:
+            mask[start_tok] = True
+
+        tok_end = starts[end_tok] + len(tokens[end_tok])
+        if m.end() < tok_end:
+            # Match ends mid-token — keep the token's post-match suffix.
+            suffix = tokens[end_tok][m.end() - starts[end_tok] :]
+            partial[end_tok] = partial.get(end_tok, "") + suffix
+        elif end_tok not in partial:
+            mask[end_tok] = True
+
+        for i in range(start_tok + 1, end_tok):
             mask[i] = True
-    return mask
+
+    return mask, partial
 
 
 def _has_word_char(text: str) -> bool:
@@ -514,11 +594,17 @@ def _remove_fillers(text: str) -> str:
         return text
 
     bares = [_bare_word(t) for t in tokens]
-    phrase_removed = _phrase_removed_mask(tokens)
+    phrase_removed, phrase_partial = _phrase_removed_mask(tokens)
     ambiguous_remove, clear_preceding_comma = _classify_ambiguous_fillers(tokens, bares)
 
     output: list[str] = []
     for i, token in enumerate(tokens):
+        if i in phrase_partial:
+            # Only part of this token fell inside a matched phrase — keep
+            # the retained substring rather than the whole token or nothing
+            # (issue #43 review, R1).
+            output.append(phrase_partial[i])
+            continue
         if phrase_removed[i] or _is_unambiguous_filler(bares[i]) or ambiguous_remove[i]:
             # The comma pairing with a removed ambiguous filler was marking
             # the aside it introduced ("It was, like, really fast."); with

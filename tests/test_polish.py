@@ -87,12 +87,17 @@ class TestRemoveFillers:
         # Issue #43 review, finding 6: the previous version of this test only
         # checked that content words survived, which a no-op `_remove_fillers`
         # would also satisfy. Assert the exact cleaned string instead, so a
-        # no-op (or a partial no-op that misses "so"/"like") fails: "um"
-        # (unambiguous) and "so"/"like" (comma-cued ambiguous fillers) must
-        # all be gone, with no stray whitespace left behind from their
-        # removal.
+        # no-op fails: "um" (unambiguous) and comma-bounded "like" must be
+        # gone, with no stray whitespace and no orphaned comma left behind.
+        #
+        # "so" here is mid-sentence with no comma cue of its own (it follows
+        # "um," but isn't utterance-initial itself, and isn't comma-bounded)
+        # — it survives as content. Issue #43 review, P1/P2: an earlier
+        # revision stripped it anyway via a leading-adjacency-to-a-pronoun
+        # heuristic that also deleted genuine content elsewhere and was
+        # dropped for that reason — see `_classify_ambiguous_fillers()`.
         result = _remove_fillers("um, so I was thinking, like, we should go")
-        assert result == "I was thinking we should go"
+        assert result == "so I was thinking we should go"
 
     def test_keeps_well_without_context_cue(self):
         # "The well is dry." / "It went so well." — "well" as plain content
@@ -127,6 +132,50 @@ class TestRemoveFillers:
     def test_preserves_non_filler_content(self):
         text = "the quick brown fox jumps over the lazy dog"
         assert _remove_fillers(text).strip() == text
+
+
+class TestPhraseRemovalTokenBoundaries:
+    """Issue #43 review, R1/R2: `_phrase_removed_mask` assumed every filler
+    phrase match starts on a whitespace token boundary. When punctuation
+    glues the phrase to the previous word with no space ("was,you know"),
+    the match starts mid-token, and the old index bookkeeping (re-splitting
+    the string prefix before the match) both mis-located the match and made
+    phrase removal O(n^2) on inputs with many matches.
+    """
+
+    def test_phrase_starting_mid_token_does_not_delete_following_content(self):
+        # R1 (BLOCKER): with the bug, this dropped "thinking" (real content)
+        # while "you" (part of the filler) survived attached to "was,".
+        assert _remove_fillers("I was,you know thinking") == "I was, thinking"
+
+    def test_phrase_starting_mid_token_after_various_punctuation(self):
+        # The comma case above is the reported regression; cover the other
+        # edge-punctuation characters that can glue a word to a phrase with
+        # no space, to make sure the fix isn't comma-specific.
+        assert _remove_fillers("I was;you know thinking") == "I was; thinking"
+        assert _remove_fillers('I was"you know thinking') == 'I was" thinking'
+
+    def test_many_phrase_matches_stay_linear_and_within_budget(self):
+        # R2 (MAJOR): the old re-split-the-prefix-per-match approach was
+        # O(n^2). 2001 tokens ("you know" x1000 + "done") took 35.7ms on the
+        # buggy branch against 9.9ms on main — over the stage 4a latency
+        # budget in CLAUDE.md (< 15ms). Assert both correctness and that the
+        # pass is fast enough to stay well inside budget, so a future
+        # regression back to O(n^2) fails loudly instead of silently
+        # returning (the note that shipped this test).
+        text = ("you know " * 1000 + "done").strip()
+        assert len(text.split()) == 2001
+
+        _remove_fillers(text)  # warm up (regex module caches, etc.)
+        start = time.perf_counter()
+        result = _remove_fillers(text)
+        elapsed_ms = (time.perf_counter() - start) * 1000
+
+        assert result == "done"
+        assert elapsed_ms < 15.0, (
+            f"_remove_fillers took {elapsed_ms:.2f}ms on 2001 tokens — "
+            "stage 4a budget is < 15ms (CLAUDE.md)"
+        )
 
 
 class TestContextualAmbiguousFillers:
@@ -176,10 +225,6 @@ class TestContextualAmbiguousFillers:
         result = _remove_fillers("It is, right, the best option.")
         assert not re.search(r"\bright\b", result, re.IGNORECASE)
 
-    def test_adjacent_to_unambiguous_filler_is_filler(self):
-        result = _remove_fillers("um like I think that works")
-        assert "like" not in result.split()
-
     def test_utterance_final_preceded_by_comma_is_filler(self):
         result = _remove_fillers("That is the plan, anyway.")
         assert "anyway" not in result.lower()
@@ -194,30 +239,66 @@ class TestContextualAmbiguousFillers:
         result = _remove_fillers("I think it is literally the best plan.")
         assert "literally" in result.lower()
 
-    # Issue #43 review, finding 1: plain adjacency to an unambiguous filler
-    # is too broad a cue on its own and deletes content. It only counts when
-    # the ambiguous word opens the utterance right after a leading filler run
-    # AND the next word looks like the start of a clause.
+    # Issue #43 review, P1/P2: an earlier revision also treated plain
+    # adjacency to a leading run of unambiguous fillers as a cue, but only
+    # when the following word looked like a clause-starting pronoun. That
+    # was dropped entirely rather than narrowed further:
+    #
+    # - P1: it deleted real content whenever a pronoun happened to follow
+    #   ("um literally I translated it word for word" -> "literally", an
+    #   adverb, was stripped as if it were a filler).
+    # - P2: it was inconsistent whenever a pronoun didn't follow ("um so we
+    #   should go" stripped "so" but "um so the build is broken" kept it —
+    #   the same construction, different outcome, with nothing in the
+    #   sentence for a user to point to as the reason).
+    #
+    # A regex cannot reliably tell "so"-the-filler from "so"-the-adverb by
+    # checking what part of speech merely follows it. Adjacency to a leading
+    # filler is no longer a cue at all — every ambiguous word now goes
+    # through the same three comma-based rules regardless of what precedes
+    # it, deferring the harder judgement call to the BERT classifier
+    # (issue #36).
 
     def test_mid_sentence_adjacency_is_not_a_cue(self):
         # "so" is adjacent to "uh" but mid-sentence, not utterance-initial —
         # plain content ("so good"), not a filler.
         assert _remove_fillers("it was uh so good") == "it was so good"
 
+    def test_leading_adjacency_alone_is_not_a_cue(self):
+        # "like" opens the utterance right after "um" and is followed by a
+        # clause-starting pronoun ("I") — exactly the pattern the dropped
+        # heuristic treated as a filler. With no comma cue, it survives as
+        # content now (P1/P2).
+        assert _remove_fillers("um like I think that works") == "like I think that works"
+
     def test_leading_adjacency_without_clause_starter_is_not_a_cue(self):
         # "right" opens the utterance right after "um", but the next word
-        # ("turn") doesn't open a clause — "right" is the direction, not a
-        # discourse filler.
+        # ("turn") doesn't open a clause either — still content either way.
         assert _remove_fillers("um right turn at the light") == "right turn at the light"
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            # P1's exact reproduction: a real adverb, not a filler, deleted
+            # only because a pronoun happened to be the next word.
+            (
+                "um literally I translated it word for word",
+                "literally I translated it word for word",
+            ),
+            ("um actually I did finish it", "actually I did finish it"),
+        ],
+    )
+    def test_leading_adjacency_does_not_delete_content_before_a_pronoun(self, raw, expected):
+        assert _remove_fillers(raw) == expected
 
     # Issue #43 review, finding 2: a filler *phrase* must not fabricate
     # adjacency for an ambiguous word that follows it. Classification has to
     # run against the original token stream, before "you know" disappears.
+    # (Leading adjacency is no longer a cue at all — see P1/P2 above — so
+    # this now also just confirms phrase removal doesn't otherwise disturb
+    # "right".)
 
     def test_phrase_removal_does_not_fabricate_adjacency(self):
-        # Without the fix, removing "you know" leaves "um" and "right"
-        # touching in the output string, which the (buggy) adjacency check
-        # then reads as "right" being adjacent to "um" — it never was.
         result = _remove_fillers("um you know right turn at the light")
         assert result == "right turn at the light"
 
@@ -240,6 +321,17 @@ class TestContextualAmbiguousFillers:
     def test_comma_bounded_cue_seen_through_quotes(self):
         result = _remove_fillers('It was, "like," really fast')
         assert "like" not in result.lower()
+
+    # Issue #43 review, P3: `_EDGE_PUNCT` omitted unicode quotes and the
+    # single-character ellipsis (…), so a filler glued to one of them wasn't
+    # recognised as a filler at all — it neither stripped nor left an
+    # orphan, it just survived outright.
+
+    def test_unicode_ellipsis_glued_filler_is_stripped(self):
+        assert _remove_fillers("um… I think") == "I think"
+
+    def test_unicode_curly_quotes_glued_filler_is_stripped(self):
+        assert _remove_fillers("“um” I think") == "I think"
 
     # Whole-utterance backstop: filler removal can never empty an utterance
     # that contained at least one word. Cover every filler (unambiguous and
@@ -555,15 +647,47 @@ class TestOnnxDisfluencyPath:
         # "so" at utterance-start with a comma is a genuine cue — the
         # override must not block a REMOVE prediction that context agrees
         # with, only one that context contradicts.
-        r = self._remover_with_fake_model({"so"})
+        #
+        # The fake model matches vocab ids by exact `word.lower()`, and the
+        # actual token here is "So," (comma attached, no space) — the vocab
+        # entry has to include the comma or the lookup misses and the model
+        # predicts KEEP for a token it was never actually asked about.
+        r = self._remover_with_fake_model({"so,"})
         result = r.process("So, I think we should go.")
-        assert "so" not in result.text.lower().split()
+        # Issue #43 review, M1: `result.text.lower().split()` tokenises a
+        # surviving "So," as "so," (comma attached), which is never equal
+        # to the bare string "so" — so `"so" not in [...]` passed even when
+        # "So," was still in the output. Match on a word boundary instead,
+        # same fix as `test_other_fillers_still_stripped` in
+        # TestDisfluencyRemover.
+        assert not re.search(r"\bso\b", result.text, re.IGNORECASE)
 
     def test_onnx_path_is_actually_taken(self):
         r = self._remover_with_fake_model(set())
         assert r._using_onnx is True
         # Would raise AssertionError inside _process_onnx if session were None.
         r.process("some text")
+
+    # Issue #43 review, O1: `_process_onnx` computed `clear_preceding_comma`
+    # but never applied it, so a model REMOVE on a comma-bounded ambiguous
+    # filler left the pairing comma behind as an orphan.
+
+    def test_comma_bounded_filler_leaves_no_orphan_comma(self):
+        r = self._remover_with_fake_model({"like,"})
+        result = r.process("It was, like, really fast.")
+        assert result.text == "It was really fast."
+
+    # Issue #43 review, O2: the ONNX path deferred to the model for
+    # unambiguous fillers (um, uh, hmm, ...) instead of always stripping
+    # them the way the regex path does — a KEEP label (or a vocab lookup
+    # that missed the attached punctuation) let one through.
+
+    def test_unambiguous_filler_is_always_stripped_regardless_of_label(self):
+        # KEEP-all stub (empty remove set) — nothing tells the model to
+        # drop "um,", so without the O2 fix it survives.
+        r = self._remover_with_fake_model(set())
+        result = r.process("um, I think")
+        assert result.text == "I think"
 
 
 # =====================================================================
