@@ -713,8 +713,41 @@ class TestFeedAudioLevels:
             pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
             await asyncio.gather(*pending)
 
-        app._overlay.show.assert_called_once()
+        # show() is NOT called here any more — it moved to the synchronous
+        # _on_recording_start so visible feedback does not wait on the event
+        # loop (see test_show_happens_on_the_hotkey_thread_before_stt).
+        app._overlay.show.assert_not_called()
         app._overlay.push_audio_level.assert_called_once_with(pytest.approx(0.9))
+
+    async def test_show_happens_on_the_hotkey_thread_before_stt(self):
+        """The pill must be shown from the synchronous hotkey path, BEFORE
+        _stt.start_stream().
+
+        Two regressions this guards. (1) show() used to live in the async
+        _handle_recording_start, so feedback waited on call_soon_threadsafe ->
+        ensure_future -> a state transition. (2) start_stream() calls
+        _ensure_worker(), which blocks for ~4.3s when it has to spawn the GPU
+        worker — showing the pill after it means no feedback at all for the
+        first dictation after startup.
+
+        Audio capture must still be started before both, so the recording
+        itself never waits on the UI.
+        """
+        app = _make_app()
+        order: list[str] = []
+
+        app._overlay = MagicMock()
+        app._overlay.show.side_effect = lambda *a, **k: order.append("overlay.show")
+        app._audio = MagicMock()
+        app._audio.get_pre_roll.return_value = np.array([0.1], dtype=np.float32)
+        app._audio.start_recording.side_effect = lambda *a, **k: order.append("audio.start")
+        app._stt = MagicMock()
+        app._stt.start_stream.side_effect = lambda *a, **k: order.append("stt.start_stream")
+        app._loop = None  # returns before the async hand-off; irrelevant here
+
+        app._on_recording_start()
+
+        assert order == ["audio.start", "overlay.show", "stt.start_stream"], order
 
     async def test_does_not_push_when_no_overlay(self):
         app = _make_app()

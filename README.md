@@ -24,7 +24,7 @@ Local voice dictation for Linux. Press a hotkey, speak naturally with filler wor
 - **Pre-roll buffer** (750ms) captures audio before the hotkey press
 - **Text injection** auto-detects display server and compositor
 - **System tray** with state icons, model/mode switcher, snippets menu, latency stats
-- **Floating GTK3 pill overlay** (via XWayland) with animated audio level bars driven by live mic input — the primary recording indicator; positioned at `center` (default), `bottom-center`, or `top-center` via config, never steals input focus
+- **Floating GTK3 pill overlay** (via XWayland) with animated audio level bars driven by live mic input — the primary recording indicator; positioned at `bottom-center` (default), `center`, or `top-center` via config, never steals input focus
 - **Full YAML configuration** with validation
 
 ## Architecture
@@ -226,7 +226,7 @@ tray:
 # Floating recording pill — the primary recording indicator
 overlay:
   enabled: true
-  position: "center"           # center | bottom-center | top-center
+  position: "bottom-center"    # bottom-center | center | top-center
 
 # Voice snippets — trigger phrases that expand to saved text
 snippets:

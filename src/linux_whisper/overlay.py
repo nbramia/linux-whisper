@@ -231,6 +231,12 @@ class _OverlayWindow:
         self._window.set_decorated(False)
         self._window.set_resizable(False)
         self._window.set_default_size(_PILL_WIDTH, _PILL_HEIGHT)
+        # set_default_size alone is not enough: a POPUP with no child
+        # widget has no natural size to shrink to, and GTK3 allocates a
+        # 200x200 square instead of the 200x40 pill. The size request
+        # pins it, and also keeps the 30fps redraw to a fifth of the
+        # pixels -- this loop holds the GIL, so its cost is not free.
+        self._window.set_size_request(_PILL_WIDTH, _PILL_HEIGHT)
         self._window.set_app_paintable(True)
         self._window.set_keep_above(True)
         self._window.set_skip_taskbar_hint(True)

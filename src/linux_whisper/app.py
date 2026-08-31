@@ -108,6 +108,15 @@ class App:
         self._stt = create_engine(self.config)
         logger.info("STT engine ready: %s", self.config.stt.backend)
 
+        # Pre-spawn the GPU worker now rather than on the first fn press.
+        # This runs before _setup_audio() by design -- see the ordering note
+        # in setup(): whisper.cpp must load before sounddevice/portaudio.
+        warmup = getattr(self._stt, "warmup", None)
+        if callable(warmup):
+            t0 = time.monotonic()
+            warmup()
+            logger.info("STT warmup complete (%.1fs)", time.monotonic() - t0)
+
     async def _setup_polish(self) -> None:
         if not self.config.polish.enabled:
             logger.info("Polish pipeline disabled")
@@ -333,6 +342,17 @@ class App:
         if self._audio:
             pre_roll = self._audio.get_pre_roll(0.75)
             self._audio.start_recording()
+        # Show the pill before touching STT. Two reasons it must be here and
+        # not in the async follow-up: Overlay.show() only marshals onto the
+        # GTK thread via GLib.idle_add (thread-safe, microseconds), whereas
+        # call_soon_threadsafe -> ensure_future -> state transition put
+        # feedback well behind the keypress; and start_stream() below can
+        # block this thread for seconds when it has to spawn the GPU worker.
+        # Audio capture is already running by this point, so the recording
+        # itself never waits on the pill.
+        if self._overlay:
+            self._overlay.show()
+
         if self._stt:
             self._stt.start_stream()
             # Feed pre-roll into the STT engine immediately
@@ -356,9 +376,7 @@ class App:
         # hotkey thread for minimum latency. Just update async state here.
         await self.state.transition(AppState.RECORDING)
 
-        if self._overlay:
-            self._overlay.show()
-
+        # The pill was already shown synchronously in _on_recording_start.
         asyncio.ensure_future(self._feed_audio_levels())
         logger.debug("Recording started")
 

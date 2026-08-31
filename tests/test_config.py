@@ -72,7 +72,9 @@ class TestDefaults:
     def test_overlay_defaults(self):
         o = OverlayConfig()
         assert o.enabled is True
-        assert o.position == "center"
+        # bottom-center, not center: a pill parked in the middle of the screen
+        # sits on top of whatever you are dictating into.
+        assert o.position == "bottom-center"
 
 
 # ── from_dict ───────────────────────────────────────────────────────────────

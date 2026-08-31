@@ -532,7 +532,7 @@ target application.
 getactivewindow` fails on this desktop because the focused window is a native
 Wayland surface, so X11 focus queries can't resolve it. `move()` is
 re-asserted after `show_all()`, since the window manager can reposition the
-window on map. `overlay.position` (`center`, `bottom-center`, `top-center`)
+window on map. `overlay.position` (`bottom-center` default, `center`, `top-center`)
 controls the vertical anchor; horizontal placement is always centered on the
 monitor; `compute_pill_position()` clamps the result to the monitor's bounds
 so a monitor narrower or shorter than the pill can't push it off-screen.
@@ -676,7 +676,7 @@ tray:
 # Recording overlay (floating pill with audio level bars)
 overlay:
   enabled: true
-  position: "center"  # center | bottom-center | top-center
+  position: "bottom-center"  # bottom-center | center | top-center
 ```
 
 ---
