@@ -112,6 +112,7 @@ _MARGIN = 48  # pixels from the edge of the monitor for top/bottom placement
 _FPS = 30
 _LEVEL_HISTORY = 32  # frames of audio level history for smoothing
 _IDLE_LEVEL = 0.06   # resting bar height when the mic is quiet
+_BAR_ON_SHOW = 0.30  # bar height for the first frame, before audio arrives
 _BAR_ATTACK = 0.55   # rise quickly toward a louder sample
 _BAR_RELEASE = 0.18  # fall back gently, so speech reads as continuous
 
@@ -269,6 +270,7 @@ class _OverlayWindow:
         self._audio_levels: deque[float] = deque(
             [0.0] * _LEVEL_HISTORY, maxlen=_LEVEL_HISTORY
         )
+        self._seed_pending = False
         self._bar_heights: list[float] = [0.0] * _BAR_COUNT
         self._phase: float = 0.0  # animation phase
         self._lock = threading.Lock()
@@ -287,8 +289,24 @@ class _OverlayWindow:
                 self._speech_active = False
                 self._audio_levels.clear()
                 self._audio_levels.extend([0.0] * _LEVEL_HISTORY)
+            else:
+                # Seed the whole history from the first sample of this
+                # recording. Otherwise the bars spend _LEVEL_HISTORY /
+                # poll-rate = 32/30 = 1.07s scrolling 32 stale zeros out
+                # before they reflect anything you said -- so although the
+                # compositor presents the pill in ~18ms, what it presents is
+                # a dark body with 4px grey stubs, which reads as "the pill
+                # has not appeared yet".
+                self._seed_pending = True
 
         if active and not was_active:
+            # Give the very first frame something legible. The compositor
+            # presents ~18ms after this, but a dark body with bars at zero
+            # is nearly invisible against a dark desktop, so the pill only
+            # *looked* like it arrived once real levels showed up. Start the
+            # bars at a visible resting height; real audio takes over within
+            # ~100ms and overwrites this.
+            self._bar_heights = [_BAR_ON_SHOW] * _BAR_COUNT
             self._reposition()
             self._window.queue_draw()
             self._start_tick()
@@ -341,7 +359,15 @@ class _OverlayWindow:
         if not self._lock.acquire(blocking=False):
             return
         try:
-            self._audio_levels.append(min(1.0, max(0.0, level)))
+            clamped = min(1.0, max(0.0, level))
+            if self._seed_pending:
+                # First sample of a recording: fill the history with it so
+                # every bar is meaningful immediately (see set_recording).
+                self._seed_pending = False
+                self._audio_levels.clear()
+                self._audio_levels.extend([clamped] * _LEVEL_HISTORY)
+            else:
+                self._audio_levels.append(clamped)
         finally:
             self._lock.release()
 
@@ -367,8 +393,6 @@ class _OverlayWindow:
         if geom is None:
             return
         target = compute_pill_position(*geom, self._position)
-        if not force and target == self._last_position:
-            return
         self._last_position = target
         self._window.move(*target)
 

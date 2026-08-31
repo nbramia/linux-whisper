@@ -338,6 +338,51 @@ class TestPersistentSurface:
         assert not cr.stroke.called
 
 
+class TestFirstFrameIsMeaningful:
+    """The pill must convey something the instant it is revealed.
+
+    The compositor presents ~18ms after show(), but the pill still read as
+    "not there yet" for about a second. Two causes, both here rather than in
+    the compositor: the level history was refilled with 32 zeros on hide, and
+    at a 30Hz poll rate 32/30 = 1.07s of scrolling was needed before the bars
+    reflected anything said; and until then a dark body with zero-height bars
+    is nearly invisible on a dark desktop.
+    """
+
+    def test_bars_start_visible_on_show(self, mock_gtk):
+        from linux_whisper.overlay import _BAR_ON_SHOW, _OverlayWindow
+
+        win = _OverlayWindow("bottom-center")
+        win.prime()
+        # The animation tick would immediately smooth these toward the idle
+        # level; this asserts the value the FIRST frame is painted from.
+        win._start_tick = lambda: None
+        win.set_recording(True)
+
+        assert all(h == _BAR_ON_SHOW for h in win._bar_heights)
+        assert _BAR_ON_SHOW > 0.2, "first frame must be legible, not a stub"
+
+    def test_first_sample_seeds_the_whole_history(self, mock_gtk):
+        from linux_whisper.overlay import _LEVEL_HISTORY, _OverlayWindow
+
+        win = _OverlayWindow("bottom-center")
+        win.prime()
+        win.set_recording(False)   # fills history with zeros
+        win.set_recording(True)    # arms the seed
+        win.push_audio_level(0.8)
+
+        levels = list(win._audio_levels)
+        assert levels == [0.8] * _LEVEL_HISTORY, (
+            "the first sample must populate the whole history, or the bars "
+            "spend 1.07s scrolling stale zeros out"
+        )
+
+        # Subsequent samples scroll normally.
+        win.push_audio_level(0.2)
+        assert list(win._audio_levels)[-1] == 0.2
+        assert len(win._audio_levels) == _LEVEL_HISTORY
+
+
 class TestBackendVerification:
     def test_x11_backend_starts_normally(self, mock_gtk, caplog):
         """Sanity check: the happy path (what mock_gtk sets up by default)
