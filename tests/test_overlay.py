@@ -8,7 +8,7 @@ regardless of what happens to be available on the machine running the tests.
 from __future__ import annotations
 
 import logging
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pytest
 
@@ -278,6 +278,45 @@ class TestOverlayLifecycle:
 # backend mismatch must disable the overlay loudly rather than show a
 # mispositioned pill.
 # ---------------------------------------------------------------------------
+
+
+class TestPersistentSurface:
+    """The window is mapped once and kept mapped; show/hide is opacity only.
+
+    Mapping on demand cost ~1s of compositor time to present a fresh XWayland
+    surface, against <10ms of in-process work. Since a permanently mapped
+    window would otherwise swallow every click landing on it, it must also be
+    given an empty input region.
+    """
+
+    def test_prime_maps_transparent_and_click_through(self, mock_gtk):
+        from linux_whisper.overlay import _OverlayWindow
+
+        win = _OverlayWindow("bottom-center")
+        win.prime()
+
+        win._window.set_opacity.assert_called_with(0.0)
+        win._window.show_all.assert_called_once()
+        gdk_window = win._window.get_window.return_value
+        assert gdk_window.input_shape_combine_region.called, (
+            "a permanently mapped window must be click-through, or it eats "
+            "every click landing on the pill"
+        )
+
+    def test_show_and_hide_do_not_unmap(self, mock_gtk):
+        from linux_whisper.overlay import _OverlayWindow
+
+        win = _OverlayWindow("bottom-center")
+        win.prime()
+        win._window.hide.reset_mock()
+        win._window.show_all.reset_mock()
+
+        win.set_recording(True)
+        win.set_recording(False)
+
+        win._window.hide.assert_not_called()
+        win._window.show_all.assert_not_called()
+        assert win._window.set_opacity.call_args_list[-2:] == [call(1.0), call(0.0)]
 
 
 class TestBackendVerification:

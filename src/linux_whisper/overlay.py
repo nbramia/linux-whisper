@@ -69,6 +69,7 @@ from __future__ import annotations
 import logging
 import math
 import threading
+import time
 from collections import deque
 
 from linux_whisper.config import OverlayConfig
@@ -87,6 +88,7 @@ try:
 
     gi.require_version("Gtk", "3.0")
     gi.require_version("Gdk", "3.0")
+    import cairo
     from gi.repository import Gdk, GLib, Gtk  # noqa: F811 (populated on success)
 
     _HAS_GTK = True
@@ -285,12 +287,40 @@ class _OverlayWindow:
                 self._audio_levels.extend([0.0] * _LEVEL_HISTORY)
 
         if active and not was_active:
-            self._window.show_all()
+            # Position first, THEN reveal. The window is already mapped (see
+            # prime()); showing is only an opacity change, so the compositor
+            # never has to create a surface on the hot path.
             self._reposition()
+            self._window.set_opacity(1.0)
             self._start_tick()
         elif not active and was_active:
             self._stop_tick()
-            self._window.hide()
+            self._window.set_opacity(0.0)
+
+    def prime(self) -> None:
+        """Map the window once, fully transparent, and keep it mapped.
+
+        Measured cost of the old map-on-demand path, from the keypress:
+        audio 0.9ms, show() dispatch 0.1ms, show_all() 6.0ms, reposition
+        2.5ms -- under 10ms in-process, against roughly a second before the
+        pill was actually visible. The gap is Mutter creating and presenting
+        a brand-new XWayland surface each time the window was mapped, which
+        nothing inside this process can measure or speed up.
+
+        So the surface is created once at startup and never torn down;
+        show/hide became an opacity change. The window is given an empty
+        input region so that, although permanently mapped, it can never
+        receive a pointer event -- without that, a 200x40 dead zone would sit
+        over the bottom of the screen swallowing clicks.
+        """
+        self._window.set_opacity(0.0)
+        self._reposition()
+        self._window.show_all()
+
+        # Empty input region == click-through. Must happen after realize.
+        gdk_window = self._window.get_window()
+        if gdk_window is not None:
+            gdk_window.input_shape_combine_region(cairo.Region(), 0, 0)
 
     def set_speech_active(self, active: bool) -> None:
         with self._lock:
@@ -581,6 +611,12 @@ class Overlay:
                     "GDK_BACKEND=x11 did not take effect before the display "
                     "opened (see App.setup() and this module's docstring)"
                 )
+            # Backend is confirmed good — create and keep the compositor
+            # surface up front, transparent and click-through, so revealing
+            # the pill later is only an opacity change rather than a fresh
+            # XWayland surface (which took ~1s to present).
+            window.prime()
+
             # Bind to the default main context (pass None), not a private
             # one — see the module docstring: GTK3's draw/expose dispatch is
             # only ever delivered through the default context, and a private
