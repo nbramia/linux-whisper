@@ -49,6 +49,10 @@ packages = ["src/linux_whisper"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Prefer the checked-out tree over the editable install. Without this a
+# pytest run inside a git worktree silently imports the MAIN repo's src/
+# and tests the wrong code — see PR #45.
+pythonpath = ["src"]
 asyncio_mode = "auto"
 markers = [
     "slow: marks tests that require model loading",

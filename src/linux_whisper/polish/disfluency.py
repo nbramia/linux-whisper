@@ -83,8 +83,6 @@ _FILLER_WORDS: list[str] = [
     "well",
     "anyway",
     "anyways",
-    "okay",
-    "ok",
 ]
 
 # Build a single compiled pattern for fillers.

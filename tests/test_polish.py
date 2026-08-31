@@ -9,6 +9,7 @@ Tests cover:
 
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 from threading import Thread
@@ -76,9 +77,11 @@ class TestRemoveFillers:
         result = _remove_fillers("well I think so")
         assert "well" not in result.split()
 
-    def test_removes_okay(self):
+    def test_keeps_okay(self):
+        # "okay" is content, not a filler — see issue #42. Deleting it
+        # unconditionally caused stand-alone "OK" utterances to vanish.
         result = _remove_fillers("okay lets do this")
-        assert "okay" not in result.lower()
+        assert "okay" in result.lower()
 
     def test_removes_hmm(self):
         result = _remove_fillers("hmm let me think")
@@ -229,6 +232,49 @@ class TestDisfluencyRemover:
     def test_returns_disfluency_result(self, remover):
         result = remover.process("hello world")
         assert isinstance(result, DisfluencyResult)
+
+    # "okay"/"ok" regression tests — issue #42.
+    # These used to be stripped as fillers, so a stand-alone "OK" utterance
+    # vanished into an empty transcript. They're content, not filler.
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("OK", "OK"),
+            ("Okay.", "Okay."),
+            ("Is that okay?", "Is that okay?"),
+            ("That is okay with me.", "That is okay with me."),
+            # Utterance-initial "Okay," is a deliberate behaviour change,
+            # not a regression — it used to be stripped.
+            ("Okay, let's ship it.", "Okay, let's ship it."),
+        ],
+    )
+    def test_okay_is_retained(self, remover, raw, expected):
+        result = remover.process(raw)
+        assert result.text == expected
+
+    @pytest.mark.parametrize(
+        ("raw", "stripped_word"),
+        [
+            ("um I think we should go", "um"),
+            ("um, I think we should go", "um"),
+            ("uh let's start", "uh"),
+            ("hmm let me think", "hmm"),
+            ("erm I forgot", "erm"),
+            ("basically I need help", "basically"),
+            ("it was, like, really fast", "like"),
+            ("so we should go", "so"),
+        ],
+    )
+    def test_other_fillers_still_stripped(self, remover, raw, stripped_word):
+        # Proves the #42 fix is scoped to "okay"/"ok" — every other filler
+        # in _FILLER_WORDS still strips exactly as before.
+        #
+        # Match on a word boundary rather than str.split(): a filler that
+        # survived with punctuation attached ("um,") is still a survivor,
+        # but split() tokenises it as "um," and would let the test pass.
+        result = remover.process(raw)
+        assert not re.search(rf"\b{stripped_word}\b", result.text, re.IGNORECASE)
 
     # Real-world dictation examples
 
