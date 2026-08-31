@@ -286,33 +286,39 @@ class _OverlayWindow:
                 self._audio_levels.extend([0.0] * _LEVEL_HISTORY)
 
         if active and not was_active:
-            # Position first, THEN reveal. The window is already mapped (see
-            # prime()); showing is only an opacity change, so the compositor
-            # never has to create a surface on the hot path.
             self._reposition()
-            self._window.set_opacity(1.0)
+            self._window.queue_draw()
             self._start_tick()
         elif not active and was_active:
             self._stop_tick()
-            self._window.set_opacity(0.0)
+            # One final repaint to clear the pill; the surface itself stays
+            # mapped and opaque so the next reveal costs a single frame.
+            self._window.queue_draw()
 
     def prime(self) -> None:
         """Map the window once, fully transparent, and keep it mapped.
 
-        Measured cost of the old map-on-demand path, from the keypress:
-        audio 0.9ms, show() dispatch 0.1ms, show_all() 6.0ms, reposition
-        2.5ms -- under 10ms in-process, against roughly a second before the
-        pill was actually visible. The gap is Mutter creating and presenting
-        a brand-new XWayland surface each time the window was mapped, which
-        nothing inside this process can measure or speed up.
+        Everything in-process is already sub-millisecond -- measured on a
+        real keypress: evdev kernel timestamp to handler 0.2ms, `show()` to
+        the callback running on the GTK thread 0.4ms, `set_recording` itself
+        ~2.5ms. Yet the pill took about a second to appear. That entire
+        second is Mutter, and nothing in this process can measure it.
 
-        So the surface is created once at startup and never torn down;
-        show/hide became an opacity change. The window is given an empty
-        input region so that, although permanently mapped, it can never
-        receive a pointer event -- without that, a 200x40 dead zone would sit
-        over the bottom of the screen swallowing clicks.
+        Two things did NOT fix it, in order: mapping on demand (obviously
+        expensive -- a fresh XWayland surface per recording), then keeping
+        the window mapped but toggling opacity 0/1. The compositor drops a
+        fully-transparent surface too, and rebuilds it on reveal.
+
+        So the window is mapped once and stays mapped AND opaque forever.
+        "Hidden" means `_draw` paints nothing, which is an ordinary frame
+        update on a surface the compositor is already maintaining.
+
+        The window is given an empty input region so that, although
+        permanently mapped, it can never receive a pointer event -- without
+        that a 200x40 dead zone would sit over the bottom of the screen
+        swallowing clicks.
         """
-        self._window.set_opacity(0.0)
+        self._window.set_opacity(1.0)
         self._reposition()
         self._window.show_all()
 
@@ -409,6 +415,14 @@ class _OverlayWindow:
         cr.set_operator(_CAIRO_OPERATOR_CLEAR)
         cr.paint()
         cr.set_operator(_CAIRO_OPERATOR_OVER)
+
+        # Hidden == painted empty, NOT unmapped and NOT opacity 0. Both of
+        # those make Mutter tear the surface down and rebuild it on reveal,
+        # which is what cost ~1s. An always-mapped, always-opaque surface
+        # whose contents happen to be transparent is just a normal frame
+        # update, so revealing the pill is one compositor frame.
+        if not self._visible_state:
+            return False
 
         self._draw_rounded_rect(cr, 0, 0, width, height, _PILL_RADIUS)
         cr.set_source_rgba(*_Colors.BG)

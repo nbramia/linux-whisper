@@ -8,7 +8,7 @@ regardless of what happens to be available on the machine running the tests.
 from __future__ import annotations
 
 import logging
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -281,42 +281,61 @@ class TestOverlayLifecycle:
 
 
 class TestPersistentSurface:
-    """The window is mapped once and kept mapped; show/hide is opacity only.
+    """The surface is created once and never torn down.
 
-    Mapping on demand cost ~1s of compositor time to present a fresh XWayland
-    surface, against <10ms of in-process work. Since a permanently mapped
-    window would otherwise swallow every click landing on it, it must also be
-    given an empty input region.
+    Neither unmapping the window nor setting opacity to 0 works: Mutter drops
+    the surface either way and rebuilds it on reveal, which measured ~1s from
+    the keypress against <1ms of in-process work (input latency 0.2ms, GTK
+    dispatch 0.4ms). So the window stays mapped AND opaque, and "hidden"
+    simply means `_draw` paints nothing -- an ordinary frame update.
+
+    Because a permanently mapped window would otherwise swallow every click
+    landing on it, prime() also installs an empty input region.
     """
 
-    def test_prime_maps_transparent_and_click_through(self, mock_gtk):
+    def test_prime_maps_opaque_and_click_through(self, mock_gtk):
         from linux_whisper.overlay import _OverlayWindow
 
         win = _OverlayWindow("bottom-center")
         win.prime()
 
-        win._window.set_opacity.assert_called_with(0.0)
         win._window.show_all.assert_called_once()
+        win._window.set_opacity.assert_called_once_with(1.0)
         gdk_window = win._window.get_window.return_value
         assert gdk_window.input_shape_combine_region.called, (
             "a permanently mapped window must be click-through, or it eats "
             "every click landing on the pill"
         )
 
-    def test_show_and_hide_do_not_unmap(self, mock_gtk):
+    def test_show_and_hide_never_unmap_or_change_opacity(self, mock_gtk):
         from linux_whisper.overlay import _OverlayWindow
 
         win = _OverlayWindow("bottom-center")
         win.prime()
         win._window.hide.reset_mock()
         win._window.show_all.reset_mock()
+        win._window.set_opacity.reset_mock()
 
         win.set_recording(True)
         win.set_recording(False)
 
         win._window.hide.assert_not_called()
         win._window.show_all.assert_not_called()
-        assert win._window.set_opacity.call_args_list[-2:] == [call(1.0), call(0.0)]
+        win._window.set_opacity.assert_not_called()
+
+    def test_draw_paints_nothing_while_hidden(self, mock_gtk):
+        from linux_whisper.overlay import _OverlayWindow
+
+        win = _OverlayWindow("bottom-center")
+        win.prime()
+        cr = MagicMock()
+
+        win._draw(win._window, cr)
+
+        # Cleared, then nothing else -- no pill body, no bars.
+        assert cr.paint.called
+        assert not cr.fill.called, "hidden overlay must not paint the pill body"
+        assert not cr.stroke.called
 
 
 class TestBackendVerification:
