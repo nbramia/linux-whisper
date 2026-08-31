@@ -27,6 +27,10 @@ from linux_whisper.config import PolishConfig
 from linux_whisper.polish.disfluency import (
     DisfluencyRemover,
     DisfluencyResult,
+    _AMBIGUOUS_FILLERS,
+    _FILLER_WORDS,
+    _LABEL_KEEP,
+    _LABEL_REMOVE,
     _detect_self_corrections,
     _normalise_whitespace,
     _remove_fillers,
@@ -43,12 +47,24 @@ class TestRemoveFillers:
     def test_removes_uh(self):
         assert "uh" not in _remove_fillers("uh I think").lower()
 
-    def test_removes_like(self):
+    def test_keeps_like_without_context_cue(self):
+        # "like" here is plain content ("similar to"/verb usage), not a
+        # discourse filler — no comma, no adjacency to an unambiguous filler,
+        # not utterance-initial/final. Issue #43: ambiguous fillers are only
+        # stripped when context marks them as disfluent.
         result = _remove_fillers("I was like going to the store")
-        assert "like" not in result.split()
+        assert "like" in result.split()
 
-    def test_removes_basically(self):
-        result = _remove_fillers("basically I need help")
+    def test_removes_comma_bounded_like(self):
+        result = _remove_fillers("It was, like, really fast.")
+        assert "like" not in result.lower()
+
+    def test_keeps_basically_without_context_cue(self):
+        result = _remove_fillers("I need basically help")
+        assert "basically" in result.lower()
+
+    def test_removes_utterance_initial_basically_with_comma(self):
+        result = _remove_fillers("Basically, I need help.")
         assert "basically" not in result.lower()
 
     def test_removes_you_know(self):
@@ -68,14 +84,31 @@ class TestRemoveFillers:
         assert "sort of" not in result.lower()
 
     def test_removes_multiple_fillers(self):
-        result = _remove_fillers("um so like I was basically going there")
-        # Only meaningful words should remain
-        assert "going" in result
-        assert "there" in result
+        # Issue #43 review, finding 6: the previous version of this test only
+        # checked that content words survived, which a no-op `_remove_fillers`
+        # would also satisfy. Assert the exact cleaned string instead, so a
+        # no-op fails: "um" (unambiguous) and comma-bounded "like" must be
+        # gone, with no stray whitespace and no orphaned comma left behind.
+        #
+        # "so" here is mid-sentence with no comma cue of its own (it follows
+        # "um," but isn't utterance-initial itself, and isn't comma-bounded)
+        # — it survives as content. Issue #43 review, P1/P2: an earlier
+        # revision stripped it anyway via a leading-adjacency-to-a-pronoun
+        # heuristic that also deleted genuine content elsewhere and was
+        # dropped for that reason — see `_classify_ambiguous_fillers()`.
+        result = _remove_fillers("um, so I was thinking, like, we should go")
+        assert result == "so I was thinking we should go"
 
-    def test_removes_well(self):
-        result = _remove_fillers("well I think so")
-        assert "well" not in result.split()
+    def test_keeps_well_without_context_cue(self):
+        # "The well is dry." / "It went so well." — "well" as plain content
+        # (noun/adverb) is not utterance-initial+comma, comma-bounded,
+        # adjacent to an unambiguous filler, or utterance-final+comma.
+        result = _remove_fillers("It went so well")
+        assert "well" in result.split()
+
+    def test_removes_utterance_initial_well_with_comma(self):
+        result = _remove_fillers("Well, maybe.")
+        assert "well" not in result.lower()
 
     def test_keeps_okay(self):
         # "okay" is content, not a filler — see issue #42. Deleting it
@@ -99,6 +132,231 @@ class TestRemoveFillers:
     def test_preserves_non_filler_content(self):
         text = "the quick brown fox jumps over the lazy dog"
         assert _remove_fillers(text).strip() == text
+
+
+class TestPhraseRemovalTokenBoundaries:
+    """Issue #43 review, R1/R2: `_phrase_removed_mask` assumed every filler
+    phrase match starts on a whitespace token boundary. When punctuation
+    glues the phrase to the previous word with no space ("was,you know"),
+    the match starts mid-token, and the old index bookkeeping (re-splitting
+    the string prefix before the match) both mis-located the match and made
+    phrase removal O(n^2) on inputs with many matches.
+    """
+
+    def test_phrase_starting_mid_token_does_not_delete_following_content(self):
+        # R1 (BLOCKER): with the bug, this dropped "thinking" (real content)
+        # while "you" (part of the filler) survived attached to "was,".
+        assert _remove_fillers("I was,you know thinking") == "I was, thinking"
+
+    def test_phrase_starting_mid_token_after_various_punctuation(self):
+        # The comma case above is the reported regression; cover the other
+        # edge-punctuation characters that can glue a word to a phrase with
+        # no space, to make sure the fix isn't comma-specific.
+        assert _remove_fillers("I was;you know thinking") == "I was; thinking"
+        assert _remove_fillers('I was"you know thinking') == 'I was" thinking'
+
+    def test_many_phrase_matches_stay_linear_and_within_budget(self):
+        # R2 (MAJOR): the old re-split-the-prefix-per-match approach was
+        # O(n^2). 2001 tokens ("you know" x1000 + "done") took 35.7ms on the
+        # buggy branch against 9.9ms on main — over the stage 4a latency
+        # budget in CLAUDE.md (< 15ms). Assert both correctness and that the
+        # pass is fast enough to stay well inside budget, so a future
+        # regression back to O(n^2) fails loudly instead of silently
+        # returning (the note that shipped this test).
+        text = ("you know " * 1000 + "done").strip()
+        assert len(text.split()) == 2001
+
+        _remove_fillers(text)  # warm up (regex module caches, etc.)
+        start = time.perf_counter()
+        result = _remove_fillers(text)
+        elapsed_ms = (time.perf_counter() - start) * 1000
+
+        assert result == "done"
+        assert elapsed_ms < 15.0, (
+            f"_remove_fillers took {elapsed_ms:.2f}ms on 2001 tokens — "
+            "stage 4a budget is < 15ms (CLAUDE.md)"
+        )
+
+
+class TestContextualAmbiguousFillers:
+    """Issue #43: ambiguous fillers (like, right, so, well, actually,
+    basically, literally, anyway, anyways) are only stripped when context
+    marks them as disfluent, never unconditionally.
+    """
+
+    # The six reproduction cases from the issue — each retains its content
+    # word because none of them carry a context cue (comma or adjacency to
+    # an unambiguous filler).
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("I like this design.", "I like this design."),
+            ("You are right about that.", "You are right about that."),
+            ("Turn right at the light.", "Turn right at the light."),
+            ("It went so well.", "It went so well."),
+            ("The well is dry.", "The well is dry."),
+            ("That is actually true.", "That is actually true."),
+        ],
+    )
+    def test_reproduction_cases_retain_content_word(self, raw, expected):
+        assert _remove_fillers(raw) == expected
+
+    # Genuine fillers still strip when context marks them as disfluent.
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("So, I think we should go.", "I think we should go."),
+            ("It was, like, really fast.", "It was really fast."),
+            ("um, like, maybe", "maybe"),
+        ],
+    )
+    def test_context_marked_fillers_still_strip(self, raw, expected):
+        assert _remove_fillers(raw).strip() == expected
+
+    # Each of the four context rules from the design, exercised directly.
+
+    def test_utterance_initial_followed_by_comma_is_filler(self):
+        result = _remove_fillers("So, we should leave now.")
+        assert "so" not in result.lower()
+
+    def test_bounded_by_commas_both_sides_is_filler(self):
+        result = _remove_fillers("It is, right, the best option.")
+        assert not re.search(r"\bright\b", result, re.IGNORECASE)
+
+    def test_utterance_final_preceded_by_comma_is_filler(self):
+        result = _remove_fillers("That is the plan, anyway.")
+        assert "anyway" not in result.lower()
+
+    def test_utterance_initial_without_comma_is_not_filler(self):
+        # No comma cue — "Right" opens a sentence as content ("Correct,
+        # let's continue" vs. plain agreement), not a discourse filler.
+        result = _remove_fillers("Right now I need to leave.")
+        assert "right" in result.lower()
+
+    def test_mid_sentence_without_comma_is_not_filler(self):
+        result = _remove_fillers("I think it is literally the best plan.")
+        assert "literally" in result.lower()
+
+    # Issue #43 review, P1/P2: an earlier revision also treated plain
+    # adjacency to a leading run of unambiguous fillers as a cue, but only
+    # when the following word looked like a clause-starting pronoun. That
+    # was dropped entirely rather than narrowed further:
+    #
+    # - P1: it deleted real content whenever a pronoun happened to follow
+    #   ("um literally I translated it word for word" -> "literally", an
+    #   adverb, was stripped as if it were a filler).
+    # - P2: it was inconsistent whenever a pronoun didn't follow ("um so we
+    #   should go" stripped "so" but "um so the build is broken" kept it —
+    #   the same construction, different outcome, with nothing in the
+    #   sentence for a user to point to as the reason).
+    #
+    # A regex cannot reliably tell "so"-the-filler from "so"-the-adverb by
+    # checking what part of speech merely follows it. Adjacency to a leading
+    # filler is no longer a cue at all — every ambiguous word now goes
+    # through the same three comma-based rules regardless of what precedes
+    # it, deferring the harder judgement call to the BERT classifier
+    # (issue #36).
+
+    def test_mid_sentence_adjacency_is_not_a_cue(self):
+        # "so" is adjacent to "uh" but mid-sentence, not utterance-initial —
+        # plain content ("so good"), not a filler.
+        assert _remove_fillers("it was uh so good") == "it was so good"
+
+    def test_leading_adjacency_alone_is_not_a_cue(self):
+        # "like" opens the utterance right after "um" and is followed by a
+        # clause-starting pronoun ("I") — exactly the pattern the dropped
+        # heuristic treated as a filler. With no comma cue, it survives as
+        # content now (P1/P2).
+        assert _remove_fillers("um like I think that works") == "like I think that works"
+
+    def test_leading_adjacency_without_clause_starter_is_not_a_cue(self):
+        # "right" opens the utterance right after "um", but the next word
+        # ("turn") doesn't open a clause either — still content either way.
+        assert _remove_fillers("um right turn at the light") == "right turn at the light"
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            # P1's exact reproduction: a real adverb, not a filler, deleted
+            # only because a pronoun happened to be the next word.
+            (
+                "um literally I translated it word for word",
+                "literally I translated it word for word",
+            ),
+            ("um actually I did finish it", "actually I did finish it"),
+        ],
+    )
+    def test_leading_adjacency_does_not_delete_content_before_a_pronoun(self, raw, expected):
+        assert _remove_fillers(raw) == expected
+
+    # Issue #43 review, finding 2: a filler *phrase* must not fabricate
+    # adjacency for an ambiguous word that follows it. Classification has to
+    # run against the original token stream, before "you know" disappears.
+    # (Leading adjacency is no longer a cue at all — see P1/P2 above — so
+    # this now also just confirms phrase removal doesn't otherwise disturb
+    # "right".)
+
+    def test_phrase_removal_does_not_fabricate_adjacency(self):
+        result = _remove_fillers("um you know right turn at the light")
+        assert result == "right turn at the light"
+
+    # Issue #43 review, finding 4: removing a filler must not leave its
+    # punctuation behind as an orphaned or doubled comma.
+
+    def test_leading_filler_comma_leaves_no_orphan(self):
+        assert _remove_fillers("um, I think") == "I think"
+
+    def test_bounded_filler_comma_does_not_double(self):
+        assert _remove_fillers("I think, um, we should go") == "I think, we should go"
+
+    # Issue #43 review, finding 5: comma detection must see through a
+    # trailing quote or bracket, not just check the literal last character.
+
+    def test_comma_cue_seen_through_trailing_quote(self):
+        result = _remove_fillers('"Well," I think')
+        assert "well" not in result.lower()
+
+    def test_comma_bounded_cue_seen_through_quotes(self):
+        result = _remove_fillers('It was, "like," really fast')
+        assert "like" not in result.lower()
+
+    # Issue #43 review, P3: `_EDGE_PUNCT` omitted unicode quotes and the
+    # single-character ellipsis (…), so a filler glued to one of them wasn't
+    # recognised as a filler at all — it neither stripped nor left an
+    # orphan, it just survived outright.
+
+    def test_unicode_ellipsis_glued_filler_is_stripped(self):
+        assert _remove_fillers("um… I think") == "I think"
+
+    def test_unicode_curly_quotes_glued_filler_is_stripped(self):
+        assert _remove_fillers("“um” I think") == "I think"
+
+    # Whole-utterance backstop: filler removal can never empty an utterance
+    # that contained at least one word. Cover every filler (unambiguous and
+    # ambiguous) alone and with terminal punctuation.
+
+    _all_filler_words = [w.rstrip("+") for w in _FILLER_WORDS] + list(_AMBIGUOUS_FILLERS)
+
+    @pytest.mark.parametrize("word", _all_filler_words)
+    @pytest.mark.parametrize("suffix", ["", ".", ",", "?"])
+    def test_backstop_never_empties_a_single_filler_word(self, word, suffix):
+        raw = f"{word}{suffix}"
+        result = _remove_fillers(raw)
+        assert any(ch.isalnum() for ch in result), (
+            f"{raw!r} -> {result!r} contains no word characters"
+        )
+
+    @pytest.mark.parametrize("word", _all_filler_words)
+    def test_backstop_never_empties_all_fillers_utterance(self, word):
+        # An utterance made entirely of the same filler, repeated with
+        # commas, so every context rule would otherwise fire.
+        raw = f"{word}, {word}, {word}."
+        result = _remove_fillers(raw)
+        assert any(ch.isalnum() for ch in result), (
+            f"{raw!r} -> {result!r} contains no word characters"
+        )
 
 
 class TestRemoveRepetitions:
@@ -218,8 +476,11 @@ class TestDisfluencyRemover:
         assert "I want to go home" == result.text
 
     def test_combined_fillers_and_repetitions(self, remover):
+        # "like" here has no context cue (no comma, not adjacent to an
+        # unambiguous filler) — issue #43 keeps it as content. Only "um"
+        # (unambiguous) and the "the the" repetition are removed.
         result = remover.process("um the the cat was like sitting there")
-        assert "the cat was sitting there" == result.text
+        assert "the cat was like sitting there" == result.text
 
     def test_self_correction_detected(self, remover):
         result = remover.process("meet at 3 actually meet at 5")
@@ -261,20 +522,36 @@ class TestDisfluencyRemover:
             ("uh let's start", "uh"),
             ("hmm let me think", "hmm"),
             ("erm I forgot", "erm"),
-            ("basically I need help", "basically"),
+            ("Basically, I need help.", "basically"),
             ("it was, like, really fast", "like"),
-            ("so we should go", "so"),
         ],
     )
     def test_other_fillers_still_stripped(self, remover, raw, stripped_word):
-        # Proves the #42 fix is scoped to "okay"/"ok" — every other filler
-        # in _FILLER_WORDS still strips exactly as before.
+        # Proves the #42 fix is scoped to "okay"/"ok" — every other
+        # unambiguous filler (um/uh/hmm/erm) still strips unconditionally as
+        # before, and every ambiguous filler (basically/like) still strips
+        # when its context marks it as disfluent (issue #43).
         #
         # Match on a word boundary rather than str.split(): a filler that
         # survived with punctuation attached ("um,") is still a survivor,
         # but split() tokenises it as "um," and would let the test pass.
         result = remover.process(raw)
         assert not re.search(rf"\b{stripped_word}\b", result.text, re.IGNORECASE)
+
+    def test_bare_so_is_no_longer_stripped(self, remover):
+        # Issue #43, intentional behaviour change from #45's baseline: "so"
+        # used to be stripped unconditionally by the flat filler regex. With
+        # no comma cue, no adjacency to an unambiguous filler, and not in a
+        # position that reads as a discourse marker, it is ordinary content
+        # ("therefore") and must survive.
+        result = remover.process("so we should go")
+        assert "so" in result.text.lower().split()
+
+    def test_utterance_initial_so_with_comma_still_stripped(self, remover):
+        # The disfluency-marking use of "so" ("So, I think we should go.")
+        # is unaffected by the above — it still strips.
+        result = remover.process("So, we should go.")
+        assert "so" not in re.sub(r"[^\w\s]", "", result.text).lower().split()
 
     # Real-world dictation examples
 
@@ -297,9 +574,120 @@ class TestDisfluencyRemover:
         assert result.has_self_corrections is True
 
     def test_real_dictation_numbers(self, remover):
+        # "like" has no context cue here (no comma, not adjacent to an
+        # unambiguous filler) — issue #43 keeps it as content ("about three
+        # hundred and fifty"). Only "um" (unambiguous) is removed.
         text = "um the total is like three hundred and fifty"
         result = remover.process(text)
-        assert "the total is three hundred and fifty" == result.text
+        assert "the total is like three hundred and fifty" == result.text
+
+
+class TestOnnxDisfluencyPath:
+    """Issue #43 review, finding 3: the ONNX path applied neither the
+    contextual predicate nor the empty-output backstop that the regex
+    fallback gained from this PR. A loaded model could still return
+    `text=''` for "um" or drop "right" from "Turn right at the light." — the
+    exact bugs this PR exists to fix, still live on the untested model path.
+
+    No model is present on any dev machine, so — mirroring
+    `TestOnnxPunctuationPath` in the stage 4b tests — a fake session with
+    forced predictions gives this path its first real coverage.
+    """
+
+    @staticmethod
+    def _remover_with_fake_model(remove_words: set[str]):
+        """A DisfluencyRemover whose fake ONNX session predicts REMOVE for
+        every token whose vocab id belongs to *remove_words* (matched via a
+        dedicated vocab entry per word, case-insensitive) and KEEP otherwise.
+        """
+        import numpy as np
+
+        vocab: dict[str, int] = {"[CLS]": 101, "[SEP]": 102, "[UNK]": 100}
+        remove_ids: set[int] = set()
+        for i, word in enumerate(remove_words, start=200):
+            vocab[word.lower()] = i
+            remove_ids.add(i)
+
+        class FakeSession:
+            def run(self, _outputs, feed):
+                ids = feed["input_ids"][0]
+                n_tokens = len(ids)
+                logits = np.zeros((1, n_tokens, 3), dtype=np.float32)
+                logits[0, :, _LABEL_KEEP] = 10.0
+                for pos, token_id in enumerate(ids):
+                    if int(token_id) in remove_ids:
+                        logits[0, pos, :] = 0
+                        logits[0, pos, _LABEL_REMOVE] = 10.0
+                return [logits]
+
+        r = DisfluencyRemover(model_dir=Path("/nonexistent/model"))
+        r._session = FakeSession()
+        r._vocab = vocab
+        r._using_onnx = True
+        return r
+
+    def test_standalone_um_does_not_come_back_empty(self):
+        # Without the backstop, a forced REMOVE on the only token in the
+        # utterance returns text=='' — exactly the bug this finding reports.
+        r = self._remover_with_fake_model({"um"})
+        result = r.process("um")
+        assert result.text != ""
+        assert any(ch.isalnum() for ch in result.text)
+
+    def test_ambiguous_word_survives_a_remove_prediction_with_no_cue(self):
+        # The model wants to drop "right", same as it wants to drop "Turn",
+        # "at", "the", "light" — but "right" has no context cue (no comma,
+        # not a leading-adjacency case), so it must be kept as content even
+        # though the (fake) model predicted REMOVE for it.
+        r = self._remover_with_fake_model({"right"})
+        result = r.process("Turn right at the light.")
+        assert "right" in result.text.split()
+
+    def test_ambiguous_word_is_removed_when_the_model_and_context_agree(self):
+        # "so" at utterance-start with a comma is a genuine cue — the
+        # override must not block a REMOVE prediction that context agrees
+        # with, only one that context contradicts.
+        #
+        # The fake model matches vocab ids by exact `word.lower()`, and the
+        # actual token here is "So," (comma attached, no space) — the vocab
+        # entry has to include the comma or the lookup misses and the model
+        # predicts KEEP for a token it was never actually asked about.
+        r = self._remover_with_fake_model({"so,"})
+        result = r.process("So, I think we should go.")
+        # Issue #43 review, M1: `result.text.lower().split()` tokenises a
+        # surviving "So," as "so," (comma attached), which is never equal
+        # to the bare string "so" — so `"so" not in [...]` passed even when
+        # "So," was still in the output. Match on a word boundary instead,
+        # same fix as `test_other_fillers_still_stripped` in
+        # TestDisfluencyRemover.
+        assert not re.search(r"\bso\b", result.text, re.IGNORECASE)
+
+    def test_onnx_path_is_actually_taken(self):
+        r = self._remover_with_fake_model(set())
+        assert r._using_onnx is True
+        # Would raise AssertionError inside _process_onnx if session were None.
+        r.process("some text")
+
+    # Issue #43 review, O1: `_process_onnx` computed `clear_preceding_comma`
+    # but never applied it, so a model REMOVE on a comma-bounded ambiguous
+    # filler left the pairing comma behind as an orphan.
+
+    def test_comma_bounded_filler_leaves_no_orphan_comma(self):
+        r = self._remover_with_fake_model({"like,"})
+        result = r.process("It was, like, really fast.")
+        assert result.text == "It was really fast."
+
+    # Issue #43 review, O2: the ONNX path deferred to the model for
+    # unambiguous fillers (um, uh, hmm, ...) instead of always stripping
+    # them the way the regex path does — a KEEP label (or a vocab lookup
+    # that missed the attached punctuation) let one through.
+
+    def test_unambiguous_filler_is_always_stripped_regardless_of_label(self):
+        # KEEP-all stub (empty remove set) — nothing tells the model to
+        # drop "um,", so without the O2 fix it survives.
+        r = self._remover_with_fake_model(set())
+        result = r.process("um, I think")
+        assert result.text == "I think"
 
 
 # =====================================================================
