@@ -170,21 +170,6 @@ class WhisperGPUEngine:
     def _audio_duration(self) -> float:
         return len(self._audio_buffer) / (_SAMPLE_RATE * _SAMPLE_WIDTH)
 
-    def warmup(self) -> None:
-        """Spawn the GPU worker ahead of the first dictation.
-
-        Not part of the ``STTEngine`` protocol -- callers must feature-detect
-        it. Without this, ``_ensure_worker()`` runs on the first ``fn`` press
-        instead, blocking the hotkey thread for ~4.3s while the model loads,
-        which reads to the user as "it did not start recording when I pressed
-        the key". Failure here is non-fatal: the worker is spawned lazily on
-        first use exactly as before.
-        """
-        try:
-            self._ensure_worker()
-        except Exception:
-            logger.warning("GPU worker warmup failed; will retry on first use", exc_info=True)
-
     def start_stream(self) -> None:
         self._ensure_worker()
         self._audio_buffer = bytearray()

@@ -108,15 +108,6 @@ class App:
         self._stt = create_engine(self.config)
         logger.info("STT engine ready: %s", self.config.stt.backend)
 
-        # Pre-spawn the GPU worker now rather than on the first fn press.
-        # This runs before _setup_audio() by design -- see the ordering note
-        # in setup(): whisper.cpp must load before sounddevice/portaudio.
-        warmup = getattr(self._stt, "warmup", None)
-        if callable(warmup):
-            t0 = time.monotonic()
-            warmup()
-            logger.info("STT warmup complete (%.1fs)", time.monotonic() - t0)
-
     async def _setup_polish(self) -> None:
         if not self.config.polish.enabled:
             logger.info("Polish pipeline disabled")
