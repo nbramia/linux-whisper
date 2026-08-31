@@ -38,6 +38,33 @@ _INITIAL_NOISE_FLOOR = 0.003
 _NOISE_FLOOR_ALPHA = 0.02    # adapts in ~1s of quiet, and only while quiet
 
 
+
+def _build_fingerprint() -> str:
+    """Identify the code actually loaded, for the log.
+
+    Editable installs make "did the service pick up my change?" genuinely
+    ambiguous -- a stale process looks identical to a fresh one. This prints
+    the git commit plus a hash of the loaded source files, so a deploy can be
+    confirmed from the journal instead of assumed.
+    """
+    import hashlib
+    import subprocess
+    from pathlib import Path
+
+    pkg = Path(__file__).parent
+    digest = hashlib.sha256()
+    for path in sorted(pkg.rglob("*.py")):
+        digest.update(path.read_bytes())
+    try:
+        commit = subprocess.run(
+            ["git", "-C", str(pkg), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=2,
+        ).stdout.strip() or "unknown"
+    except Exception:
+        commit = "unknown"
+    return f"commit={commit} src_sha={digest.hexdigest()[:12]}"
+
+
 class App:
     """Main application coordinating all pipeline stages."""
 
@@ -66,6 +93,7 @@ class App:
     async def setup(self) -> None:
         """Initialize all components. Call before run()."""
         logger.info("Initializing Linux Whisper v0.1.0")
+        logger.info("build: %s", _build_fingerprint())
         errors = self.config.validate()
         if errors:
             for e in errors:

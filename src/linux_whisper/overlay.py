@@ -229,6 +229,9 @@ class _OverlayWindow:
         # to the default main context only while the pill is visible, so it
         # doesn't tick at 30fps forever while hidden. None means "not ticking".
         self._tick_source: int | None = None
+        # Last position actually pushed to the window, so a reveal on the
+        # same monitor does not re-issue a move (see _reposition).
+        self._last_position: tuple[int, int] | None = None
 
         self._window = Gtk.Window(type=Gtk.WindowType.POPUP)
         self._window.set_title("linux-whisper-overlay")
@@ -319,7 +322,7 @@ class _OverlayWindow:
         swallowing clicks.
         """
         self._window.set_opacity(1.0)
-        self._reposition()
+        self._reposition(force=True)
         self._window.show_all()
 
         # Empty input region == click-through. Must happen after realize.
@@ -346,14 +349,28 @@ class _OverlayWindow:
         self._stop_tick()
         self._window.destroy()
 
-    def _reposition(self) -> None:
-        """Move the window to its configured position. Must be re-asserted
-        after show_all() — GTK/the window manager can reposition on map."""
+    def _reposition(self, *, force: bool = False) -> None:
+        """Move the window to its configured position, if it is not there.
+
+        Moving is skipped when the target has not changed. `move()` on a
+        mapped window is a surface reconfiguration the compositor has to
+        process, and it was previously issued on every single reveal -- the
+        last structural operation left on the hot path after mapping and
+        opacity were both eliminated. In the common case (same monitor as
+        last time) the pill is already exactly where it belongs, so revealing
+        it is now a pure repaint.
+
+        `force=True` is used from prime(), where the window has just been
+        mapped and has no position yet.
+        """
         geom = _monitor_geometry_at_pointer()
         if geom is None:
             return
-        x, y = compute_pill_position(*geom, self._position)
-        self._window.move(x, y)
+        target = compute_pill_position(*geom, self._position)
+        if not force and target == self._last_position:
+            return
+        self._last_position = target
+        self._window.move(*target)
 
     # -- animation timer, attached to the default main context (see module
     #    docstring) only while the pill is visible --
