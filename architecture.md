@@ -497,10 +497,28 @@ and has no positioning API on Wayland without `wlr-layer-shell`, which Mutter
 (GNOME's compositor) does not implement — that rules out a GNOME layer-shell
 overlay at any GTK4 version. The one path that positions correctly, verified
 on GNOME 46 / Mutter: **GTK3 running through XWayland**, with
-`GDK_BACKEND=x11` forced only for the moment the overlay thread opens its
-display connection (never mutated process-wide — the backend is chosen once
-per process, so the override is restored immediately after), and
-`Gtk.WindowType.POPUP` for an override-redirect window.
+`GDK_BACKEND=x11` and `Gtk.WindowType.POPUP` for an override-redirect window.
+
+**Forcing X11, correctly.** `GDK_BACKEND=x11` must be set **before this
+process imports anything GTK-related at all**, not merely before a window is
+constructed — verified against a real GNOME/Wayland session, PyGObject
+resolves and locks in the GDK backend as a side effect of
+`from gi.repository import Gdk` itself, at *import* time, even with no
+`Gtk.init()` call and no window ever built. Two consequences drove the
+implementation:
+
+- The write happens in `App.setup()`, as a bare `os.environ["GDK_BACKEND"] =
+  "x11"`, *before* `_setup_tray()` — and before importing `overlay.py` or
+  `tray.py` at all, since both import `Gdk`/`Gtk` at module scope (the system
+  tray is GTK3-backed via `pystray._appindicator`) and `_setup_tray()` runs
+  before `_setup_overlay()`. A helper function living inside `overlay.py`
+  cannot do this job: importing `overlay.py` to reach it already runs that
+  module's own `from gi.repository import Gdk` line first.
+- `overlay.py` never assumes the override took effect. After constructing its
+  window, `Overlay._run_gtk()` checks `type(Gdk.Display.get_default()).__name__`
+  and disables the overlay (logging a WARNING naming the actual backend)
+  instead of showing a pill Wayland has already refused to position — see
+  Failure modes below.
 
 **Focus safety.** `Gtk.WindowType.POPUP` never takes input focus, and the
 window additionally calls `set_accept_focus(False)`, `set_can_focus(False)`,
@@ -516,18 +534,53 @@ Wayland surface, so X11 focus queries can't resolve it. `move()` is
 re-asserted after `show_all()`, since the window manager can reposition the
 window on map. `overlay.position` (`center`, `bottom-center`, `top-center`)
 controls the vertical anchor; horizontal placement is always centered on the
-monitor.
+monitor; `compute_pill_position()` clamps the result to the monitor's bounds
+so a monitor narrower or shorter than the pill can't push it off-screen.
+
+**Its own GLib main loop.** The overlay thread runs on a private
+`GLib.MainContext`/`GLib.MainLoop`, not the process-wide default context —
+which the system tray's own GTK loop also pumps. `GLib.idle_add()` and
+`GLib.timeout_add()` always attach to that shared default context regardless
+of which thread calls them, so using them here would let `show()`/`hide()`/
+the animation timer dispatch on the *tray's* thread instead of the overlay's
+whenever the tray happens to be pumping the context — a real, reproduced bug
+in an earlier revision. `Overlay._dispatch()` attaches an explicit
+`GLib.idle_source_new()` source to the overlay's own context instead, and
+`stop()` quits that same `GLib.MainLoop` object directly (`MainLoop.quit()`
+is documented thread-safe) rather than posting `Gtk.main_quit()` to the
+shared default loop.
+
+**Animation timer lifecycle.** The 30fps bar-animation timer is attached only
+while the pill is visible — `set_recording(True)` attaches it, `(False)`
+destroys it — instead of running forever and polling visibility, so a hidden
+overlay costs nothing between recordings.
 
 **Live levels.** `push_audio_level()` is called from the audio monitor loop
 in `app.py` (the same `asyncio` loop that drives `set_speech_active()` for
 the tray), pushing the peak amplitude of the last 100ms alongside the
 existing RMS-based speech detection. It is never called from the sounddevice
 callback — that thread runs at 32ms intervals and is a documented escalation
-boundary.
+boundary. Unlike `show()`/`hide()`/`set_speech_active()`, it is **not**
+marshalled onto the overlay thread: it writes straight into a lock-guarded
+deque, and uses a non-blocking `try_acquire` — if the overlay thread is
+mid-animation-frame, the sample is dropped rather than stalling the real-time
+audio monitor.
 
-**Failure mode.** If GTK 3.0 / PyGObject isn't installed, `_setup_overlay()`
-logs a WARNING naming the reason and the app continues without the pill (the
-system tray remains as a fallback indicator). This used to fail silently.
+**Failure modes.** `Overlay.start()` never claims success it can't back up:
+
+- *GDK backend mismatch* (the X11 override didn't take effect — see above):
+  `_run_gtk()` destroys the window it just built, logs a WARNING naming the
+  actual backend, and `start()` reports the overlay as unavailable.
+- *GTK init failure* (no display, GTK 3.0 missing at runtime despite passing
+  the import check, etc.): window construction happens inside the same
+  try/except as the backend check, and `_ready` is always set in a `finally`
+  — so `start()` returns promptly with a WARNING instead of blocking for its
+  full 5s timeout and then logging success anyway (the original bug).
+- *GTK 3.0 / PyGObject not installed at all*: `_setup_overlay()` logs a
+  WARNING naming the reason and the app continues without the pill (the
+  system tray remains as a fallback indicator).
+
+In every case the system tray remains as a fallback recording indicator.
 
 ---
 

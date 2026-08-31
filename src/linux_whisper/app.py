@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 import time
 from typing import TYPE_CHECKING
@@ -59,6 +60,23 @@ class App:
             for e in errors:
                 logger.error("Config error: %s", e)
             raise ValueError(f"Invalid configuration: {'; '.join(errors)}")
+
+        # Must run before this process imports ANYTHING GTK-related — this
+        # bare os.environ write, not a call into a helper in overlay.py or
+        # tray.py. Verified against a real GNOME/Wayland session: PyGObject
+        # resolves and locks in the GDK backend as a side effect of
+        # `from gi.repository import Gdk` (or Gtk) itself, at IMPORT time —
+        # not lazily at first Gtk.init()/window-construction, which is what
+        # "GDK picks its backend once, on first display access" would
+        # suggest. `overlay.py` and `tray.py` (via pystray) both import
+        # Gdk/Gtk at module scope and are only imported lazily, below, by
+        # `_setup_tray()`/`_setup_overlay()` — so importing either of them
+        # just to reach a helper function would already have locked the
+        # backend to native Wayland before that helper's body ever ran.
+        # Do not "simplify" this into a call to a function that lives in
+        # overlay.py — that was tried and measurably did not work.
+        if self.config.overlay.enabled:
+            os.environ["GDK_BACKEND"] = "x11"
 
         # STT must init before audio: pywhispercpp's ROCm/HIP C extension
         # segfaults if sounddevice (portaudio) is already loaded. Preloading

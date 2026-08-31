@@ -265,9 +265,17 @@ and disappears when recording stops — the primary recording indicator,
 positioned per `overlay.position` in config. It runs on GTK3 via XWayland
 (GTK4 has no window-positioning API on Wayland, and GNOME's Mutter compositor
 doesn't implement `wlr-layer-shell`) and never takes input focus, so dictated
-text always lands in whatever application you're actually typing into. If
-GTK 3.0 / PyGObject isn't installed, startup logs a warning and the app runs
-without it — the system tray remains as a fallback indicator.
+text always lands in whatever application you're actually typing into.
+
+Getting onto XWayland requires forcing `GDK_BACKEND=x11` before this process
+imports anything GTK-related — including the system tray, which is also
+GTK3-backed and starts first. The app verifies this actually took effect
+(rather than assuming it did) and disables the overlay with a warning naming
+the real backend if it didn't, instead of showing a pill Wayland has already
+refused to position. If GTK 3.0 / PyGObject isn't installed at all, or the
+backend override doesn't take effect, or GTK fails to initialize, startup
+logs a warning and the app runs without the pill — the system tray remains
+as a fallback indicator in every case.
 
 ## System Tray
 

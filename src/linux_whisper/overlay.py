@@ -15,15 +15,31 @@ load-bearing, since text injection targets whatever window *does* have
 focus, and a focus-stealing overlay would swallow dictated text instead of
 delivering it.
 
-Runs entirely in its own daemon thread with its own GTK main loop, isolated
-from the asyncio event loop and the real-time audio callback thread.
+Getting to XWayland requires ``GDK_BACKEND=x11`` set **before this process
+imports anything GTK-related at all** — not merely before a window is
+constructed. PyGObject resolves and locks in the GDK backend as a side
+effect of ``from gi.repository import Gdk`` (or ``Gtk``) itself, at *import*
+time — verified against a real GNOME/Wayland session, this happens even
+with no ``Gtk.init()`` call and no window ever constructed. Since this
+module's own top-level import block below does exactly that, the env var
+must be set by whatever imports this module for the first time, *before*
+that import — see the comment in ``app.py``'s ``setup()``, which sets it
+before importing either this module or ``tray.py`` (whose GTK3-backed
+pystray backend imports Gdk/Gtk too, and starts its own thread first).
+Setting it inside this module, even at the top of a function that runs
+before any window is built, is too late: importing this module to reach
+that function already ran the lines below first.
+
+Runs entirely in its own daemon thread with its own ``GLib.MainContext`` and
+``GLib.MainLoop`` — not the process-wide default context, which the tray's
+GTK loop also pumps — isolated from the asyncio event loop and the
+real-time audio callback thread.
 """
 
 from __future__ import annotations
 
 import logging
 import math
-import os
 import threading
 from collections import deque
 
@@ -112,7 +128,9 @@ def compute_pill_position(
     it can be unit-tested against a fake monitor without a display.
     Horizontally always centred; ``position`` controls the vertical anchor.
     Unrecognised positions fall back to "center" (config validation is
-    responsible for rejecting bad values before they reach here).
+    responsible for rejecting bad values before they reach here). The result
+    is clamped to the monitor's bounds, so a narrow or short monitor can't
+    push the pill partly off-screen.
     """
     x = monitor_x + (monitor_width - pill_width) // 2
     if position == "top-center":
@@ -121,7 +139,18 @@ def compute_pill_position(
         y = monitor_y + monitor_height - pill_height - margin
     else:
         y = monitor_y + (monitor_height - pill_height) // 2
+
+    x = _clamp(x, monitor_x, monitor_x + monitor_width - pill_width)
+    y = _clamp(y, monitor_y, monitor_y + monitor_height - pill_height)
     return x, y
+
+
+def _clamp(value: int, lo: int, hi: int) -> int:
+    """Clamp ``value`` to ``[lo, hi]``. If the range is inverted (the pill is
+    larger than the monitor on this axis), pin to ``lo`` rather than raise."""
+    if hi < lo:
+        return lo
+    return max(lo, min(value, hi))
 
 
 def _monitor_geometry_at_pointer() -> tuple[int, int, int, int] | None:
@@ -162,8 +191,13 @@ class _OverlayWindow:
     mock object cannot be used as a base class.
     """
 
-    def __init__(self, position: str) -> None:
+    def __init__(self, position: str, context: object) -> None:
         self._position = position
+        # The overlay's own GLib.MainContext (see Overlay._run_gtk) — used
+        # to attach the animation timer only while the pill is visible, so
+        # it doesn't tick at 30fps forever while hidden.
+        self._context = context
+        self._tick_source: object | None = None
 
         self._window = Gtk.Window(type=Gtk.WindowType.POPUP)
         self._window.set_title("linux-whisper-overlay")
@@ -199,44 +233,46 @@ class _OverlayWindow:
         self._phase: float = 0.0  # animation phase
         self._lock = threading.Lock()
 
-    # -- thread-safe state mutation (called via GLib.idle_add or directly) --
+    # -- entry points, always run on the overlay's own GTK thread (marshalled
+    #    there by Overlay._dispatch — see the facade below) --
 
     def set_recording(self, active: bool) -> None:
+        """Show or hide the pill. Runs on the overlay thread only — GTK
+        calls (`show_all`/`hide`/`move`) are not thread-safe, so this must
+        never be invoked directly from another thread."""
         with self._lock:
+            was_active = self._visible_state
             self._visible_state = active
             if not active:
                 self._speech_active = False
                 self._audio_levels.clear()
                 self._audio_levels.extend([0.0] * _LEVEL_HISTORY)
 
+        if active and not was_active:
+            self._window.show_all()
+            self._reposition()
+            self._start_tick()
+        elif not active and was_active:
+            self._stop_tick()
+            self._window.hide()
+
     def set_speech_active(self, active: bool) -> None:
         with self._lock:
             self._speech_active = active
 
     def push_audio_level(self, level: float) -> None:
-        with self._lock:
+        """Record one audio sample. Called directly from the async audio
+        monitor thread, not marshalled — it must never block that thread, so
+        it drops the sample rather than waiting for a tick in progress."""
+        if not self._lock.acquire(blocking=False):
+            return
+        try:
             self._audio_levels.append(min(1.0, max(0.0, level)))
-
-    # -- GTK main-loop callbacks (always run on the overlay thread) --
-
-    def tick(self) -> bool:
-        """Called by a GLib timeout for animation. Returns True to continue."""
-        with self._lock:
-            visible = self._visible_state
-
-        if visible and not self._window.get_visible():
-            self._window.show_all()
-            self._reposition()
-        elif not visible and self._window.get_visible():
-            self._window.hide()
-
-        if visible:
-            self._update_bars()
-            self._window.queue_draw()
-
-        return True
+        finally:
+            self._lock.release()
 
     def destroy(self) -> None:
+        self._stop_tick()
         self._window.destroy()
 
     def _reposition(self) -> None:
@@ -247,6 +283,31 @@ class _OverlayWindow:
             return
         x, y = compute_pill_position(*geom, self._position)
         self._window.move(x, y)
+
+    # -- animation timer, attached to this overlay's own context only while
+    #    the pill is visible — see MAJOR finding on cross-thread dispatch --
+
+    def _start_tick(self) -> None:
+        if self._tick_source is not None:
+            return
+        source = GLib.timeout_source_new(1000 // _FPS)
+        source.set_callback(self._tick)
+        source.attach(self._context)
+        self._tick_source = source
+
+    def _stop_tick(self) -> None:
+        if self._tick_source is not None:
+            self._tick_source.destroy()
+            self._tick_source = None
+
+    def _tick(self) -> bool:
+        """GLib timeout callback while the pill is visible. Returns True to
+        keep running — the source is explicitly destroyed in `_stop_tick()`
+        rather than by returning False, so it can be re-attached on the next
+        `set_recording(True)`."""
+        self._update_bars()
+        self._window.queue_draw()
+        return True
 
     def _update_bars(self) -> None:
         """Update bar heights from audio level history."""
@@ -335,8 +396,10 @@ class Overlay:
     """Public API for the recording overlay.
 
     Thread-safe: all methods can be called from any thread. The GTK event
-    loop runs in a dedicated daemon thread, isolated from the asyncio loop
-    and the real-time audio callback thread.
+    loop runs in a dedicated daemon thread on its own `GLib.MainContext` —
+    not the process-wide default context, which the system tray's GTK loop
+    also pumps — isolated from the asyncio loop and the real-time audio
+    callback thread.
     """
 
     def __init__(self, config: OverlayConfig | None = None) -> None:
@@ -344,6 +407,8 @@ class Overlay:
         self._window: _OverlayWindow | None = None
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
+        self._context: object | None = None
+        self._main_loop: object | None = None
 
     @property
     def available(self) -> bool:
@@ -354,7 +419,13 @@ class Overlay:
         return _UNAVAILABLE_REASON
 
     def start(self) -> None:
-        """Start the overlay in a background thread."""
+        """Start the overlay in a background thread.
+
+        Does not silently claim success: if the GTK thread never signals
+        ready, or signals ready but failed to produce a window (backend
+        mismatch, GTK init failure — see `_run_gtk`), this logs a WARNING
+        naming what happened instead of an unconditional "Overlay started".
+        """
         if not _HAS_GTK:
             logger.info("GTK not available — overlay disabled: %s", _UNAVAILABLE_REASON)
             return
@@ -364,69 +435,140 @@ class Overlay:
         self._ready.clear()
         self._thread = threading.Thread(target=self._run_gtk, name="overlay", daemon=True)
         self._thread.start()
-        self._ready.wait(timeout=5.0)
+        became_ready = self._ready.wait(timeout=5.0)
+        if not became_ready:
+            logger.warning("Overlay startup timed out after 5s — GTK thread unresponsive")
+            return
+        if self._window is None:
+            logger.warning("Overlay failed to start — running without recording pill")
+            return
         logger.info("Overlay started")
 
     def stop(self) -> None:
-        """Stop the overlay."""
-        if self._thread is not None:
-            GLib.idle_add(Gtk.main_quit)
-            self._thread.join(timeout=3.0)
+        """Stop the overlay: quit its own main loop and join its thread."""
+        if self._thread is None:
+            logger.info("Overlay stopped")
+            return
+
+        if self._main_loop is not None:
+            # GLib.MainLoop.quit() is documented MT-safe — no marshalling
+            # needed, and marshalling it would require the loop we're
+            # trying to quit to still be running to process the request.
+            self._main_loop.quit()
+
+        self._thread.join(timeout=3.0)
+        if self._thread.is_alive():
+            logger.warning(
+                "Overlay thread did not exit within 3s — abandoning join "
+                "(it is a daemon thread, so it will not block process exit)"
+            )
+        else:
             self._thread = None
+            self._main_loop = None
+            self._context = None
         logger.info("Overlay stopped")
 
     def show(self) -> None:
         """Show the pill (recording started)."""
         if self._window is not None:
-            GLib.idle_add(self._window.set_recording, True)
+            self._dispatch(self._window.set_recording, True)
 
     def hide(self) -> None:
         """Hide the pill (recording stopped)."""
         if self._window is not None:
-            GLib.idle_add(self._window.set_recording, False)
+            self._dispatch(self._window.set_recording, False)
 
     def set_speech_active(self, active: bool) -> None:
         """Update whether speech is currently detected."""
         if self._window is not None:
-            GLib.idle_add(self._window.set_speech_active, active)
+            self._dispatch(self._window.set_speech_active, active)
 
     def push_audio_level(self, level: float) -> None:
-        """Push a new audio level (0.0-1.0) for visualization."""
+        """Push a new audio level (0.0-1.0) for visualization.
+
+        Called directly, not marshalled through `_dispatch()`: this runs on
+        the async audio monitor loop, which must never block on the overlay
+        thread. `_OverlayWindow.push_audio_level()` is itself non-blocking —
+        it drops the sample instead of waiting for a lock held by a tick in
+        progress.
+        """
         if self._window is not None:
-            # Direct call is fine — guarded by a lock, no GTK API touched.
             self._window.push_audio_level(level)
 
-    def _run_gtk(self) -> None:
-        """GTK main loop — runs in the overlay thread.
+    def _dispatch(self, fn: object, *args: object) -> None:
+        """Marshal a call onto the overlay's own GTK thread.
 
-        GDK_BACKEND is forced to "x11" only for the brief window in which
-        the window is constructed and its display connection is opened
-        (GTK4 native-Wayland has no positioning API, and Mutter does not
-        implement wlr-layer-shell — XWayland is the only path that
-        positions correctly on this desktop). The environment variable is
-        restored immediately afterward: the backend is chosen once per
-        process, on first display access, so nothing later in the process
-        needs it set, and this avoids mutating os.environ for the life of
-        the app.
+        `GLib.idle_add()`/`GLib.timeout_add()` always attach to the
+        *process-wide default* main context, not the calling thread's — see
+        the module docstring. Since the overlay thread runs its own private
+        context (`_run_gtk`), a plain `idle_add()` call here would only ever
+        be serviced by whatever thread happens to be pumping the default
+        context (typically the system tray's), which is exactly the
+        cross-thread GTK hazard this class exists to avoid. Attach an
+        explicit idle source to the overlay's own context instead.
         """
-        prior_backend = os.environ.get("GDK_BACKEND")
-        os.environ["GDK_BACKEND"] = "x11"
+        context = self._context
+        if context is None:
+            return
+
+        def _run_once() -> bool:
+            fn(*args)
+            return GLib.SOURCE_REMOVE
+
+        source = GLib.idle_source_new()
+        source.set_callback(_run_once)
+        source.attach(context)
+
+    def _run_gtk(self) -> None:
+        """GTK setup and main loop — runs entirely on the overlay thread.
+
+        `GDK_BACKEND=x11` must already be set in the environment (`App.setup()`
+        does this before importing this module or `tray.py` at all — see the
+        module docstring) — by the time this thread runs, the backend is
+        whatever it is going to be. Verify it rather than assume: if
+        something beat us to opening the display natively on Wayland, the
+        window would report requested-but-refused positions (see the module
+        docstring's positioning caveat), which is worse than no pill at all.
+        """
+        context = GLib.MainContext()
+        context.push_thread_default()
+        self._context = context
+
+        window: _OverlayWindow | None = None
+        loop: object | None = None
         try:
-            self._window = _OverlayWindow(self._config.position)
+            window = _OverlayWindow(self._config.position, context)
+            backend = type(Gdk.Display.get_default()).__name__
+            if "X11" not in backend:
+                raise RuntimeError(
+                    f"expected the X11 GDK backend, got {backend!r} — "
+                    "GDK_BACKEND=x11 did not take effect before the display "
+                    "opened (see App.setup() and this module's docstring)"
+                )
+            loop = GLib.MainLoop(context)
+        except Exception as exc:
+            logger.warning("Overlay disabled: %s", exc)
+            if window is not None:
+                window.destroy()
+            window = None
         finally:
-            if prior_backend is None:
-                os.environ.pop("GDK_BACKEND", None)
-            else:
-                os.environ["GDK_BACKEND"] = prior_backend
+            self._window = window
+            self._main_loop = loop
+            # Always signal readiness — success or failure — so start()
+            # never blocks the full timeout waiting on a thread that has
+            # already finished failing.
+            self._ready.set()
 
-        GLib.timeout_add(1000 // _FPS, self._window.tick)
-        self._ready.set()
+        if loop is None:
+            context.pop_thread_default()
+            return
+
         logger.debug("Overlay window created")
-
         try:
-            Gtk.main()
+            loop.run()
         except Exception:
             logger.exception("Overlay GTK loop crashed")
         finally:
             if self._window is not None:
                 self._window.destroy()
+            context.pop_thread_default()

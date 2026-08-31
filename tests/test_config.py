@@ -263,6 +263,19 @@ class TestLoad:
         assert cfg.overlay.position == "top-center"
         assert cfg.validate() == []
 
+    def test_bare_overlay_section_gives_defaults_instead_of_crashing(
+        self, tmp_config_dir: Path
+    ):
+        # `overlay:` with nothing indented under it parses to
+        # {"overlay": None}, not {"overlay": {}} — this used to raise
+        # AttributeError: 'NoneType' object has no attribute 'get' before
+        # validation ever ran.
+        path = tmp_config_dir / "bare_overlay.yaml"
+        path.write_text("overlay:\nhotkey: fn\n")
+        cfg = Config.load(path)
+        assert cfg.overlay == OverlayConfig()
+        assert cfg.validate() == []
+
 
 # ── save_default ────────────────────────────────────────────────────────────
 
@@ -315,6 +328,12 @@ class TestMergeDataclass:
         # _merge_dataclass must skip it.
         result = _merge_dataclass(STTConfig, {"VALID_BACKENDS": ("fake",)})
         assert result.backend == "whisper-cpp"
+
+    def test_none_overrides_falls_back_to_defaults(self):
+        # A YAML section written with no mapping under it (e.g. a bare
+        # "overlay:" key) parses to None, not {} — this must not crash.
+        result = _merge_dataclass(STTConfig, None)
+        assert result == STTConfig()
 
 
 # ── _dataclass_to_dict ──────────────────────────────────────────────────────

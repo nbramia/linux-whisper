@@ -127,6 +127,39 @@ def mock_audio_f32():
     return _make
 
 
+class _FakeGLibSource:
+    """Stand-in for a `GLib.Source` (from `idle_source_new`/`timeout_source_new`).
+
+    Real GLib only invokes a source's callback once the main loop it is
+    attached to actually runs. Tests have no such loop pumping, so `attach()`
+    here invokes the callback immediately and once — but critically, only
+    `attach()` does that, not `set_callback()`. That means a test can tell
+    the difference between code that dispatches through the overlay's own
+    context (`Overlay._dispatch`, which calls `set_callback` then `attach`)
+    and code that (incorrectly) mutates the window directly: only the former
+    shows up as a recorded `attach()` call.
+    """
+
+    def __init__(self) -> None:
+        self.callback = None
+        self.args: tuple = ()
+        self.attached_to: object | None = None
+        self.destroyed = False
+
+    def set_callback(self, callback, *args):
+        self.callback = callback
+        self.args = args
+
+    def attach(self, context):
+        self.attached_to = context
+        if self.callback is not None:
+            self.callback(*self.args)
+        return 1  # fake source id
+
+    def destroy(self):
+        self.destroyed = True
+
+
 @pytest.fixture()
 def mock_gtk(monkeypatch):
     """Replace linux_whisper.overlay's GTK bindings with MagicMocks.
@@ -145,10 +178,37 @@ def mock_gtk(monkeypatch):
     fake_gtk = MagicMock()
     fake_gdk = MagicMock()
     fake_glib = MagicMock()
-    # GLib.idle_add in real usage schedules a call on the GTK main loop;
-    # for tests, invoke synchronously so assertions don't need to pump a
-    # (nonexistent) event loop.
-    fake_glib.idle_add.side_effect = lambda fn, *a, **kw: fn(*a, **kw)
+
+    # GLib.idle_source_new()/timeout_source_new() return a fresh fake source
+    # each call; attach() runs the callback synchronously (see _FakeGLibSource)
+    # so tests don't need to pump a real main loop.
+    fake_glib.idle_source_new.side_effect = lambda: _FakeGLibSource()
+    fake_glib.timeout_source_new.side_effect = lambda *a, **kw: _FakeGLibSource()
+    fake_glib.SOURCE_REMOVE = False
+    fake_glib.SOURCE_CONTINUE = True
+
+    # Gdk.Display.get_default() reports a class named "X11Display" — the
+    # overlay's backend check (Overlay._run_gtk) matches on the substring
+    # "X11" in the type name, the same way the real GdkX11Display/
+    # GdkWaylandDisplay classes are named. Tests that need to exercise the
+    # non-X11 path override this return value.
+    x11_display_cls = type("X11Display", (MagicMock,), {})
+    fake_display = x11_display_cls()
+
+    # A concrete (not auto-mocked) pointer/monitor geometry, so
+    # `_monitor_geometry_at_pointer()` — exercised for real now that
+    # `set_recording(True)` calls `_reposition()` directly — has real ints
+    # to do arithmetic on instead of chained MagicMocks.
+    fake_pointer = MagicMock()
+    fake_pointer.get_position.return_value = (None, 960, 540)
+    fake_seat = MagicMock()
+    fake_seat.get_pointer.return_value = fake_pointer
+    fake_display.get_default_seat.return_value = fake_seat
+    fake_geometry = types.SimpleNamespace(x=0, y=0, width=1920, height=1080)
+    fake_monitor = MagicMock()
+    fake_monitor.get_geometry.return_value = fake_geometry
+    fake_display.get_monitor_at_point.return_value = fake_monitor
+    fake_gdk.Display.get_default.return_value = fake_display
 
     monkeypatch.setattr(overlay_module, "Gtk", fake_gtk)
     monkeypatch.setattr(overlay_module, "Gdk", fake_gdk)

@@ -165,8 +165,14 @@ class Config:
         logger.info("Wrote default config to %s", path)
 
 
-def _merge_dataclass[T](cls: type[T], overrides: dict) -> T:
-    """Create a dataclass instance, merging overrides with defaults."""
+def _merge_dataclass[T](cls: type[T], overrides: dict | None) -> T:
+    """Create a dataclass instance, merging overrides with defaults.
+
+    A YAML section written with no mapping under it (e.g. a bare ``overlay:``
+    key) parses to ``None``, not ``{}`` — treat that the same as "no
+    overrides", not a crash.
+    """
+    overrides = overrides or {}
     defaults = cls()
     fields = {f.name for f in cls.__dataclass_fields__.values()}
     kwargs = {}
