@@ -126,6 +126,158 @@ class TestConfigSubcommands:
         assert "Usage" in captured.err or "usage" in captured.err.lower()
 
 
+# ── Config subcommands honour --config (issue #49) ─────────────────────────
+
+
+class TestConfigFlagPassthrough:
+    """`config show`/`validate`/`path`/`init` must honour a global --config,
+    the same way `run` already does.
+
+    Each test asserts which file's content actually shows up in the output,
+    not just the exit code — an exit-code-only assertion passes even with
+    the pre-fix bug, because the default config also happens to be valid.
+    """
+
+    def _patch_default_config_path(self, monkeypatch, path):
+        monkeypatch.setattr("linux_whisper.cli.CONFIG_PATH", path)
+        monkeypatch.setattr("linux_whisper.config.CONFIG_PATH", path)
+
+    def test_show_without_config_flag_reads_default_path(self, tmp_path, capsys, monkeypatch):
+        default_path = tmp_path / "default.yaml"
+        default_path.write_text("hotkey: ctrl+alt+d\n")
+        self._patch_default_config_path(monkeypatch, default_path)
+
+        result = main(["config", "show"])
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "ctrl+alt+d" in captured.out
+
+    def test_show_with_config_flag_reads_that_file_not_default(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        default_path = tmp_path / "default.yaml"
+        default_path.write_text("hotkey: ctrl+alt+d\n")
+        self._patch_default_config_path(monkeypatch, default_path)
+
+        custom_path = tmp_path / "custom.yaml"
+        custom_path.write_text("hotkey: super+space\n")
+
+        result = main(["--config", str(custom_path), "config", "show"])
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "super+space" in captured.out
+        assert "ctrl+alt+d" not in captured.out
+
+    def test_validate_without_config_flag_reads_default_path(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        default_path = tmp_path / "default.yaml"
+        default_path.write_text("mode: bogus-mode\n")
+        self._patch_default_config_path(monkeypatch, default_path)
+
+        result = main(["config", "validate"])
+
+        assert result == 1
+        captured = capsys.readouterr()
+        assert "bogus-mode" in captured.out
+
+    def test_validate_with_config_flag_reads_that_file_not_default(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        # The default path is a *valid* config; the custom path is invalid.
+        # Pre-fix, `validate` ignores --config and reports on the (valid)
+        # default, so this fails before the fix and passes after.
+        default_path = tmp_path / "default.yaml"
+        default_path.write_text("mode: auto\n")
+        self._patch_default_config_path(monkeypatch, default_path)
+
+        custom_path = tmp_path / "custom.yaml"
+        custom_path.write_text("mode: bogus-mode\n")
+
+        result = main(["--config", str(custom_path), "config", "validate"])
+
+        assert result == 1
+        captured = capsys.readouterr()
+        assert "bogus-mode" in captured.out
+
+    def test_path_without_config_flag_prints_default_path(self, tmp_path, capsys, monkeypatch):
+        default_path = tmp_path / "default.yaml"
+        self._patch_default_config_path(monkeypatch, default_path)
+
+        result = main(["config", "path"])
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert captured.out.strip() == str(default_path)
+
+    def test_path_with_config_flag_prints_that_path_not_default(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        default_path = tmp_path / "default.yaml"
+        self._patch_default_config_path(monkeypatch, default_path)
+        custom_path = tmp_path / "custom.yaml"
+
+        result = main(["--config", str(custom_path), "config", "path"])
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert captured.out.strip() == str(custom_path)
+
+    def test_init_with_config_flag_writes_that_path_not_default(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        default_path = tmp_path / "default.yaml"
+        self._patch_default_config_path(monkeypatch, default_path)
+        custom_path = tmp_path / "sub" / "custom.yaml"
+
+        result = main(["--config", str(custom_path), "config", "init"])
+
+        assert result == 0
+        assert custom_path.exists()
+        assert not default_path.exists()
+        captured = capsys.readouterr()
+        assert str(custom_path) in captured.out
+
+    def test_show_with_nonexistent_config_flag_errors_clearly(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        # A typo'd --config path must not silently fall back to the
+        # (possibly different) default config — report it instead.
+        default_path = tmp_path / "default.yaml"
+        default_path.write_text("hotkey: ctrl+alt+d\n")
+        self._patch_default_config_path(monkeypatch, default_path)
+
+        missing_path = tmp_path / "does-not-exist.yaml"
+
+        result = main(["--config", str(missing_path), "config", "show"])
+
+        assert result == 1
+        captured = capsys.readouterr()
+        assert "not found" in captured.err.lower()
+        assert str(missing_path) in captured.err
+        # Must not have silently fallen back and printed the default's content.
+        assert "ctrl+alt+d" not in captured.out
+
+    def test_validate_with_nonexistent_config_flag_errors_clearly(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        default_path = tmp_path / "default.yaml"
+        default_path.write_text("mode: auto\n")
+        self._patch_default_config_path(monkeypatch, default_path)
+
+        missing_path = tmp_path / "does-not-exist.yaml"
+
+        result = main(["--config", str(missing_path), "config", "validate"])
+
+        assert result == 1
+        captured = capsys.readouterr()
+        assert "not found" in captured.err.lower()
+        assert str(missing_path) in captured.err
+        assert "valid" not in captured.out.lower()
+
+
 # ── Models subcommand ───────────────────────────────────────────────────────
 
 
