@@ -201,25 +201,40 @@ def _models_default(model_id: str) -> int:
 def _cmd_config(args: argparse.Namespace) -> int:
     """Handle config commands."""
     config_command = getattr(args, "config_command", None)
+    # The path this invocation resolves to: an explicit `--config PATH` if
+    # given, else the default. `show`/`validate`/`init` all honour it; only
+    # `path` needs it directly since it doesn't load anything.
+    config_path = args.config or CONFIG_PATH
 
     if config_command == "init":
         config = Config()
-        config.save_default()
-        print(f"Config written to {CONFIG_PATH}")
+        config.save_default(args.config)
+        print(f"Config written to {config_path}")
         return 0
     elif config_command == "show":
-        config = Config.load()
+        # An explicit --config that doesn't exist is almost certainly a typo
+        # — report it instead of silently falling back to defaults, which
+        # would defeat the point of passing --config at all. (No --config
+        # still falls back to defaults when the default path is absent —
+        # that's the normal first-run experience, unchanged.)
+        if args.config is not None and not args.config.exists():
+            print(f"Config file not found: {args.config}", file=sys.stderr)
+            return 1
+        config = Config.load(args.config)
         import yaml
         from linux_whisper.config import _dataclass_to_dict
 
         print(yaml.dump(_dataclass_to_dict(config), default_flow_style=False, sort_keys=False))
         return 0
     elif config_command == "path":
-        print(CONFIG_PATH)
+        print(config_path)
         return 0
     elif config_command == "validate":
+        if args.config is not None and not args.config.exists():
+            print(f"Config file not found: {args.config}", file=sys.stderr)
+            return 1
         try:
-            config = Config.load()
+            config = Config.load(args.config)
         except ValueError as exc:
             # A malformed section (e.g. `overlay: false` instead of a
             # mapping) is a config problem, same as anything Config.validate()

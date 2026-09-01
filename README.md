@@ -305,6 +305,17 @@ linux-whisper [--version] [--config PATH] [-v|-vv] COMMAND
 
 Verbosity: `-v` for INFO, `-vv` for DEBUG.
 
+`--config PATH` is honoured by every subcommand that touches config —
+`run`, and all of `config init`/`show`/`path`/`validate`. `config path`
+prints whichever path is in effect (the `--config` override if given,
+otherwise the default). Passing `--config PATH` for a file that doesn't
+exist is an error (`Config file not found: PATH`) for `show` and
+`validate`, rather than a silent fallback to the default config — a
+typo'd path should not be mistaken for a validated one. `run` and `config
+init` keep their existing behaviour when no `--config` is given: a missing
+*default* config file (no override) still falls back to built-in defaults,
+which is the normal experience before running `config init`.
+
 ## Recording Overlay
 
 A floating pill appears on the monitor under your pointer when recording
