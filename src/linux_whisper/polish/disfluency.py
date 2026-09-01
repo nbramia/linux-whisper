@@ -13,9 +13,12 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from linux_whisper.config import MODELS_DIR
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -374,10 +377,7 @@ class DisfluencyRemover:
 
 def _detect_self_corrections(text: str) -> bool:
     """Return True if *text* contains a self-correction pattern."""
-    for pattern in _SELF_CORRECTION_PATTERNS:
-        if pattern.search(text):
-            return True
-    return False
+    return any(pattern.search(text) for pattern in _SELF_CORRECTION_PATTERNS)
 
 
 def _bare_word(token: str) -> str:

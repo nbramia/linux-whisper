@@ -12,25 +12,22 @@ from __future__ import annotations
 import re
 import time
 from pathlib import Path
-from threading import Thread
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 from linux_whisper.config import PolishConfig
 
-
 # =====================================================================
 # Stage 4a: DisfluencyRemover
 # =====================================================================
-
 from linux_whisper.polish.disfluency import (
-    DisfluencyRemover,
-    DisfluencyResult,
     _AMBIGUOUS_FILLERS,
     _FILLER_WORDS,
     _LABEL_KEEP,
     _LABEL_REMOVE,
+    DisfluencyRemover,
+    DisfluencyResult,
     _detect_self_corrections,
     _normalise_whitespace,
     _remove_fillers,
@@ -473,14 +470,14 @@ class TestDisfluencyRemover:
 
     def test_repetition_removal(self, remover):
         result = remover.process("I I I want to go go home")
-        assert "I want to go home" == result.text
+        assert result.text == "I want to go home"
 
     def test_combined_fillers_and_repetitions(self, remover):
         # "like" here has no context cue (no comma, not adjacent to an
         # unambiguous filler) — issue #43 keeps it as content. Only "um"
         # (unambiguous) and the "the the" repetition are removed.
         result = remover.process("um the the cat was like sitting there")
-        assert "the cat was like sitting there" == result.text
+        assert result.text == "the cat was like sitting there"
 
     def test_self_correction_detected(self, remover):
         result = remover.process("meet at 3 actually meet at 5")
@@ -566,7 +563,7 @@ class TestDisfluencyRemover:
     def test_real_dictation_email(self, remover):
         text = "I I wanted to to let uh the the project is done"
         result = remover.process(text)
-        assert "I wanted to let the project is done" == result.text
+        assert result.text == "I wanted to let the project is done"
 
     def test_real_dictation_with_correction(self, remover):
         text = "send it to john actually send it to sarah"
@@ -579,7 +576,7 @@ class TestDisfluencyRemover:
         # hundred and fifty"). Only "um" (unambiguous) is removed.
         text = "um the total is like three hundred and fifty"
         result = remover.process(text)
-        assert "the total is like three hundred and fifty" == result.text
+        assert result.text == "the total is like three hundred and fifty"
 
 
 class TestOnnxDisfluencyPath:
@@ -882,7 +879,10 @@ class TestPunctuationRestorer:
         assert result.count(".") >= 1 or result.count("?") >= 1
 
     def test_real_dictation_long(self, restorer):
-        text = "i went to the store and i bought some milk but they didnt have eggs so i went to another store"
+        text = (
+            "i went to the store and i bought some milk but they "
+            "didnt have eggs so i went to another store"
+        )
         result = restorer.process(text)
         assert result[0].isupper()
         assert result[-1] in ".?!"
@@ -1573,7 +1573,13 @@ class TestPolishPipelineStageToggling:
     """Test enabling/disabling individual stages."""
 
     def test_disfluency_only(self):
-        cfg = PolishConfig(enabled=True, disfluency=True, punctuation=False, formatting=False, llm=False)
+        cfg = PolishConfig(
+            enabled=True,
+            disfluency=True,
+            punctuation=False,
+            formatting=False,
+            llm=False,
+        )
         pipeline = PolishPipeline(cfg)
         assert pipeline._disfluency is not None
         assert pipeline._punctuation is None
@@ -1581,7 +1587,13 @@ class TestPolishPipelineStageToggling:
         assert pipeline._llm is None
 
     def test_punctuation_only(self):
-        cfg = PolishConfig(enabled=True, disfluency=False, punctuation=True, formatting=False, llm=False)
+        cfg = PolishConfig(
+            enabled=True,
+            disfluency=False,
+            punctuation=True,
+            formatting=False,
+            llm=False,
+        )
         pipeline = PolishPipeline(cfg)
         assert pipeline._disfluency is None
         assert pipeline._punctuation is not None
@@ -1589,7 +1601,13 @@ class TestPolishPipelineStageToggling:
         assert pipeline._llm is None
 
     def test_formatting_only(self):
-        cfg = PolishConfig(enabled=True, disfluency=False, punctuation=False, formatting=True, llm=False)
+        cfg = PolishConfig(
+            enabled=True,
+            disfluency=False,
+            punctuation=False,
+            formatting=True,
+            llm=False,
+        )
         pipeline = PolishPipeline(cfg)
         assert pipeline._disfluency is None
         assert pipeline._punctuation is None
@@ -1597,7 +1615,13 @@ class TestPolishPipelineStageToggling:
         assert pipeline._llm is None
 
     def test_llm_only(self):
-        cfg = PolishConfig(enabled=True, disfluency=False, punctuation=False, formatting=False, llm=True)
+        cfg = PolishConfig(
+            enabled=True,
+            disfluency=False,
+            punctuation=False,
+            formatting=False,
+            llm=True,
+        )
         pipeline = PolishPipeline(cfg)
         assert pipeline._disfluency is None
         assert pipeline._punctuation is None
@@ -1605,7 +1629,13 @@ class TestPolishPipelineStageToggling:
         assert pipeline._llm is not None
 
     def test_all_stages_enabled(self):
-        cfg = PolishConfig(enabled=True, disfluency=True, punctuation=True, formatting=True, llm=True)
+        cfg = PolishConfig(
+            enabled=True,
+            disfluency=True,
+            punctuation=True,
+            formatting=True,
+            llm=True,
+        )
         pipeline = PolishPipeline(cfg)
         assert pipeline._disfluency is not None
         assert pipeline._punctuation is not None
@@ -1664,63 +1694,79 @@ class TestPolishPipelineIntegration:
 
 
 class TestPolishPipelineLLMConditional:
-    """Test that LLM is only invoked when appropriate."""
+    """Stage 4c is only invoked when it should be.
+
+    These previously wrapped every assertion in
+    `if pipeline._llm is not None and pipeline._llm._model is not None:`, so
+    wherever the LLM could not be constructed — CI, for one — the assertions
+    were skipped entirely and the tests passed without testing anything. The
+    unused `result` was the tell that ruff's F841 flagged. They now skip
+    loudly instead of passing quietly.
+    """
+
+    @staticmethod
+    def _pipeline_with_mock_llm(*, llm_always: bool, reply: str) -> PolishPipeline:
+        cfg = PolishConfig(
+            enabled=True,
+            disfluency=True,
+            punctuation=False,
+            llm=True,
+            llm_always=llm_always,
+        )
+        pipeline = PolishPipeline(cfg)
+        if pipeline._llm is None:
+            pytest.skip("stage 4c (LLM) could not be constructed in this environment")
+        pipeline._llm._loaded = True
+        pipeline._llm._model = MagicMock()
+        pipeline._llm._timeout_s = 5.0
+        pipeline._llm._model.create_chat_completion.return_value = {
+            "choices": [{"message": {"content": reply}}]
+        }
+        return pipeline
 
     def test_llm_skipped_without_self_corrections(self):
-        cfg = PolishConfig(enabled=True, disfluency=True, punctuation=False, llm=True, llm_always=False)
-        pipeline = PolishPipeline(cfg)
-
-        # Mock the LLM
-        if pipeline._llm is not None:
-            pipeline._llm._loaded = True
-            pipeline._llm._model = MagicMock()
-            pipeline._llm._timeout_s = 5.0
-            pipeline._llm._model.create_chat_completion.return_value = {
-                "choices": [{"message": {"content": "should not be called"}}]
-            }
+        pipeline = self._pipeline_with_mock_llm(
+            llm_always=False, reply="should not be called"
+        )
 
         result = pipeline.process("the weather is nice today")
-        # LLM should NOT have been called (no self-corrections)
-        if pipeline._llm is not None and pipeline._llm._model is not None:
-            pipeline._llm._model.create_chat_completion.assert_not_called()
+
+        assert isinstance(result, str) and result
+        pipeline._llm._model.create_chat_completion.assert_not_called()
 
     def test_llm_invoked_with_self_corrections(self):
-        cfg = PolishConfig(enabled=True, disfluency=True, punctuation=False, llm=True, llm_always=False)
-        pipeline = PolishPipeline(cfg)
-
-        if pipeline._llm is not None:
-            pipeline._llm._loaded = True
-            pipeline._llm._model = MagicMock()
-            pipeline._llm._timeout_s = 5.0
-            pipeline._llm._model.create_chat_completion.return_value = {
-                "choices": [{"message": {"content": "at 4"}}]
-            }
+        pipeline = self._pipeline_with_mock_llm(llm_always=False, reply="at 4")
 
         result = pipeline.process("at 2 actually at 4")
-        # LLM should have been called because self-correction was detected
-        if pipeline._llm is not None and pipeline._llm._model is not None:
-            pipeline._llm._model.create_chat_completion.assert_called_once()
+
+        assert isinstance(result, str) and result
+        pipeline._llm._model.create_chat_completion.assert_called_once()
 
     def test_llm_always_flag(self):
-        cfg = PolishConfig(enabled=True, disfluency=True, punctuation=False, llm=True, llm_always=True)
-        pipeline = PolishPipeline(cfg)
-
-        if pipeline._llm is not None:
-            pipeline._llm._loaded = True
-            pipeline._llm._model = MagicMock()
-            pipeline._llm._timeout_s = 5.0
-            pipeline._llm._model.create_chat_completion.return_value = {
-                "choices": [{"message": {"content": "cleaned up text"}}]
-            }
+        pipeline = self._pipeline_with_mock_llm(
+            llm_always=True, reply="cleaned up text"
+        )
 
         result = pipeline.process("normal text without corrections")
-        # LLM should still be called because llm_always is True
-        if pipeline._llm is not None and pipeline._llm._model is not None:
-            pipeline._llm._model.create_chat_completion.assert_called_once()
+
+        assert isinstance(result, str) and result
+        pipeline._llm._model.create_chat_completion.assert_called_once()
 
 
 class TestSystemPromptHygiene:
     """The system prompt must not carry model-specific workarounds."""
+
+    def test_first_line_is_intact(self):
+        """The opening line is assembled from three implicitly concatenated
+        pieces to fit the column limit. Assert it reassembles exactly — a
+        dropped space would silently change a benchmark-gated prompt."""
+        from linux_whisper.polish.llm import _SYSTEM_PROMPT
+
+        assert _SYSTEM_PROMPT.split("\n")[0] == (
+            "You resolve self-corrections in dictated text. When someone "
+            "changes their mind mid-sentence, keep ONLY the final version. "
+            "Fix grammar. Output ONLY the result."
+        )
 
     def test_no_thinking_suppression_hack(self):
         from linux_whisper.polish.llm import _SYSTEM_PROMPT

@@ -12,11 +12,14 @@ from __future__ import annotations
 import logging
 import os
 import time
+from typing import TYPE_CHECKING
 
 import numpy as np
 
-from linux_whisper.config import Config
 from linux_whisper.stt.engine import TranscriptResult, TranscriptSegment
+
+if TYPE_CHECKING:
+    from linux_whisper.config import Config
 
 logger = logging.getLogger(__name__)
 

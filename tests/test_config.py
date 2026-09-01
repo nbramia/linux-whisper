@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 import yaml
@@ -19,6 +19,8 @@ from linux_whisper.config import (
     _merge_dataclass,
 )
 
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # ── Defaults ────────────────────────────────────────────────────────────────
 
@@ -325,7 +327,7 @@ class TestMergeDataclass:
         assert result.backend == "whisper-cpp"
         assert result.model == "whisper-large-v3-turbo"  # untouched default
 
-    def test_skips_VALID_constants(self):
+    def test_skips_valid_constants(self):
         # VALID_BACKENDS is a class variable, not a constructor param.
         # _merge_dataclass must skip it.
         result = _merge_dataclass(STTConfig, {"VALID_BACKENDS": ("fake",)})

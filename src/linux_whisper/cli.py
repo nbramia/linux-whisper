@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import logging
 import sys
 from pathlib import Path
@@ -115,10 +116,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
             overlay=config.overlay,
         )
 
-    try:
+    with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(run_app(config))
-    except KeyboardInterrupt:
-        pass
     return 0
 
 
@@ -171,7 +170,10 @@ def _models_list() -> int:
         downloaded = (MODELS_DIR / model_id).exists()
         status = "[downloaded]" if downloaded else "[not downloaded]"
         print(f"  {model_id:<30} {status}")
-        print(f"    Params: {info['params']}, WER: {info['wer']}, RAM: {info['ram']}, Type: {info['type']}")
+        print(
+            f"    Params: {info['params']}, WER: {info['wer']}, "
+            f"RAM: {info['ram']}, Type: {info['type']}"
+        )
         print()
 
     return 0
@@ -184,16 +186,18 @@ def _models_download(model_id: str) -> int:
 
     # Model download logic would use huggingface_hub
     # For now, print instructions
-    print(f"Model download not yet implemented. Models will be downloaded automatically on first use.")
+    print(
+        "Model download not yet implemented. "
+        "Models will be downloaded automatically on first use."
+    )
     print(f"Models are cached in: {MODELS_DIR}")
     return 0
 
 
 def _models_default(model_id: str) -> int:
     """Set the default model in config."""
-    config = Config.load()
     print(f"To set the default model, edit {CONFIG_PATH}:")
-    print(f"  stt:")
+    print("  stt:")
     print(f"    model: {model_id}")
     return 0
 
@@ -222,6 +226,7 @@ def _cmd_config(args: argparse.Namespace) -> int:
             return 1
         config = Config.load(args.config)
         import yaml
+
         from linux_whisper.config import _dataclass_to_dict
 
         print(yaml.dump(_dataclass_to_dict(config), default_flow_style=False, sort_keys=False))
@@ -290,7 +295,10 @@ def _cmd_listen_keys() -> int:
                             action = "DOWN" if event.value == 1 else "UP  "
                             kernel_ts = event.timestamp()
                             delivery_ms = (time.time() - kernel_ts) * 1000
-                            print(f"  {action}  {name:<30} code={event.code:<5}  +{delivery_ms:5.1f}ms  device={dev.name}")
+                            print(
+                                f"  {action}  {name:<30} code={event.code:<5}  "
+                                f"+{delivery_ms:5.1f}ms  device={dev.name}"
+                            )
                 except OSError:
                     pass
     except KeyboardInterrupt:

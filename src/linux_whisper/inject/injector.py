@@ -17,8 +17,10 @@ import os
 import shutil
 from abc import ABC, abstractmethod
 from enum import Enum
+from typing import TYPE_CHECKING
 
-from linux_whisper.config import InjectConfig
+if TYPE_CHECKING:
+    from linux_whisper.config import InjectConfig
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +89,7 @@ async def _run(
             proc.communicate(input=stdin_data),
             timeout=timeout,
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         proc.kill()
         await proc.wait()
         logger.error("Subprocess timed out: %s", " ".join(cmd))

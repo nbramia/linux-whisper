@@ -11,14 +11,13 @@ audio bytes sent inline after transcribe commands.
 # ── IMPORT ORDER MATTERS ──────────────────────────────────────────────
 # pywhispercpp's ROCm/HIP C extension segfaults if numpy is loaded first.
 # Import it at the top, before anything else.
-from pywhispercpp.model import Model as _WhisperModel  # noqa: E402,F401
-
 import json
 import logging
 import struct
 import sys
 
 import numpy as np
+from pywhispercpp.model import Model as _WhisperModel  # noqa: E402,F401
 
 # ── Logging ───────────────────────────────────────────────────────────
 

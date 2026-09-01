@@ -12,11 +12,14 @@ import itertools
 import sys
 import threading
 import types
-from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 import pytest
 import yaml
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Ensure optional heavy dependencies can be faked during test collection.

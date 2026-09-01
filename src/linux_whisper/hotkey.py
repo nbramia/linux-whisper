@@ -18,16 +18,19 @@ Supported modes (set in ``Config.mode``):
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import select
 import threading
 import time
-from collections.abc import Callable
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from evdev import InputDevice, InputEvent, ecodes
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +89,7 @@ def _key_name_to_code(name: str) -> int:
         return _MODIFIER_MAP[lower]
 
     # Common aliases for non-alphanumeric keys.
-    _ALIASES: dict[str, str] = {
+    aliases: dict[str, str] = {
         "`": "GRAVE",
         "backtick": "GRAVE",
         "grave": "GRAVE",
@@ -103,8 +106,8 @@ def _key_name_to_code(name: str) -> int:
         ".": "DOT",
         "/": "SLASH",
     }
-    if lower in _ALIASES:
-        lower = _ALIASES[lower]
+    if lower in aliases:
+        lower = aliases[lower]
 
     # Try KEY_<NAME> in ecodes (e.g. "e" → KEY_E, "f1" → KEY_F1).
     attr = f"KEY_{lower.upper()}"
@@ -253,10 +256,10 @@ class HotkeyDaemon:
         self._key_down_time: float = 0.0  # monotonic time of last key-down
         self._last_tap_up_time: float = 0.0  # monotonic time of last quick tap key-up
         self._in_toggle_mode: bool = False  # currently in double-tap toggle recording
-        _HOLD_THRESHOLD_S = 0.3  # seconds: hold longer than this = hold mode
-        _DOUBLE_TAP_WINDOW_S = 0.4  # seconds: second tap within this = double-tap
-        self._HOLD_THRESHOLD = _HOLD_THRESHOLD_S
-        self._DOUBLE_TAP_WINDOW = _DOUBLE_TAP_WINDOW_S
+        # seconds: hold longer than this = hold mode
+        self._HOLD_THRESHOLD = 0.3
+        # seconds: a second tap within this window = double-tap
+        self._DOUBLE_TAP_WINDOW = 0.4
 
         logger.info(
             "HotkeyDaemon configured: combo=%s  mode=%s",
@@ -435,27 +438,21 @@ class HotkeyDaemon:
         """Close *dev*, ignoring an already-closed or already-gone device."""
         if dev is None:
             return
-        try:
+        with contextlib.suppress(OSError, ValueError):
             dev.close()
-        except (OSError, ValueError):
-            pass
 
     @staticmethod
     def _close_device(devices: dict[str, InputDevice], path: str) -> None:
         dev = devices.pop(path, None)
         if dev is not None:
-            try:
+            with contextlib.suppress(OSError):
                 dev.close()
-            except OSError:
-                pass
 
     @staticmethod
     def _close_all_devices(devices: dict[str, InputDevice]) -> None:
         for dev in devices.values():
-            try:
+            with contextlib.suppress(OSError):
                 dev.close()
-            except OSError:
-                pass
         devices.clear()
 
     # -- event handling -----------------------------------------------------

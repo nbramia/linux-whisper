@@ -5,7 +5,6 @@ Does NOT test actual audio device capture (requires hardware and sounddevice).
 
 from __future__ import annotations
 
-import math
 import time
 
 import numpy as np
@@ -14,8 +13,6 @@ import pytest
 from linux_whisper.audio import (
     FEEDBACK_AMPLITUDE,
     FEEDBACK_DURATION_S,
-    FEEDBACK_FREQ_HIGH,
-    FEEDBACK_FREQ_LOW,
     SAMPLE_RATE,
     AudioChunk,
     PipelineMode,
@@ -25,7 +22,6 @@ from linux_whisper.audio import (
     generate_start_tone,
     generate_stop_tone,
 )
-
 
 # ── RingBuffer ──────────────────────────────────────────────────────────────
 
@@ -359,7 +355,6 @@ class TestSileroVADFallback:
 
 # Need to import Path for the tests above
 from pathlib import Path
-
 
 # ── Automatic Gain Control ─────────────────────────────────────────────────
 

@@ -15,18 +15,21 @@ import logging
 import math
 import threading
 import time
-from collections.abc import AsyncGenerator
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
 import sounddevice as sd
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
+    from pathlib import Path
+
     import numpy.typing as npt
 
-from linux_whisper.config import AudioConfig, CACHE_DIR
+import contextlib
+
+from linux_whisper.config import CACHE_DIR, AudioConfig
 
 logger = logging.getLogger(__name__)
 
@@ -563,10 +566,8 @@ class AudioPipeline:
             self._stream = None
 
         # Signal end-of-stream to any waiting consumers
-        try:
+        with contextlib.suppress(asyncio.QueueFull):
             self._chunk_queue.put_nowait(None)
-        except asyncio.QueueFull:
-            pass
 
         logger.info("Audio pipeline stopped")
 

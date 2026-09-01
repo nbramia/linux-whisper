@@ -18,7 +18,6 @@ from linux_whisper.stt.engine import (
     create_engine,
 )
 
-
 # ── TranscriptSegment / TranscriptResult ────────────────────────────────────
 
 

@@ -277,8 +277,9 @@ class App:
 
     async def _handle_mode_change(self, mode: str) -> None:
         """Switch the hotkey mode and persist to config."""
-        from linux_whisper.config import Config, CONFIG_PATH, _dataclass_to_dict
         import yaml
+
+        from linux_whisper.config import CONFIG_PATH, Config, _dataclass_to_dict
 
         logger.info("Switching mode to %s", mode)
 
@@ -327,8 +328,9 @@ class App:
 
     async def _handle_model_change(self, backend: str, model: str) -> None:
         """Hot-swap the STT engine to a different model."""
-        from linux_whisper.config import STTConfig, Config, CONFIG_PATH, _dataclass_to_dict
         import yaml
+
+        from linux_whisper.config import CONFIG_PATH, Config, STTConfig, _dataclass_to_dict
 
         logger.info("Switching STT engine to %s/%s...", backend, model)
 
@@ -589,7 +591,12 @@ class App:
         return text
 
     @staticmethod
-    def _trim_silence(audio: np.ndarray, frame_ms: int = 30, threshold_factor: float = 3.0, pad_frames: int = 5) -> np.ndarray:
+    def _trim_silence(
+        audio: np.ndarray,
+        frame_ms: int = 30,
+        threshold_factor: float = 3.0,
+        pad_frames: int = 5,
+    ) -> np.ndarray:
         """Remove leading/trailing/internal silence from audio.
 
         Splits audio into frames, computes RMS per frame, identifies speech
