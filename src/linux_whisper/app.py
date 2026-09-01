@@ -392,12 +392,25 @@ class App:
         if self._overlay:
             self._overlay.show()
 
-        if self._stt:
-            self._stt.start_stream()
-            # Feed pre-roll into the STT engine immediately
-            if pre_roll is not None and len(pre_roll) > 0:
-                pre_roll_int16 = (pre_roll * 32767).astype(np.int16)
-                self._stt.feed_audio(pre_roll_int16.tobytes())
+        try:
+            if self._stt:
+                self._stt.start_stream()
+                # Feed pre-roll into the STT engine immediately
+                if pre_roll is not None and len(pre_roll) > 0:
+                    pre_roll_int16 = (pre_roll * 32767).astype(np.int16)
+                    self._stt.feed_audio(pre_roll_int16.tobytes())
+        except Exception:
+            # The pill is already on screen and audio is already capturing.
+            # If STT cannot start (e.g. the GPU worker fails to spawn), tear
+            # both back down rather than leaving a recording that can never
+            # finish — which is what stranded the pill on screen indefinitely
+            # and made the app look frozen.
+            logger.exception("Failed to start STT — aborting this recording")
+            if self._overlay:
+                self._overlay.hide()
+            if self._audio:
+                self._audio.stop_recording()
+            raise
 
         if self._loop is None or self._loop.is_closed():
             return
