@@ -580,6 +580,124 @@ class TestDisfluencyRemover:
         assert result.text == "the total is like three hundred and fifty"
 
 
+class _FakeInput:
+    """Mirrors the `NodeArg` shape `onnxruntime` exposes via get_inputs().
+
+    The production code now builds its feed from the session's declared
+    inputs rather than assuming a BERT signature, so the double has to model
+    that — a fake that is more permissive than the real API is how the
+    DistilBERT incompatibility went unnoticed.
+    """
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+_BERT_INPUTS = [_FakeInput(n) for n in ("input_ids", "attention_mask", "token_type_ids")]
+
+
+class TestOnnxInputSignature:
+    """The feed is built from the model's declared inputs, not assumed.
+
+    Hardcoding `token_type_ids` made every DistilBERT-based checkpoint fail
+    with `InvalidArgument: Invalid input name: token_type_ids` — DistilBERT
+    has no segment embeddings. Found while evaluating a real candidate for
+    #36; it ruled out an entire family of otherwise-usable models.
+    """
+
+    @staticmethod
+    def _vocab():
+        return {"[CLS]": 101, "[SEP]": 102, "[UNK]": 100,
+                "um": 1, "so": 2, "i": 3, "think": 4}
+
+    def test_distilbert_signature_without_token_type_ids(self):
+        import numpy as np
+
+        class DistilBertSession:
+            """No token_type_ids, exactly like a real DistilBERT export."""
+
+            def get_inputs(self):
+                return [_FakeInput("input_ids"), _FakeInput("attention_mask")]
+
+            def run(self, _outputs, feed):
+                assert "token_type_ids" not in feed, (
+                    "fed an input this model never declared"
+                )
+                n = len(feed["input_ids"][0])
+                logits = np.zeros((1, n, 3), dtype=np.float32)
+                logits[0, :, _LABEL_KEEP] = 10.0
+                return [logits]
+
+        r = DisfluencyRemover(model_dir=Path("/nonexistent/model"))
+        r._session = DistilBertSession()
+        r._vocab = self._vocab()
+        r._using_onnx = True
+
+        assert r.process("i think").text == "i think"
+        assert r._using_onnx is True, "a valid model must not fall back"
+
+    def test_unsupported_required_input_falls_back_to_regex(self):
+
+        class WeirdSession:
+            def get_inputs(self):
+                return [_FakeInput("input_ids"), _FakeInput("pixel_values")]
+
+            def run(self, _outputs, feed):  # pragma: no cover - must not run
+                raise AssertionError("should have fallen back before running")
+
+        r = DisfluencyRemover(model_dir=Path("/nonexistent/model"))
+        r._session = WeirdSession()
+        r._vocab = self._vocab()
+        r._using_onnx = True
+
+        # Degrades to the rules rather than raising at dictation time.
+        assert r.process("um i think").text == "i think"
+        assert r._using_onnx is False
+
+
+class TestOnnxUnknownLabel:
+    """An unrecognised label must not be read as "delete".
+
+    Label spaces differ between checkpoints. A candidate evaluated for #36
+    uses {0: KEEP, 1: DELETE, 2: KEEP_STRIP_COMMA, 3: KEEP_CAPITALIZE} — 2
+    and 3 are *keep* variants. Treating anything unknown as REMOVE would
+    silently delete those words.
+    """
+
+    def test_unknown_label_keeps_the_token(self):
+        """Only ONE word gets the unknown label.
+
+        Labelling every word would be rescued by the whole-utterance
+        backstop from #43 (removal may never empty the text), which masks
+        the defect entirely — an earlier version of this test did exactly
+        that and passed against the unfixed code.
+        """
+        import numpy as np
+
+        class FourLabelSession:
+            def get_inputs(self):
+                return _BERT_INPUTS
+
+            def run(self, _outputs, feed):
+                n = len(feed["input_ids"][0])
+                logits = np.zeros((1, n, 4), dtype=np.float32)
+                logits[0, :, _LABEL_KEEP] = 10.0
+                # position 2 == the second real word ([CLS] occupies 0)
+                logits[0, 2, :] = 0
+                logits[0, 2, 3] = 10.0  # KEEP_CAPITALIZE — unknown to us
+                return [logits]
+
+        r = DisfluencyRemover(model_dir=Path("/nonexistent/model"))
+        r._session = FourLabelSession()
+        r._vocab = {"[CLS]": 101, "[SEP]": 102, "[UNK]": 100,
+                    "ship": 1, "the": 2, "build": 3, "now": 4}
+        r._using_onnx = True
+
+        assert r.process("ship the build now").text == "ship the build now", (
+            "an unrecognised label must keep the token, not delete it"
+        )
+
+
 class TestOnnxDisfluencyPath:
     """Issue #43 review, finding 3: the ONNX path applied neither the
     contextual predicate nor the empty-output backstop that the regex
@@ -607,6 +725,9 @@ class TestOnnxDisfluencyPath:
             remove_ids.add(i)
 
         class FakeSession:
+            def get_inputs(self):
+                return _BERT_INPUTS
+
             def run(self, _outputs, feed):
                 ids = feed["input_ids"][0]
                 n_tokens = len(ids)
@@ -2018,6 +2139,9 @@ class TestOnnxPunctuationPath:
         from linux_whisper.polish.punctuation import PunctuationRestorer
 
         class FakeSession:
+            def get_inputs(self):
+                return _BERT_INPUTS
+
             def __init__(self, label: int, n_labels: int) -> None:
                 self._label = label
                 self._n = n_labels

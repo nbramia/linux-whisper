@@ -180,6 +180,7 @@ class DisfluencyRemover:
         self._vocab: dict[str, int] = {}
         self._id_to_label: dict[int, int] = {}
         self._using_onnx = False
+        self._warned_unknown_label = False
 
         self._try_load_model()
 
@@ -278,14 +279,28 @@ class DisfluencyRemover:
         attn_mask = np.ones_like(ids_array, dtype=np.int64)
         token_type = np.zeros_like(ids_array, dtype=np.int64)
 
-        outputs = self._session.run(
-            None,
-            {
-                "input_ids": ids_array,
-                "attention_mask": attn_mask,
-                "token_type_ids": token_type,
-            },
-        )
+        # Feed only what this model actually declares. Hardcoding a
+        # BERT-style signature makes any DistilBERT-based checkpoint fail
+        # outright with `InvalidArgument: Invalid input name: token_type_ids`
+        # — DistilBERT has no segment embeddings — which silently rules out
+        # a whole family of otherwise-suitable models.
+        available = {
+            "input_ids": ids_array,
+            "attention_mask": attn_mask,
+            "token_type_ids": token_type,
+        }
+        feed = {i.name: available[i.name] for i in self._session.get_inputs()
+                if i.name in available}
+        missing = {i.name for i in self._session.get_inputs()} - feed.keys()
+        if missing:
+            logger.warning(
+                "Disfluency model expects unsupported inputs %s — using regex fallback",
+                sorted(missing),
+            )
+            self._using_onnx = False
+            return self._process_regex(text)
+
+        outputs = self._session.run(None, feed)
         # outputs[0] shape: (1, seq_len, num_labels)
         logits = outputs[0][0]
         # Strip [CLS] and [SEP]
@@ -330,10 +345,27 @@ class DisfluencyRemover:
                 has_self_corrections = True
                 continue
 
-            # _LABEL_REMOVE (and any unrecognised label): the model wants
-            # to drop this token. Override that for ambiguous vocabulary
-            # with no context cue — otherwise this is the exact bug issue
-            # #43 fixes on the regex path, still live here.
+            if label != _LABEL_REMOVE:
+                # An unrecognised label is NOT a licence to delete. Model
+                # label spaces differ: a candidate evaluated for #36 uses
+                # {0: KEEP, 1: DELETE, 2: KEEP_STRIP_COMMA, 3: KEEP_CAPITALIZE},
+                # where 2 and 3 are *keep* variants. Treating anything
+                # unknown as REMOVE would silently drop those words. Keep
+                # the token and say so once, rather than eating the input.
+                if not self._warned_unknown_label:
+                    self._warned_unknown_label = True
+                    logger.warning(
+                        "Disfluency model emitted unrecognised label %d — keeping "
+                        "the token. Expected 0=KEEP, 1=REMOVE, 2=REPAIR.",
+                        label,
+                    )
+                kept.append(word)
+                continue
+
+            # _LABEL_REMOVE: the model wants to drop this token. Override
+            # that for ambiguous vocabulary with no context cue — otherwise
+            # this is the exact bug issue #43 fixes on the regex path,
+            # still live here.
             if bare.lower() in _AMBIGUOUS_FILLER_SET and not context_marks_filler[word_idx]:
                 kept.append(word)
                 continue
