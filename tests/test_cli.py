@@ -7,14 +7,11 @@ runtime).
 
 from __future__ import annotations
 
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
-import yaml
 
 from linux_whisper.cli import main
-
 
 # ── Argument parsing ────────────────────────────────────────────────────────
 
@@ -61,6 +58,11 @@ class TestCliParsing:
         with patch("linux_whisper.cli._cmd_run", return_value=0) as mock_run:
             result = main(["--config", str(config_file)])
         assert result == 0
+        # The point of this test is that --config reaches run, so check it
+        # rather than only the exit code — the binding was previously unused,
+        # which meant a regression here would have gone unnoticed.
+        mock_run.assert_called_once()
+        assert mock_run.call_args.args[0].config == config_file
 
 
 # ── Config subcommands ──────────────────────────────────────────────────────

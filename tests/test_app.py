@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
@@ -22,6 +23,8 @@ from linux_whisper.config import (
 )
 from linux_whisper.state import AppState
 
+if TYPE_CHECKING:
+    from linux_whisper.app import App
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -69,7 +72,7 @@ class FakeTranscriptResult:
             self.segments = []
 
 
-def _make_app(config: Config | None = None) -> "App":
+def _make_app(config: Config | None = None) -> App:
     """Create an App with all heavy imports mocked."""
     from linux_whisper.app import App
 
@@ -374,7 +377,9 @@ class TestProcessPipeline:
         assert result == "hello world"
 
     async def test_agc_not_applied_when_auto_gain_false(self):
-        config = _make_config(audio=AudioConfig(auto_gain=False), polish=PolishConfig(enabled=False))
+        config = _make_config(
+            audio=AudioConfig(auto_gain=False), polish=PolishConfig(enabled=False)
+        )
         app = _make_app(config)
         app._audio = MagicMock()
         app._stt = MagicMock()
@@ -1022,21 +1027,22 @@ class TestConfigReconstruction:
         app._hotkey = MagicMock()
         app._loop = asyncio.get_running_loop()
 
-        with patch("linux_whisper.app.HotkeyDaemon", create=True) as MockHK, \
-             patch("linux_whisper.app.CONFIG_PATH", create=True) as mock_path, \
+        with patch("linux_whisper.app.HotkeyDaemon", create=True), \
+             patch("linux_whisper.app.CONFIG_PATH", create=True), \
              patch("linux_whisper.app._dataclass_to_dict", create=True, return_value={}), \
              patch("linux_whisper.app.yaml", create=True):
             # Patch the imports inside _handle_mode_change
             import linux_whisper.config as cfg_mod
             mock_path_obj = MagicMock()
             mock_path_obj.parent.mkdir = MagicMock()
-            with patch.object(cfg_mod, "CONFIG_PATH", mock_path_obj):
-                with patch("builtins.open", MagicMock()):
-                    with patch("yaml.dump"):
-                        # Need to patch the local import too
-                        with patch.dict("sys.modules", {}):
-                            await app._handle_mode_change("toggle")
-
+            with (
+                patch.object(cfg_mod, "CONFIG_PATH", mock_path_obj),
+                patch("builtins.open", MagicMock()),
+                patch("yaml.dump"),
+                # Need to patch the local import too
+                patch.dict("sys.modules", {}),
+            ):
+                await app._handle_mode_change("toggle")
         assert app.config.mode == "toggle"
         assert app.config.snippets == snippets
         assert app.config.hotkey == "fn"
@@ -1082,11 +1088,13 @@ class TestConfigReconstruction:
             import linux_whisper.config as cfg_mod
             mock_path_obj = MagicMock()
             mock_path_obj.parent.mkdir = MagicMock()
-            with patch.object(cfg_mod, "CONFIG_PATH", mock_path_obj):
-                with patch("linux_whisper.hotkey.HotkeyDaemon") as MockHK:
-                    mock_hk_instance = MagicMock()
-                    MockHK.return_value = mock_hk_instance
-                    await app._handle_mode_change("auto")
+            with (
+                patch.object(cfg_mod, "CONFIG_PATH", mock_path_obj),
+                patch("linux_whisper.hotkey.HotkeyDaemon") as mock_hk,
+            ):
+                mock_hk_instance = MagicMock()
+                mock_hk.return_value = mock_hk_instance
+                await app._handle_mode_change("auto")
 
         assert app.config.hotkey == "ctrl+space"
         assert app.config.mode == "auto"

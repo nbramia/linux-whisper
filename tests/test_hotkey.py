@@ -51,7 +51,6 @@ from linux_whisper.hotkey import (  # noqa: E402
     _normalize_modifier,
 )
 
-
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
@@ -547,10 +546,10 @@ class TestFindKeyboardDevices:
             ecodes.EV_KEY: [ecodes.KEY_A, ecodes.KEY_ENTER],
         }
 
-        with patch("linux_whisper.hotkey.Path") as MockPath:
+        with patch("linux_whisper.hotkey.Path") as mock_path_cls:
             mock_input_dir = MagicMock()
             mock_input_dir.glob.return_value = ["/dev/input/event0"]
-            MockPath.return_value = mock_input_dir
+            mock_path_cls.return_value = mock_input_dir
 
             with patch("linux_whisper.hotkey.InputDevice", return_value=mock_dev):
                 devices = _find_keyboard_devices()
@@ -566,10 +565,10 @@ class TestFindKeyboardDevices:
             ecodes.EV_KEY: [116],  # KEY_POWER only
         }
 
-        with patch("linux_whisper.hotkey.Path") as MockPath:
+        with patch("linux_whisper.hotkey.Path") as mock_path_cls:
             mock_input_dir = MagicMock()
             mock_input_dir.glob.return_value = ["/dev/input/event0"]
-            MockPath.return_value = mock_input_dir
+            mock_path_cls.return_value = mock_input_dir
 
             with patch("linux_whisper.hotkey.InputDevice", return_value=mock_dev):
                 devices = _find_keyboard_devices()
@@ -578,10 +577,10 @@ class TestFindKeyboardDevices:
         mock_dev.close.assert_called_once()
 
     def test_skips_permission_error(self):
-        with patch("linux_whisper.hotkey.Path") as MockPath:
+        with patch("linux_whisper.hotkey.Path") as mock_path_cls:
             mock_input_dir = MagicMock()
             mock_input_dir.glob.return_value = ["/dev/input/event0"]
-            MockPath.return_value = mock_input_dir
+            mock_path_cls.return_value = mock_input_dir
 
             with patch(
                 "linux_whisper.hotkey.InputDevice",

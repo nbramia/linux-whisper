@@ -5,16 +5,12 @@ All subprocess calls are mocked; no actual typing tools are invoked.
 
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
+from unittest.mock import AsyncMock, patch
 
 from linux_whisper.config import InjectConfig
 from linux_whisper.inject.injector import (
     ClipboardInjector,
     DisplayServer,
-    TextInjector,
     WtypeInjector,
     XdotoolInjector,
     YdotoolInjector,
@@ -22,7 +18,6 @@ from linux_whisper.inject.injector import (
     _is_wlroots_compositor,
     detect_injector,
 )
-
 
 # ── Display server detection ────────────────────────────────────────────────
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import enum
 import logging
-from typing import Callable
+from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +97,7 @@ class StateMachine:
             while self._state != target:
                 await asyncio.wait_for(self._state_event.wait(), timeout=timeout)
             return True
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return False
 
     async def reset(self) -> None:

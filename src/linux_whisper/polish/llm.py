@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import logging
 import os
-import signal
 from pathlib import Path
 from threading import Thread
 from typing import Any
@@ -60,8 +59,14 @@ _DEFAULT_MAX_TOKENS = 256
 # checkpoint compresses beyond the self-correction — dropping qualifiers like
 # "just" and leading subjects like "Let's" — which reads as a summary rather
 # than a transcript.
-_SYSTEM_PROMPT = """\
-You resolve self-corrections in dictated text. When someone changes their mind mid-sentence, keep ONLY the final version. Fix grammar. Output ONLY the result.
+_SYSTEM_PROMPT = (
+    # Split purely to satisfy the 100-column limit — the assembled string is
+    # byte-identical to the single line it replaces, and is asserted as such
+    # in tests. This prompt is benchmark-gated; do not reword it casually.
+    "You resolve self-corrections in dictated text. When someone changes "
+    "their mind mid-sentence, keep ONLY the final version. Fix grammar. "
+    "Output ONLY the result.\n"
+) + """\
 
 Delete nothing except the abandoned half of a self-correction. Keep every
 other word, including qualifiers and the opening subject. Never shorten,
@@ -124,7 +129,11 @@ class LLMCorrector:
             )
             return
 
-        n_threads = self._config.llm_threads if self._config.llm_threads > 0 else max(1, os.cpu_count() or 4)
+        n_threads = (
+            self._config.llm_threads
+            if self._config.llm_threads > 0
+            else max(1, os.cpu_count() or 4)
+        )
 
         # Determine GPU offload based on config
         n_gpu_layers = 0

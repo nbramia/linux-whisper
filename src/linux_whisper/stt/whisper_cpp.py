@@ -10,13 +10,15 @@ from __future__ import annotations
 import logging
 import os
 import time
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from linux_whisper.config import MODELS_DIR, Config
 from linux_whisper.stt.engine import TranscriptResult, TranscriptSegment
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 logger = logging.getLogger(__name__)
 

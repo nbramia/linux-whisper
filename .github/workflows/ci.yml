@@ -7,27 +7,39 @@ on:
     branches: [main]
 
 jobs:
+  # Lint and test are SEPARATE jobs on purpose. They used to be two steps in
+  # one job with lint first, so a lint failure aborted the job before pytest
+  # ever ran -- CI was red for three weeks on lint debt alone and the test
+  # suite silently never executed. Split, a dirty lint can no longer hide a
+  # broken test suite.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Ruff
+        run: ruff check src/ tests/
+
   test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
         python-version: ["3.12"]
-
     steps:
       - uses: actions/checkout@v4
-
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
-
-      - name: Lint
-        run: ruff check src/ tests/
-
       - name: Test
         run: python -m pytest tests/ -q --tb=short

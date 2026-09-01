@@ -10,11 +10,13 @@ from __future__ import annotations
 import logging
 import math
 import threading
-from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from linux_whisper.config import Config
 from linux_whisper.state import AppState
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -434,7 +436,8 @@ class SystemTray:
 
         model_items = [
             pystray.MenuItem(
-                f"{'● ' if (current_backend == backend and current_model == model) else '  '}{name}",
+                f"{'● ' if (current_backend == backend and current_model == model) else '  '}"
+                f"{name}",
                 self._make_model_handler(backend, model),
             )
             for name, backend, model in self._MODEL_OPTIONS

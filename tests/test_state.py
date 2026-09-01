@@ -4,10 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
-
-from linux_whisper.state import AppState, StateMachine, _TRANSITIONS
-
+from linux_whisper.state import _TRANSITIONS, AppState, StateMachine
 
 # ── Initial state ───────────────────────────────────────────────────────────
 
