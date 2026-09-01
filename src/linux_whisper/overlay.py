@@ -129,15 +129,29 @@ _CAIRO_OPERATOR_OVER = 2
 
 
 class _Colors:
+    """The idle state has to be legible on its own.
+
+    The pill is on screen ~24ms after the keypress (measured by capturing the
+    X window's pixels), but it used to be near-invisible until the bars went
+    green -- and green requires the speech detector to latch, which does not
+    happen until you actually start talking. So the pill "took about a
+    second to appear" when in fact it appeared immediately and only became
+    *noticeable* once you spoke. Dark body, dark border and 40%-alpha grey
+    bars on a dark desktop is simply not visible.
+
+    Idle is now clearly drawn in its own right; green still marks speech.
+    """
+
     # Pill background
-    BG = (0.1, 0.1, 0.12, 0.85)
-    # Border
-    BORDER = (0.3, 0.3, 0.35, 0.6)
+    BG = (0.13, 0.14, 0.17, 0.96)
+    # Border — a bright rim is what makes the pill readable against any
+    # wallpaper the instant it is revealed.
+    BORDER = (0.62, 0.67, 0.78, 0.95)
     # Bars when speech detected
-    BAR_ACTIVE = (0.35, 0.75, 0.55, 0.9)  # green
-    BAR_ACTIVE_PEAK = (0.45, 0.9, 0.65, 1.0)
-    # Bars when listening but no speech
-    BAR_IDLE = (0.4, 0.4, 0.45, 0.4)  # dim gray
+    BAR_ACTIVE = (0.35, 0.75, 0.55, 0.95)  # green
+    BAR_ACTIVE_PEAK = (0.45, 0.95, 0.68, 1.0)
+    # Bars when listening but no speech — visible, not a hint of one
+    BAR_IDLE = (0.66, 0.70, 0.80, 0.9)
 
 
 # ---------------------------------------------------------------------------
@@ -469,7 +483,7 @@ class _OverlayWindow:
         cr.set_source_rgba(*_Colors.BG)
         cr.fill_preserve()
         cr.set_source_rgba(*_Colors.BORDER)
-        cr.set_line_width(1.0)
+        cr.set_line_width(1.6)
         cr.stroke()
 
         with self._lock:
