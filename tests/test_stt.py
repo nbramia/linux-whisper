@@ -147,6 +147,54 @@ class TestCreateEngine:
 # ── MoonshineEngine unit tests (mocked) ────────────────────────────────────
 
 
+class TestWorkerImportOrder:
+    """The GPU worker must import pywhispercpp before numpy.
+
+    pywhispercpp's ROCm/HIP extension segfaults if numpy is loaded first. A
+    comment saying so is not enough: ruff's I001 auto-fix reordered exactly
+    this block and shipped a SIGSEGV that killed transcription until it was
+    caught in production. `# isort: off` now guards it, and this test fails
+    if anyone removes the guard or reorders the imports again.
+    """
+
+    def test_pywhispercpp_is_imported_before_numpy(self):
+        from pathlib import Path
+
+        import linux_whisper.stt as stt_pkg
+
+        src = (Path(stt_pkg.__file__).parent / "whisper_gpu_worker.py").read_text()
+        whisper_at = src.index("from pywhispercpp")
+        numpy_at = src.index("import numpy")
+        assert whisper_at < numpy_at, (
+            "pywhispercpp must be imported before numpy in whisper_gpu_worker.py "
+            "— importing numpy first segfaults the ROCm backend"
+        )
+
+    def test_entrypoint_preload_is_also_guarded(self):
+        """`__main__.py` carries the identical preload and the same hazard."""
+        from pathlib import Path
+
+        import linux_whisper
+
+        src = (Path(linux_whisper.__file__).parent / "__main__.py").read_text()
+        assert "# isort: off" in src, (
+            "the entrypoint's pywhispercpp preload needs the same guard — it "
+            "survived an earlier formatter run by luck, not by protection"
+        )
+        assert src.index("import pywhispercpp") < src.index("from linux_whisper.cli")
+
+    def test_isort_guard_is_present(self):
+        from pathlib import Path
+
+        import linux_whisper.stt as stt_pkg
+
+        src = (Path(stt_pkg.__file__).parent / "whisper_gpu_worker.py").read_text()
+        assert "# isort: off" in src, (
+            "the `# isort: off` guard is load-bearing — without it an "
+            "auto-formatter will reorder the imports and reintroduce the segfault"
+        )
+
+
 class TestMoonshineEngine:
 
     @pytest.fixture(autouse=True)

@@ -9,15 +9,24 @@ audio bytes sent inline after transcribe commands.
 """
 
 # ── IMPORT ORDER MATTERS ──────────────────────────────────────────────
-# pywhispercpp's ROCm/HIP C extension segfaults if numpy is loaded first.
-# Import it at the top, before anything else.
+# pywhispercpp's ROCm/HIP C extension segfaults if numpy is loaded first, so
+# it MUST be imported before numpy and before anything that pulls numpy in.
+#
+# `isort: off` is load-bearing, not decoration. A comment alone does not stop
+# an auto-formatter: ruff's I001 fix silently moved this import below numpy
+# and shipped a SIGSEGV that killed transcription outright. `noqa: E402` does
+# not cover I001. Do not remove these markers, and do not "tidy" this block.
+# tests/test_stt.py asserts this ordering.
+# isort: off
+from pywhispercpp.model import Model as _WhisperModel  # noqa: E402,F401
+
 import json
 import logging
 import struct
 import sys
 
 import numpy as np
-from pywhispercpp.model import Model as _WhisperModel  # noqa: E402,F401
+# isort: on
 
 # ── Logging ───────────────────────────────────────────────────────────
 
