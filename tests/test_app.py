@@ -670,6 +670,31 @@ class TestHandleRecordingStop:
 # ---------------------------------------------------------------------------
 
 
+class TestStartOrder:
+    """GTK initialisation order. Both the overlay and the tray (via pystray's
+    appindicator backend) build GTK3 objects on their own threads, and GTK is
+    not thread-safe -- constructing them concurrently segfaults the process.
+    Measured with tray-first: 8 SIGSEGVs across 4 consecutive restarts, unit
+    crash-looping. Overlay-first: 0 across 6. Overlay.start() blocks until its
+    window exists, which serialises the two.
+    """
+
+    async def test_overlay_starts_before_tray(self):
+        app = _make_app()
+        order: list[str] = []
+        app._overlay = MagicMock()
+        app._overlay.start.side_effect = lambda *a, **k: order.append("overlay")
+        app._tray = MagicMock()
+        app._tray.start.side_effect = lambda *a, **k: order.append("tray")
+        app._hotkey = None
+        app._audio = None
+        app._shutdown_event.set()  # return immediately after startup
+
+        await app.run()
+
+        assert order == ["overlay", "tray"], order
+
+
 class TestFeedAudioLevels:
     async def test_pushes_audio_level_to_overlay_while_recording(self):
         app = _make_app()
@@ -686,11 +711,14 @@ class TestFeedAudioLevels:
         with patch("asyncio.sleep", new=AsyncMock(side_effect=_stop_after_one_iteration)):
             await app._feed_audio_levels()
 
-        # Not just "called" — the actual peak amplitude of the sample
-        # (max(abs([0.5, -0.5, 0.3])) == 0.5) must reach the overlay, or a
-        # regression could feed it a constant/wrong value and this would
-        # still pass.
-        app._overlay.push_audio_level.assert_called_once_with(pytest.approx(0.5))
+        # A loud sample well above the ambient floor must arrive as a near-full
+        # bar. The overlay is fed a level normalised in dB above the noise
+        # floor, not raw amplitude: ordinary speech only reaches ~0.02-0.06 rms
+        # on a real mic, so raw amplitude left the bars flat.
+        app._overlay.push_audio_level.assert_called_once()
+        (level,) = app._overlay.push_audio_level.call_args.args
+        assert 0.0 <= level <= 1.0
+        assert level > 0.9, f"loud audio should nearly fill the bar, got {level}"
 
     async def test_recording_start_wires_up_the_feed_loop_end_to_end(self):
         """Regression guard for the actual bug (push_audio_level() wired to
@@ -713,8 +741,98 @@ class TestFeedAudioLevels:
             pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
             await asyncio.gather(*pending)
 
-        app._overlay.show.assert_called_once()
-        app._overlay.push_audio_level.assert_called_once_with(pytest.approx(0.9))
+        # show() is NOT called here any more — it moved to the synchronous
+        # _on_recording_start so visible feedback does not wait on the event
+        # loop (see test_show_happens_on_the_hotkey_thread_before_stt).
+        app._overlay.show.assert_not_called()
+        app._overlay.push_audio_level.assert_called_once()
+        (level,) = app._overlay.push_audio_level.call_args.args
+        assert 0.0 <= level <= 1.0 and level > 0.9
+
+    async def test_speech_stays_detected_through_a_long_utterance(self):
+        """The noise floor must not learn your voice.
+
+        It used to adapt on every sample regardless of whether speech was
+        present, so during continuous talking it climbed toward the speech
+        level and the `rms > floor * 3` test went false and stayed false.
+        Simulated at a steady rms of 0.05 the old detector flipped to "no
+        speech" at t=6.9s and never came back. This drives ~20s of continuous
+        speech and asserts it never gets switched off.
+        """
+        app = _make_app()
+        app._overlay = MagicMock()
+        app._audio = MagicMock()
+        # Steady tone at a normal speaking level, well above ambient.
+        app._audio.get_pre_roll.return_value = np.full(1600, 0.05, dtype=np.float32)
+
+        await app.state.transition(AppState.RECORDING)
+
+        iterations = 600  # 20s at 30Hz
+
+        async def _advance(*_args, **_kwargs):
+            nonlocal iterations
+            iterations -= 1
+            if iterations <= 0:
+                await app.state.transition(AppState.IDLE)
+
+        with patch("asyncio.sleep", new=AsyncMock(side_effect=_advance)):
+            await app._feed_audio_levels()
+
+        # set_speech_active is only called on a change. Speech should latch on
+        # once and never be turned back off while the level is held steady.
+        calls = [c.args[0] for c in app._overlay.set_speech_active.call_args_list]
+        assert calls == [True], f"speech toggled during a steady utterance: {calls}"
+
+    async def test_silence_is_not_reported_as_speech(self):
+        app = _make_app()
+        app._overlay = MagicMock()
+        app._audio = MagicMock()
+        app._audio.get_pre_roll.return_value = np.full(1600, 0.0015, dtype=np.float32)
+
+        await app.state.transition(AppState.RECORDING)
+        remaining = 100
+
+        async def _advance(*_args, **_kwargs):
+            nonlocal remaining
+            remaining -= 1
+            if remaining <= 0:
+                await app.state.transition(AppState.IDLE)
+
+        with patch("asyncio.sleep", new=AsyncMock(side_effect=_advance)):
+            await app._feed_audio_levels()
+
+        calls = [c.args[0] for c in app._overlay.set_speech_active.call_args_list]
+        assert True not in calls, f"ambient silence reported as speech: {calls}"
+
+    async def test_show_happens_on_the_hotkey_thread_before_stt(self):
+        """The pill must be shown from the synchronous hotkey path, BEFORE
+        _stt.start_stream().
+
+        Two regressions this guards. (1) show() used to live in the async
+        _handle_recording_start, so feedback waited on call_soon_threadsafe ->
+        ensure_future -> a state transition. (2) start_stream() calls
+        _ensure_worker(), which blocks for ~4.3s when it has to spawn the GPU
+        worker — showing the pill after it means no feedback at all for the
+        first dictation after startup.
+
+        Audio capture must still be started before both, so the recording
+        itself never waits on the UI.
+        """
+        app = _make_app()
+        order: list[str] = []
+
+        app._overlay = MagicMock()
+        app._overlay.show.side_effect = lambda *a, **k: order.append("overlay.show")
+        app._audio = MagicMock()
+        app._audio.get_pre_roll.return_value = np.array([0.1], dtype=np.float32)
+        app._audio.start_recording.side_effect = lambda *a, **k: order.append("audio.start")
+        app._stt = MagicMock()
+        app._stt.start_stream.side_effect = lambda *a, **k: order.append("stt.start_stream")
+        app._loop = None  # returns before the async hand-off; irrelevant here
+
+        app._on_recording_start()
+
+        assert order == ["audio.start", "overlay.show", "stt.start_stream"], order
 
     async def test_does_not_push_when_no_overlay(self):
         app = _make_app()

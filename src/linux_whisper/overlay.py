@@ -110,6 +110,10 @@ _BAR_MAX_HEIGHT = 28
 _MARGIN = 48  # pixels from the edge of the monitor for top/bottom placement
 _FPS = 30
 _LEVEL_HISTORY = 32  # frames of audio level history for smoothing
+_IDLE_LEVEL = 0.06   # resting bar height when the mic is quiet
+_BAR_ON_SHOW = 0.30  # bar height for the first frame, before audio arrives
+_BAR_ATTACK = 0.55   # rise quickly toward a louder sample
+_BAR_RELEASE = 0.18  # fall back gently, so speech reads as continuous
 
 # cairo operator constants, spelled out numerically to avoid a hard `import
 # cairo` dependency purely for two constants (pycairo ships with PyGObject's
@@ -124,15 +128,29 @@ _CAIRO_OPERATOR_OVER = 2
 
 
 class _Colors:
+    """The idle state has to be legible on its own.
+
+    The pill is on screen ~24ms after the keypress (measured by capturing the
+    X window's pixels), but it used to be near-invisible until the bars went
+    green -- and green requires the speech detector to latch, which does not
+    happen until you actually start talking. So the pill "took about a
+    second to appear" when in fact it appeared immediately and only became
+    *noticeable* once you spoke. Dark body, dark border and 40%-alpha grey
+    bars on a dark desktop is simply not visible.
+
+    Idle is now clearly drawn in its own right; green still marks speech.
+    """
+
     # Pill background
-    BG = (0.1, 0.1, 0.12, 0.85)
-    # Border
-    BORDER = (0.3, 0.3, 0.35, 0.6)
+    BG = (0.13, 0.14, 0.17, 0.96)
+    # Border — a bright rim is what makes the pill readable against any
+    # wallpaper the instant it is revealed.
+    BORDER = (0.62, 0.67, 0.78, 0.95)
     # Bars when speech detected
-    BAR_ACTIVE = (0.35, 0.75, 0.55, 0.9)  # green
-    BAR_ACTIVE_PEAK = (0.45, 0.9, 0.65, 1.0)
-    # Bars when listening but no speech
-    BAR_IDLE = (0.4, 0.4, 0.45, 0.4)  # dim gray
+    BAR_ACTIVE = (0.35, 0.75, 0.55, 0.95)  # green
+    BAR_ACTIVE_PEAK = (0.45, 0.95, 0.68, 1.0)
+    # Bars when listening but no speech — visible, not a hint of one
+    BAR_IDLE = (0.66, 0.70, 0.80, 0.9)
 
 
 # ---------------------------------------------------------------------------
@@ -225,12 +243,21 @@ class _OverlayWindow:
         # to the default main context only while the pill is visible, so it
         # doesn't tick at 30fps forever while hidden. None means "not ticking".
         self._tick_source: int | None = None
+        # Last position actually pushed to the window, so a reveal on the
+        # same monitor does not re-issue a move (see _reposition).
+        self._last_position: tuple[int, int] | None = None
 
         self._window = Gtk.Window(type=Gtk.WindowType.POPUP)
         self._window.set_title("linux-whisper-overlay")
         self._window.set_decorated(False)
         self._window.set_resizable(False)
         self._window.set_default_size(_PILL_WIDTH, _PILL_HEIGHT)
+        # set_default_size alone is not enough: a POPUP with no child
+        # widget has no natural size to shrink to, and GTK3 allocates a
+        # 200x200 square instead of the 200x40 pill. The size request
+        # pins it, and also keeps the 30fps redraw to a fifth of the
+        # pixels -- this loop holds the GIL, so its cost is not free.
+        self._window.set_size_request(_PILL_WIDTH, _PILL_HEIGHT)
         self._window.set_app_paintable(True)
         self._window.set_keep_above(True)
         self._window.set_skip_taskbar_hint(True)
@@ -256,6 +283,7 @@ class _OverlayWindow:
         self._audio_levels: deque[float] = deque(
             [0.0] * _LEVEL_HISTORY, maxlen=_LEVEL_HISTORY
         )
+        self._seed_pending = False
         self._bar_heights: list[float] = [0.0] * _BAR_COUNT
         self._phase: float = 0.0  # animation phase
         self._lock = threading.Lock()
@@ -274,8 +302,22 @@ class _OverlayWindow:
                 self._speech_active = False
                 self._audio_levels.clear()
                 self._audio_levels.extend([0.0] * _LEVEL_HISTORY)
+            else:
+                # Seed the whole history from the first sample of this
+                # recording. Otherwise the bars spend _LEVEL_HISTORY /
+                # poll-rate = 32/30 = 1.07s scrolling 32 stale zeros out
+                # before they reflect anything you said -- so although the
+                # compositor presents the pill in ~18ms, what it presents is
+                # a dark body with 4px grey stubs, which reads as "the pill
+                # has not appeared yet".
+                self._seed_pending = True
 
         if active and not was_active:
+            # Give the very first frame something legible: a dark body with
+            # bars at zero is nearly invisible against a dark desktop, so the
+            # pill only *looked* like it had arrived once real levels showed
+            # up. Real audio takes over within ~100ms and overwrites this.
+            self._bar_heights = [_BAR_ON_SHOW] * _BAR_COUNT
             self._window.show_all()
             self._reposition()
             self._start_tick()
@@ -294,7 +336,15 @@ class _OverlayWindow:
         if not self._lock.acquire(blocking=False):
             return
         try:
-            self._audio_levels.append(min(1.0, max(0.0, level)))
+            clamped = min(1.0, max(0.0, level))
+            if self._seed_pending:
+                # First sample of a recording: fill the history with it so
+                # every bar is meaningful immediately (see set_recording).
+                self._seed_pending = False
+                self._audio_levels.clear()
+                self._audio_levels.extend([clamped] * _LEVEL_HISTORY)
+            else:
+                self._audio_levels.append(clamped)
         finally:
             self._lock.release()
 
@@ -302,14 +352,23 @@ class _OverlayWindow:
         self._stop_tick()
         self._window.destroy()
 
-    def _reposition(self) -> None:
-        """Move the window to its configured position. Must be re-asserted
-        after show_all() — GTK/the window manager can reposition on map."""
+    def _reposition(self, *, force: bool = False) -> None:
+        """Move the window to its configured position.
+
+        Must be re-asserted after `show_all()` — GTK and the window manager
+        can place the window themselves on map. The target monitor is
+        resolved from the pointer on every reveal, so moving between screens
+        works without restarting.
+
+        `force` is accepted for call-site clarity; the move is issued
+        unconditionally either way.
+        """
         geom = _monitor_geometry_at_pointer()
         if geom is None:
             return
-        x, y = compute_pill_position(*geom, self._position)
-        self._window.move(x, y)
+        target = compute_pill_position(*geom, self._position)
+        self._last_position = target
+        self._window.move(*target)
 
     # -- animation timer, attached to the default main context (see module
     #    docstring) only while the pill is visible --
@@ -337,21 +396,31 @@ class _OverlayWindow:
         """Update bar heights from audio level history."""
         with self._lock:
             levels = list(self._audio_levels)
-            speech = self._speech_active
             self._phase += 0.1
 
-        if speech:
-            n = len(levels)
-            for i in range(_BAR_COUNT):
-                idx = min(int((i / _BAR_COUNT) * n), n - 1)
-                target = levels[idx]
-                wave = 0.15 * math.sin(self._phase + i * 0.4)
-                target = max(0.05, min(1.0, target + wave))
-                self._bar_heights[i] += (target - self._bar_heights[i]) * 0.3
-        else:
-            for i in range(_BAR_COUNT):
-                breath = 0.08 + 0.04 * math.sin(self._phase * 0.5 + i * 0.3)
-                self._bar_heights[i] += (breath - self._bar_heights[i]) * 0.1
+        # Bars always follow the measured level. They used to be driven by the
+        # `speech` flag instead -- audio-reactive while it was true, and a
+        # decorative sine "breathing" animation whenever it was false. Since
+        # that flag went permanently false a few seconds into any continuous
+        # utterance, the pill spent most of a dictation animating something
+        # unrelated to the microphone. `speech` now only picks the colour.
+        n = len(levels)
+        for i in range(_BAR_COUNT):
+            # Oldest sample at the left edge, newest at the right, so the pill
+            # reads as a waveform scrolling past.
+            idx = min(int((i / _BAR_COUNT) * n), n - 1)
+            target = levels[idx]
+
+            if target < _IDLE_LEVEL:
+                # Near-silence: a low shimmer, so the pill still looks live
+                # while you are thinking rather than sitting completely flat.
+                target = _IDLE_LEVEL + 0.03 * math.sin(self._phase * 0.5 + i * 0.3)
+
+            # Fast attack, slower release -- a meter that rises instantly and
+            # falls gently tracks speech far better than symmetric smoothing.
+            current = self._bar_heights[i]
+            rate = _BAR_ATTACK if target > current else _BAR_RELEASE
+            self._bar_heights[i] += (target - current) * rate
 
     def _draw(self, widget: object, cr: object) -> bool:
         """Draw the pill with audio level bars."""
@@ -362,11 +431,16 @@ class _OverlayWindow:
         cr.paint()
         cr.set_operator(_CAIRO_OPERATOR_OVER)
 
+        # Defensive: a draw can still be dispatched between hide() and the
+        # window actually unmapping. Paint nothing rather than a stale pill.
+        if not self._visible_state:
+            return False
+
         self._draw_rounded_rect(cr, 0, 0, width, height, _PILL_RADIUS)
         cr.set_source_rgba(*_Colors.BG)
         cr.fill_preserve()
         cr.set_source_rgba(*_Colors.BORDER)
-        cr.set_line_width(1.0)
+        cr.set_line_width(1.6)
         cr.stroke()
 
         with self._lock:

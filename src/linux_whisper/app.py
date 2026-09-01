@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import signal
 import time
@@ -25,6 +26,43 @@ if TYPE_CHECKING:
     from linux_whisper.tray import SystemTray
 
 logger = logging.getLogger(__name__)
+
+# -- live speech-level metering for the overlay pill / tray ------------------
+_LEVEL_WINDOW_S = 0.1        # audio window each sample is measured over
+_LEVEL_POLL_S = 1 / 30       # sample near the overlay's 30fps redraw
+_LEVEL_SPAN_DB = 30.0        # dB above the noise floor that fills a bar
+_SPEECH_ON_NORM = 0.25       # ~7.5 dB above floor to latch speech on
+_SPEECH_OFF_NORM = 0.15      # ~4.5 dB to latch it off again (hysteresis)
+_ABSOLUTE_SILENCE_RMS = 0.004  # never call true silence speech
+_INITIAL_NOISE_FLOOR = 0.003
+_NOISE_FLOOR_ALPHA = 0.02    # adapts in ~1s of quiet, and only while quiet
+
+
+
+def _build_fingerprint() -> str:
+    """Identify the code actually loaded, for the log.
+
+    Editable installs make "did the service pick up my change?" genuinely
+    ambiguous -- a stale process looks identical to a fresh one. This prints
+    the git commit plus a hash of the loaded source files, so a deploy can be
+    confirmed from the journal instead of assumed.
+    """
+    import hashlib
+    import subprocess
+    from pathlib import Path
+
+    pkg = Path(__file__).parent
+    digest = hashlib.sha256()
+    for path in sorted(pkg.rglob("*.py")):
+        digest.update(path.read_bytes())
+    try:
+        commit = subprocess.run(
+            ["git", "-C", str(pkg), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=2,
+        ).stdout.strip() or "unknown"
+    except Exception:
+        commit = "unknown"
+    return f"commit={commit} src_sha={digest.hexdigest()[:12]}"
 
 
 class App:
@@ -55,6 +93,7 @@ class App:
     async def setup(self) -> None:
         """Initialize all components. Call before run()."""
         logger.info("Initializing Linux Whisper v0.1.0")
+        logger.info("build: %s", _build_fingerprint())
         errors = self.config.validate()
         if errors:
             for e in errors:
@@ -192,10 +231,17 @@ class App:
             self._hotkey.start()
         if self._audio:
             await self._audio.start()
-        if self._tray:
-            self._tray.start()
+        # Overlay BEFORE tray, and not the other way round. Both build GTK3
+        # objects on their own threads (the tray's via pystray's appindicator
+        # backend), and GTK is not thread-safe: constructing them concurrently
+        # segfaults the process. Measured with tray-first, 4 consecutive
+        # restarts produced 8 SIGSEGVs and left the unit crash-looping.
+        # Overlay.start() blocks until its window exists, so going first
+        # serialises the two initialisations.
         if self._overlay:
             self._overlay.start()
+        if self._tray:
+            self._tray.start()
 
         logger.info("Ready — press %s to dictate", self.config.hotkey)
 
@@ -333,6 +379,17 @@ class App:
         if self._audio:
             pre_roll = self._audio.get_pre_roll(0.75)
             self._audio.start_recording()
+        # Show the pill before touching STT. Two reasons it must be here and
+        # not in the async follow-up: Overlay.show() only marshals onto the
+        # GTK thread via GLib.idle_add (thread-safe, microseconds), whereas
+        # call_soon_threadsafe -> ensure_future -> state transition put
+        # feedback well behind the keypress; and start_stream() below can
+        # block this thread for seconds when it has to spawn the GPU worker.
+        # Audio capture is already running by this point, so the recording
+        # itself never waits on the pill.
+        if self._overlay:
+            self._overlay.show()
+
         if self._stt:
             self._stt.start_stream()
             # Feed pre-roll into the STT engine immediately
@@ -356,9 +413,7 @@ class App:
         # hotkey thread for minimum latency. Just update async state here.
         await self.state.transition(AppState.RECORDING)
 
-        if self._overlay:
-            self._overlay.show()
-
+        # The pill was already shown synchronously in _on_recording_start.
         asyncio.ensure_future(self._feed_audio_levels())
         logger.debug("Recording started")
 
@@ -393,34 +448,58 @@ class App:
             await self.state.transition(AppState.IDLE)
 
     async def _feed_audio_levels(self) -> None:
-        """Monitor audio levels and update tray/overlay accordingly.
+        """Feed the overlay/tray a live speech level while recording.
 
-        Uses RMS energy for speech detection rather than Silero VAD,
-        since VAD threshold calibration varies by mic gain. A simple
-        RMS threshold is more robust for visual indication.
+        Three things this has to get right, each of which was wrong before:
+
+        1. **The noise floor must not chase your voice.** It used to adapt
+           unconditionally, so during continuous speech it climbed toward the
+           speech level itself and the ``rms > floor * 3`` test went false
+           after ~7s and stayed false. Simulated at a steady rms of 0.05, the
+           detector flipped to "no speech" at t=6.9s and never recovered while
+           talking. The floor now only adapts when speech is NOT detected.
+
+        2. **Level must be measured in dB above that floor, not as raw
+           amplitude.** Ambient rms on this machine is ~0.002 and ordinary
+           speech only reaches ~0.02-0.06, so feeding raw amplitude to a
+           0.0-1.0 bar height left the bars flat no matter how loud you were.
+
+        3. **It must sample near the redraw rate.** At 10Hz one new sample fed
+           a 32-slot history, so the bars showed a 3.2s smear rather than what
+           you were saying. Polling costs ~0.8us, so 30Hz is free.
         """
         if not self._audio:
             return
+
         last_speech = False
-        # Track a rolling baseline of ambient noise
-        noise_floor = 0.003  # initial estimate
+        noise_floor = _INITIAL_NOISE_FLOOR
+
         while self.state.is_recording:
             try:
-                recent = self._audio.get_pre_roll(0.1)  # last 100ms
+                recent = self._audio.get_pre_roll(_LEVEL_WINDOW_S)
                 if len(recent) > 0:
                     rms = float(np.sqrt(np.mean(recent ** 2)))
-                    peak = float(np.max(np.abs(recent)))
-                    # Slowly adapt noise floor
-                    noise_floor = noise_floor * 0.995 + rms * 0.005
-                    # Speech = RMS is significantly above noise floor
-                    speech = rms > noise_floor * 3.0 and rms > 0.008
-                    logger.debug(
-                        "audio: rms=%.5f peak=%.5f floor=%.5f speech=%s",
-                        rms, peak, noise_floor, speech,
-                    )
+
+                    level_db = 20.0 * math.log10(max(rms, 1e-6))
+                    floor_db = 20.0 * math.log10(max(noise_floor, 1e-6))
+                    norm = (level_db - floor_db) / _LEVEL_SPAN_DB
+                    norm = max(0.0, min(1.0, norm))
+
+                    # Hysteresis: separate on/off thresholds stop the green
+                    # indicator flickering around a single boundary.
+                    threshold = _SPEECH_OFF_NORM if last_speech else _SPEECH_ON_NORM
+                    speech = norm > threshold and rms > _ABSOLUTE_SILENCE_RMS
+
+                    # Only track ambient level while nothing is being said,
+                    # otherwise the floor learns your voice (see 1 above).
+                    if not speech:
+                        noise_floor = (
+                            noise_floor * (1.0 - _NOISE_FLOOR_ALPHA)
+                            + rms * _NOISE_FLOOR_ALPHA
+                        )
 
                     if self._overlay:
-                        self._overlay.push_audio_level(peak)
+                        self._overlay.push_audio_level(norm)
 
                     if speech != last_speech:
                         last_speech = speech
@@ -430,7 +509,7 @@ class App:
                             self._overlay.set_speech_active(speech)
             except Exception:
                 pass
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(_LEVEL_POLL_S)
 
     async def _process_pipeline(self) -> str | None:
         """Run the full pipeline: collect audio → STT → polish → text."""

@@ -532,7 +532,7 @@ target application.
 getactivewindow` fails on this desktop because the focused window is a native
 Wayland surface, so X11 focus queries can't resolve it. `move()` is
 re-asserted after `show_all()`, since the window manager can reposition the
-window on map. `overlay.position` (`center`, `bottom-center`, `top-center`)
+window on map. `overlay.position` (`bottom-center` default, `center`, `top-center`)
 controls the vertical anchor; horizontal placement is always centered on the
 monitor; `compute_pill_position()` clamps the result to the monitor's bounds
 so a monitor narrower or shorter than the pill can't push it off-screen.
@@ -578,8 +578,27 @@ overlay costs nothing between recordings.
 
 **Live levels.** `push_audio_level()` is called from the audio monitor loop
 in `app.py` (the same `asyncio` loop that drives `set_speech_active()` for
-the tray), pushing the peak amplitude of the last 100ms alongside the
-existing RMS-based speech detection. It is never called from the sounddevice
+the tray), sampling at 30Hz to match the pill's redraw rate. What it pushes
+is a level normalised in **dB above an adaptive noise floor**, not raw
+amplitude: ambient RMS on a typical mic is ~0.002 and ordinary speech only
+reaches ~0.02-0.06, so raw amplitude mapped onto a 0.0-1.0 bar height left
+the bars visually flat regardless of how loud the speaker was. 30dB above the
+floor fills a bar.
+
+The noise floor adapts **only while speech is not detected**. Adapting it
+unconditionally makes it climb toward the speaker's own voice during a long
+utterance until the speech test can no longer be satisfied — measured at a
+steady 0.05 RMS, the previous unconditional version declared "no speech" 6.9s
+into continuous talking and never recovered. Speech detection uses separate
+on/off thresholds (hysteresis) so the indicator does not chatter at the
+boundary.
+
+The pill's bars track this level at all times, with fast attack and slower
+release; `set_speech_active()` only selects the bar **colour**. Gating the
+animation itself on the speech flag meant the pill spent most of a dictation
+running a decorative sine "breathing" loop unrelated to the microphone.
+
+It is never called from the sounddevice
 callback — that thread runs at 32ms intervals and is a documented escalation
 boundary. Unlike `show()`/`hide()`/`set_speech_active()`, it is **not**
 marshalled onto the overlay thread: it writes straight into a lock-guarded
@@ -676,7 +695,7 @@ tray:
 # Recording overlay (floating pill with audio level bars)
 overlay:
   enabled: true
-  position: "center"  # center | bottom-center | top-center
+  position: "bottom-center"  # bottom-center | center | top-center
 ```
 
 ---

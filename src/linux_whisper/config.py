@@ -81,7 +81,7 @@ class TrayConfig:
 @dataclass(frozen=True)
 class OverlayConfig:
     enabled: bool = True
-    position: str = "center"  # center | bottom-center | top-center
+    position: str = "bottom-center"  # center | bottom-center | top-center
 
     VALID_POSITIONS = ("center", "bottom-center", "top-center")
 
