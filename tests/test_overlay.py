@@ -280,64 +280,6 @@ class TestOverlayLifecycle:
 # ---------------------------------------------------------------------------
 
 
-class TestPersistentSurface:
-    """The surface is created once and never torn down.
-
-    Neither unmapping the window nor setting opacity to 0 works: Mutter drops
-    the surface either way and rebuilds it on reveal, which measured ~1s from
-    the keypress against <1ms of in-process work (input latency 0.2ms, GTK
-    dispatch 0.4ms). So the window stays mapped AND opaque, and "hidden"
-    simply means `_draw` paints nothing -- an ordinary frame update.
-
-    Because a permanently mapped window would otherwise swallow every click
-    landing on it, prime() also installs an empty input region.
-    """
-
-    def test_prime_maps_opaque_and_click_through(self, mock_gtk):
-        from linux_whisper.overlay import _OverlayWindow
-
-        win = _OverlayWindow("bottom-center")
-        win.prime()
-
-        win._window.show_all.assert_called_once()
-        win._window.set_opacity.assert_called_once_with(1.0)
-        gdk_window = win._window.get_window.return_value
-        assert gdk_window.input_shape_combine_region.called, (
-            "a permanently mapped window must be click-through, or it eats "
-            "every click landing on the pill"
-        )
-
-    def test_show_and_hide_never_unmap_or_change_opacity(self, mock_gtk):
-        from linux_whisper.overlay import _OverlayWindow
-
-        win = _OverlayWindow("bottom-center")
-        win.prime()
-        win._window.hide.reset_mock()
-        win._window.show_all.reset_mock()
-        win._window.set_opacity.reset_mock()
-
-        win.set_recording(True)
-        win.set_recording(False)
-
-        win._window.hide.assert_not_called()
-        win._window.show_all.assert_not_called()
-        win._window.set_opacity.assert_not_called()
-
-    def test_draw_paints_nothing_while_hidden(self, mock_gtk):
-        from linux_whisper.overlay import _OverlayWindow
-
-        win = _OverlayWindow("bottom-center")
-        win.prime()
-        cr = MagicMock()
-
-        win._draw(win._window, cr)
-
-        # Cleared, then nothing else -- no pill body, no bars.
-        assert cr.paint.called
-        assert not cr.fill.called, "hidden overlay must not paint the pill body"
-        assert not cr.stroke.called
-
-
 class TestFirstFrameIsMeaningful:
     """The pill must convey something the instant it is revealed.
 
@@ -353,7 +295,6 @@ class TestFirstFrameIsMeaningful:
         from linux_whisper.overlay import _BAR_ON_SHOW, _OverlayWindow
 
         win = _OverlayWindow("bottom-center")
-        win.prime()
         # The animation tick would immediately smooth these toward the idle
         # level; this asserts the value the FIRST frame is painted from.
         win._start_tick = lambda: None
@@ -366,7 +307,6 @@ class TestFirstFrameIsMeaningful:
         from linux_whisper.overlay import _LEVEL_HISTORY, _OverlayWindow
 
         win = _OverlayWindow("bottom-center")
-        win.prime()
         win.set_recording(False)   # fills history with zeros
         win.set_recording(True)    # arms the seed
         win.push_audio_level(0.8)

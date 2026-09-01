@@ -236,6 +236,54 @@ snippets:
   #   Following up on our meeting...
 ```
 
+## Hotkeys and keyboard remappers
+
+If the hotkey feels delayed — recording seems to start late, or the recording
+pill appears about a second after you press the key — suspect a keyboard
+remapper before suspecting this app.
+
+Remappers such as **Toshy/xwaykeyz**, Kinto, keyd, kanata and kmonad take an
+`EVIOCGRAB` (exclusive grab) on your real keyboard and re-emit every event
+through a *virtual* uinput device. linux-whisper can then only see the
+re-emitted copy. When the hotkey is a **modifier** the remapper must hold the
+press to see whether a combo follows, and that hold lands directly on your
+dictation latency.
+
+Measured on a Magic Keyboard with Toshy running: `fn` as the hotkey put the
+pill about **a second** behind the keypress. Stopping `toshy-config.service`
+made it instant; switching to `capslock` (a normal keycode, not a modifier
+the remapper has to disambiguate) made it instant with Toshy still running.
+
+Two things make this hard to diagnose, and both are worth knowing:
+
+- **Every in-app measurement looks fine.** The delay is upstream of anything
+  the app can see. evdev timestamps come from the *virtual* device and are
+  stamped when the remapper replays the event, so even
+  "kernel timestamp → handler" reads as sub-millisecond.
+- **The pre-roll hides half the symptom.** Stage 2 keeps 0.75s of audio from
+  *before* the keypress, so a late start still captures your opening words.
+  Recording feels responsive while the visual indicator is plainly late,
+  which misdirects the search toward the overlay.
+
+To check whether a remapper is in your input path:
+
+```bash
+# Is one running?
+ps -eo pid,cmd | grep -Ei 'xwaykeyz|keyd|kanata|kinto|kmonad'
+
+# A virtual keyboard device alongside your real one is the tell:
+python3 -c "import evdev; [print(d.path, repr(d.name)) for d in map(evdev.InputDevice, evdev.list_devices())]"
+
+# Decisive test — stop the remapper, try the hotkey, start it again:
+systemctl --user stop toshy-config.service
+systemctl --user start toshy-config.service
+```
+
+**Prefer a non-modifier key for the hotkey.** `capslock`, a function key, or
+a modifier *combo* (e.g. `super+space`) all resolve immediately; a bare
+modifier such as `fn`, `rightalt` or `rightctrl` is the case a remapper has
+to buffer.
+
 ## CLI Reference
 
 ```

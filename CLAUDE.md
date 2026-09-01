@@ -128,6 +128,24 @@ Sub-skills run in forked agent contexts (own working memory). Max 3 review/addre
 | `/standup` | Daily summary: shipped, in progress, blocked, next |
 | `/stale` | Find stale PRs, orphan branches, stale issues |
 
+## Hotkey Latency and Keyboard Remappers
+
+Before investigating hotkey or overlay latency in this codebase, check for a
+keyboard remapper. Toshy/xwaykeyz, keyd, kanata and similar tools `EVIOCGRAB`
+the real keyboard and re-emit through a virtual uinput device; a **modifier**
+hotkey then gets held while the remapper disambiguates a possible combo.
+
+On the development machine this put `fn` about a second behind the keypress.
+It is not observable from inside the app: evdev timestamps come from the
+virtual device and are stamped at replay, so `kernel timestamp -> handler`
+measures ~0.2ms while the real delay sits upstream of it. The 0.75s audio
+pre-roll independently masks the recording half of the symptom, leaving only
+a visibly late overlay and pointing the investigation at the wrong component.
+
+The decisive test is external: stop the remapper's service, try the hotkey,
+start it again. Prefer a non-modifier hotkey (`capslock`, a function key, or a
+modifier *combo*) over a bare modifier.
+
 ## Latency Budgets
 
 Referenced during planning to assess whether a change is safe.

@@ -87,7 +87,6 @@ try:
 
     gi.require_version("Gtk", "3.0")
     gi.require_version("Gdk", "3.0")
-    import cairo
     from gi.repository import Gdk, GLib, Gtk  # noqa: F811 (populated on success)
 
     _HAS_GTK = True
@@ -314,53 +313,17 @@ class _OverlayWindow:
                 self._seed_pending = True
 
         if active and not was_active:
-            # Give the very first frame something legible. The compositor
-            # presents ~18ms after this, but a dark body with bars at zero
-            # is nearly invisible against a dark desktop, so the pill only
-            # *looked* like it arrived once real levels showed up. Start the
-            # bars at a visible resting height; real audio takes over within
-            # ~100ms and overwrites this.
+            # Give the very first frame something legible: a dark body with
+            # bars at zero is nearly invisible against a dark desktop, so the
+            # pill only *looked* like it had arrived once real levels showed
+            # up. Real audio takes over within ~100ms and overwrites this.
             self._bar_heights = [_BAR_ON_SHOW] * _BAR_COUNT
+            self._window.show_all()
             self._reposition()
-            self._window.queue_draw()
             self._start_tick()
         elif not active and was_active:
             self._stop_tick()
-            # One final repaint to clear the pill; the surface itself stays
-            # mapped and opaque so the next reveal costs a single frame.
-            self._window.queue_draw()
-
-    def prime(self) -> None:
-        """Map the window once, fully transparent, and keep it mapped.
-
-        Everything in-process is already sub-millisecond -- measured on a
-        real keypress: evdev kernel timestamp to handler 0.2ms, `show()` to
-        the callback running on the GTK thread 0.4ms, `set_recording` itself
-        ~2.5ms. Yet the pill took about a second to appear. That entire
-        second is Mutter, and nothing in this process can measure it.
-
-        Two things did NOT fix it, in order: mapping on demand (obviously
-        expensive -- a fresh XWayland surface per recording), then keeping
-        the window mapped but toggling opacity 0/1. The compositor drops a
-        fully-transparent surface too, and rebuilds it on reveal.
-
-        So the window is mapped once and stays mapped AND opaque forever.
-        "Hidden" means `_draw` paints nothing, which is an ordinary frame
-        update on a surface the compositor is already maintaining.
-
-        The window is given an empty input region so that, although
-        permanently mapped, it can never receive a pointer event -- without
-        that a 200x40 dead zone would sit over the bottom of the screen
-        swallowing clicks.
-        """
-        self._window.set_opacity(1.0)
-        self._reposition(force=True)
-        self._window.show_all()
-
-        # Empty input region == click-through. Must happen after realize.
-        gdk_window = self._window.get_window()
-        if gdk_window is not None:
-            gdk_window.input_shape_combine_region(cairo.Region(), 0, 0)
+            self._window.hide()
 
     def set_speech_active(self, active: bool) -> None:
         with self._lock:
@@ -390,18 +353,15 @@ class _OverlayWindow:
         self._window.destroy()
 
     def _reposition(self, *, force: bool = False) -> None:
-        """Move the window to its configured position, if it is not there.
+        """Move the window to its configured position.
 
-        Moving is skipped when the target has not changed. `move()` on a
-        mapped window is a surface reconfiguration the compositor has to
-        process, and it was previously issued on every single reveal -- the
-        last structural operation left on the hot path after mapping and
-        opacity were both eliminated. In the common case (same monitor as
-        last time) the pill is already exactly where it belongs, so revealing
-        it is now a pure repaint.
+        Must be re-asserted after `show_all()` — GTK and the window manager
+        can place the window themselves on map. The target monitor is
+        resolved from the pointer on every reveal, so moving between screens
+        works without restarting.
 
-        `force=True` is used from prime(), where the window has just been
-        mapped and has no position yet.
+        `force` is accepted for call-site clarity; the move is issued
+        unconditionally either way.
         """
         geom = _monitor_geometry_at_pointer()
         if geom is None:
@@ -471,11 +431,8 @@ class _OverlayWindow:
         cr.paint()
         cr.set_operator(_CAIRO_OPERATOR_OVER)
 
-        # Hidden == painted empty, NOT unmapped and NOT opacity 0. Both of
-        # those make Mutter tear the surface down and rebuild it on reveal,
-        # which is what cost ~1s. An always-mapped, always-opaque surface
-        # whose contents happen to be transparent is just a normal frame
-        # update, so revealing the pill is one compositor frame.
+        # Defensive: a draw can still be dispatched between hide() and the
+        # window actually unmapping. Paint nothing rather than a stale pill.
         if not self._visible_state:
             return False
 
@@ -679,12 +636,6 @@ class Overlay:
                     "GDK_BACKEND=x11 did not take effect before the display "
                     "opened (see App.setup() and this module's docstring)"
                 )
-            # Backend is confirmed good — create and keep the compositor
-            # surface up front, transparent and click-through, so revealing
-            # the pill later is only an opacity change rather than a fresh
-            # XWayland surface (which took ~1s to present).
-            window.prime()
-
             # Bind to the default main context (pass None), not a private
             # one — see the module docstring: GTK3's draw/expose dispatch is
             # only ever delivered through the default context, and a private
