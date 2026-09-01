@@ -149,6 +149,20 @@ class TestCreateEngine:
 
 class TestMoonshineEngine:
 
+    @pytest.fixture(autouse=True)
+    def _require_backend(self):
+        """Skip when the optional Moonshine backend is not installed.
+
+        These construct a real engine, so they need the extra. It is
+        present on the dev machine but not in `pip install -e ".[dev]"`,
+        so they failed in CI while passing locally — exactly the kind of
+        machine dependency an unrun CI suite hides.
+        """
+        pytest.importorskip(
+            "moonshine_onnx",
+            reason="optional Moonshine backend not installed",
+        )
+
     def test_invalid_model_raises_value_error(self):
         from linux_whisper.stt.moonshine import MoonshineEngine
 
@@ -215,6 +229,20 @@ class TestMoonshineEngine:
 
 
 class TestParakeetEngine:
+
+    @pytest.fixture(autouse=True)
+    def _require_backend(self):
+        """Skip when the optional Parakeet backend is not installed.
+
+        These construct a real engine, so they need the extra. It is
+        present on the dev machine but not in `pip install -e ".[dev]"`,
+        so they failed in CI while passing locally — exactly the kind of
+        machine dependency an unrun CI suite hides.
+        """
+        pytest.importorskip(
+            "onnx_asr",
+            reason="optional Parakeet backend not installed",
+        )
 
     def _cfg(self, **stt):
         base = {"backend": "parakeet", "model": "parakeet-tdt-0.6b-v3"}

@@ -9,10 +9,12 @@ Tests cover:
 
 from __future__ import annotations
 
+import contextlib
+
 import re
 import time
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 
@@ -1716,6 +1718,11 @@ class TestPolishPipelineLLMConditional:
         pipeline = PolishPipeline(cfg)
         if pipeline._llm is None:
             pytest.skip("stage 4c (LLM) could not be constructed in this environment")
+        # `available` is False wherever llama_cpp is absent or the GGUF is not
+        # on disk — CI, for one — and the pipeline then skips stage 4c
+        # entirely. What these tests are about is the pipeline's *decision*
+        # to invoke the LLM, not whether this machine can run one, so force
+        # availability and let the decision logic be what is exercised.
         pipeline._llm._loaded = True
         pipeline._llm._model = MagicMock()
         pipeline._llm._timeout_s = 5.0
@@ -1724,12 +1731,22 @@ class TestPolishPipelineLLMConditional:
         }
         return pipeline
 
+    @staticmethod
+    @contextlib.contextmanager
+    def _llm_available(pipeline: PolishPipeline):
+        """Force `LLMCorrector.available` True for the duration of the test."""
+        with patch.object(
+            LLMCorrector, "available", new_callable=PropertyMock, return_value=True
+        ):
+            yield pipeline
+
     def test_llm_skipped_without_self_corrections(self):
         pipeline = self._pipeline_with_mock_llm(
             llm_always=False, reply="should not be called"
         )
 
-        result = pipeline.process("the weather is nice today")
+        with self._llm_available(pipeline):
+            result = pipeline.process("the weather is nice today")
 
         assert isinstance(result, str) and result
         pipeline._llm._model.create_chat_completion.assert_not_called()
@@ -1737,7 +1754,8 @@ class TestPolishPipelineLLMConditional:
     def test_llm_invoked_with_self_corrections(self):
         pipeline = self._pipeline_with_mock_llm(llm_always=False, reply="at 4")
 
-        result = pipeline.process("at 2 actually at 4")
+        with self._llm_available(pipeline):
+            result = pipeline.process("at 2 actually at 4")
 
         assert isinstance(result, str) and result
         pipeline._llm._model.create_chat_completion.assert_called_once()
@@ -1747,7 +1765,8 @@ class TestPolishPipelineLLMConditional:
             llm_always=True, reply="cleaned up text"
         )
 
-        result = pipeline.process("normal text without corrections")
+        with self._llm_available(pipeline):
+            result = pipeline.process("normal text without corrections")
 
         assert isinstance(result, str) and result
         pipeline._llm._model.create_chat_completion.assert_called_once()
