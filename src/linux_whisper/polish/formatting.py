@@ -253,21 +253,45 @@ def _format_times(text: str) -> str:
 
     while i < len(words):
         matched = False
-        bare = words[i].lower().rstrip(".,?!;:")
+        hour_raw = words[i]
+        bare = hour_raw.lower().rstrip(".,?!;:")
+        hour_suffix = hour_raw[len(bare):]
 
-        # Check if this word is a valid hour (1-12)
+        # Check if this word is a valid hour (1-12). A comma right after it
+        # kills the match outright: English spoken times never put a comma
+        # between hour and minute, so "one, two" is an enumeration, not a
+        # time — "implement one, two, three" must stay a list, not become
+        # "implement 1:02, three".
         hour_val = hour_words.get(bare)
-        if hour_val is not None and 1 <= hour_val <= 12:
-            # Look ahead for minute words
+        if hour_val is not None and 1 <= hour_val <= 12 and "," not in hour_suffix:
+            # Look ahead for a single minute expression: one number word
+            # ("thirty", "fifteen"), or a tens word plus a ones word
+            # ("forty five" -> 45). The run is capped at two words — a
+            # third number word is a new list item, not more minutes, so
+            # unlike the old unbounded scan it is never folded in and
+            # summed (e.g. "items one, two, three" must not become "1:05").
             j = i + 1
             minute_words_found: list[str] = []
-            while j < len(words):
-                next_bare = words[j].lower().rstrip(".,?!;:")
-                if next_bare in hour_words and hour_words[next_bare] <= 59:
-                    minute_words_found.append(next_bare)
+            if j < len(words):
+                first_raw = words[j]
+                first_bare = first_raw.lower().rstrip(".,?!;:")
+                first_suffix = first_raw[len(first_bare):]
+                first_val = hour_words.get(first_bare)
+                if first_val is not None and first_val <= 59:
+                    minute_words_found.append(first_bare)
                     j += 1
-                else:
-                    break
+                    if (
+                        "," not in first_suffix
+                        and first_val >= 20
+                        and first_val % 10 == 0
+                        and j < len(words)
+                    ):
+                        second_raw = words[j]
+                        second_bare = second_raw.lower().rstrip(".,?!;:")
+                        second_val = _ONES.get(second_bare)
+                        if second_val is not None and 1 <= second_val <= 9:
+                            minute_words_found.append(second_bare)
+                            j += 1
 
             if minute_words_found:
                 minute_val = _words_to_number(minute_words_found)
@@ -542,11 +566,27 @@ def _format_cardinal_numbers(text: str) -> str:
             number_words: list[str] = []
 
             while j < len(words):
-                nbare = words[j].lower().rstrip(".,?!;:")
-                if nbare in _NUMBER_WORDS:
+                raw = words[j]
+                nbare = raw.lower().rstrip(".,?!;:")
+                if nbare == "and":
+                    # "and" only continues a compound number directly after
+                    # a scale word ("three hundred and fifty"). Treating it
+                    # as a connector everywhere let a plain list without an
+                    # Oxford comma ("one, two and three") get summed into a
+                    # single digit once #48 stopped `_format_times` from
+                    # eating the earlier words first.
+                    if not number_words or number_words[-1] not in _SCALES:
+                        break
                     number_words.append(nbare)
                     j += 1
-                else:
+                    continue
+                if nbare not in _NUMBER_WORDS:
+                    break
+                number_words.append(nbare)
+                j += 1
+                if "," in raw[len(nbare):]:
+                    # A comma ends the phrase — "one, two, three" is an
+                    # enumeration, not a single number to sum (see #48).
                     break
 
             # Only convert if it looks like a real number phrase:

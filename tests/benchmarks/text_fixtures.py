@@ -126,6 +126,18 @@ POLISH_FIXTURES: list[TextFixture] = [
         expected="Latency dropped by 40% after the change.",
         tags=("formatting",),
     ),
+    TextFixture(
+        id="formatting-enumeration-not-time",
+        # Regression fixture for #48: a comma-separated enumeration of number
+        # words is not a spoken clock time. `_format_times` used to collapse
+        # it into one timestamp, summing the trailing words into the minutes
+        # ("one, two" -> "1:02"). The commas here stand in for the pauses a
+        # dictated list produces — this is the exact shape of the sentence
+        # that mangled a real message in production.
+        raw="we still need to implement one, two, and the recording indicator",
+        expected="We still need to implement one, two, and the recording indicator.",
+        tags=("formatting",),
+    ),
     # ── Punctuation and capitalisation ────────────────────────────────────
     TextFixture(
         id="punctuation-question",

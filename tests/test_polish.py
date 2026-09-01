@@ -1041,6 +1041,41 @@ class TestFormatTimes:
     def test_ten_twenty(self):
         assert _format_times("ten twenty") == "10:20"
 
+    # -- Regression tests for #48: a comma-separated enumeration of number
+    # words ("one, two, three") is not a spoken clock time, and used to be
+    # collapsed into a single timestamp with the trailing numbers summed
+    # into the minutes.
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "one, two",
+            "one, two, three",
+            "one, two, three, four",
+        ],
+    )
+    def test_comma_separated_enumeration_left_unchanged(self, text):
+        # English spoken times never place a comma between hour and minute,
+        # so the comma must terminate the pattern before it starts.
+        assert _format_times(text) == text
+
+    def test_comma_after_minute_word_blocks_extension(self):
+        # A comma right after the (single-word) minute must not pull a
+        # following list item in as a second minute word.
+        assert _format_times("three forty, five") == "3:40, five"
+
+    def test_minute_bounded_to_a_single_expression(self):
+        # The old code summed every trailing number word into the minute
+        # slot without limit: "forty" + "thirty" = 70 was rejected only
+        # because it fell outside 0-59, discarding the whole match. The
+        # fix caps the minute parse to one expression up front, so "forty"
+        # alone is a valid partial match and "thirty" is correctly left
+        # as its own word - never an invalid time like "1:70".
+        result = _format_times("one forty thirty")
+        assert result == "1:40 thirty"
+        assert "1:70" not in result
+        assert "1:75" not in result
+
 
 class TestFormatDates:
     """Test date formatting."""
@@ -1217,6 +1252,66 @@ class TestSpokenFormFormatter:
         result = formatter.process(text)
         assert "john@gmail.com" in result
         assert "March 22nd" in result
+
+
+class TestEnumerationNotFormattedAsTime:
+    """Regression tests for #48.
+
+    A comma-separated enumeration of number words ("one, two, three") was
+    read as a spoken clock time: the whole list collapsed into one
+    timestamp, with the trailing numbers summed into the minutes. Found in
+    production dictating a message about implementing two features.
+    """
+
+    @pytest.fixture()
+    def formatter(self):
+        return SpokenFormFormatter()
+
+    def test_two_item_list(self, formatter):
+        text = "implement one, two, as well as the recording indicator"
+        assert formatter.process(text) == text
+
+    def test_two_item_list_with_and(self, formatter):
+        text = "do one, two and three"
+        assert formatter.process(text) == text
+
+    def test_three_item_list(self, formatter):
+        text = "items one, two, three"
+        assert formatter.process(text) == text
+
+    def test_four_item_list(self, formatter):
+        text = "steps one, two, three, four"
+        assert formatter.process(text) == text
+
+    def test_genuine_time_is_unaffected(self, formatter):
+        # The pattern this bug exploited is real and worth keeping.
+        assert formatter.process("let's meet at one thirty") == "let's meet at 1:30"
+
+    @pytest.mark.parametrize(
+        ("text", "summed_minute"),
+        [
+            ("count one, two", "1:02"),  # would-be sum: 2
+            ("items one, two, three", "1:05"),  # would-be sum: 2 + 3
+            ("steps one, two, three, four", "1:09"),  # would-be sum: 2 + 3 + 4
+        ],
+    )
+    def test_minute_never_equals_sum_of_list_items(self, formatter, text, summed_minute):
+        """No list of length 2, 3, or 4 may sum its trailing items into the minute."""
+        assert summed_minute not in formatter.process(text)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "implement one, two, as well as the recording indicator",
+            "do one, two and three",
+            "items one, two, three",
+            "steps one, two, three, four",
+        ],
+    )
+    def test_no_time_pattern_emitted(self, formatter, text):
+        """None of these enumerations should ever collapse into an H:MM time."""
+        result = formatter.process(text)
+        assert not re.search(r"\b\d{1,2}:\d{2}\b", result), f"{text!r} -> {result!r}"
 
 
 # =====================================================================
