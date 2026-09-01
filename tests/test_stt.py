@@ -170,6 +170,19 @@ class TestWorkerImportOrder:
             "— importing numpy first segfaults the ROCm backend"
         )
 
+    def test_entrypoint_preload_is_also_guarded(self):
+        """`__main__.py` carries the identical preload and the same hazard."""
+        from pathlib import Path
+
+        import linux_whisper
+
+        src = (Path(linux_whisper.__file__).parent / "__main__.py").read_text()
+        assert "# isort: off" in src, (
+            "the entrypoint's pywhispercpp preload needs the same guard — it "
+            "survived an earlier formatter run by luck, not by protection"
+        )
+        assert src.index("import pywhispercpp") < src.index("from linux_whisper.cli")
+
     def test_isort_guard_is_present(self):
         from pathlib import Path
 
