@@ -7,9 +7,13 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import struct
+import subprocess
 import sys
 import time
+from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -212,6 +216,114 @@ class TestWorkerImportOrder:
         )
 
 
+_SYNTHETIC_GPU_WORKER = r"""
+import json
+import signal
+import struct
+import sys
+import time
+
+mode = sys.argv[1]
+stdin = sys.stdin.buffer
+stdout = sys.stdout.buffer
+
+
+def recv():
+    header = stdin.read(4)
+    if len(header) < 4:
+        return None
+    length = struct.unpack(">I", header)[0]
+    data = stdin.read(length)
+    if len(data) < length:
+        return None
+    return json.loads(data)
+
+
+def send(message):
+    data = json.dumps(message).encode()
+    stdout.write(struct.pack(">I", len(data)) + data)
+    stdout.flush()
+
+
+if mode == "startup_hang":
+    time.sleep(10)
+
+recv()
+send({"status": "ready"})
+
+if mode == "exit":
+    raise SystemExit(7)
+if mode == "blocked_write":
+    time.sleep(10)
+
+message = recv()
+audio_length = message["audio_length"]
+stdin.read(audio_length)
+
+if mode == "inference_hang_kill":
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    time.sleep(10)
+elif mode == "malformed":
+    payload = b"not-json"
+    stdout.write(struct.pack(">I", len(payload)) + payload)
+    stdout.flush()
+    recv()
+elif mode == "silence":
+    send({"status": "ok", "segments": [], "full_text": ""})
+    recv()
+"""
+
+
+def _synthetic_gpu_engine():
+    from linux_whisper.stt.whisper_gpu import WhisperGPUEngine
+
+    engine = object.__new__(WhisperGPUEngine)
+    engine._model_path = Path("/synthetic/model")
+    engine._threads = 1
+    engine._process = None
+    engine._operation_timeout_s = 0.02
+    engine._stream_started = False
+    engine._audio_buffer = bytearray()
+    engine._stream_start_time = 0.0
+    return engine
+
+
+@contextmanager
+def _synthetic_gpu_workers(monkeypatch, *modes):
+    import linux_whisper.stt.whisper_gpu as whisper_gpu
+
+    pending_modes = list(modes)
+    processes = []
+    real_popen = subprocess.Popen
+
+    def start(_command, **kwargs):
+        mode = pending_modes.pop(0)
+        process = real_popen(
+            [sys.executable, "-u", "-c", _SYNTHETIC_GPU_WORKER, mode],
+            **kwargs,
+        )
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(whisper_gpu.subprocess, "Popen", start)
+    try:
+        yield processes
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=1)
+
+
+def _assert_silence_recovery(engine) -> None:
+    engine.start_stream()
+    engine.feed_audio(b"\x00\x00" * 100)
+    result = engine.finalize()
+    assert result.full_text == ""
+    assert result.segments == []
+    engine._shutdown_worker()
+
+
 class TestGPUWorkerIPC:
     """Synthetic pipe tests for the worker boundary; no model or GPU is needed."""
 
@@ -263,6 +375,117 @@ class TestGPUWorkerIPC:
                 },
                 duration=1.0,
             )
+
+        with pytest.raises(GPUWorkerProtocolError, match="invalid segment timing"):
+            _parse_result(
+                {
+                    "status": "ok",
+                    "full_text": "synthetic",
+                    "segments": [{"text": "synthetic", "t0": True, "t1": 1.0}],
+                },
+                duration=1.0,
+            )
+
+        with pytest.raises(GPUWorkerProtocolError, match="inconsistent text"):
+            _parse_result(
+                {
+                    "status": "ok",
+                    "full_text": "",
+                    "segments": [{"text": "synthetic", "t0": 0.0, "t1": 1.0}],
+                },
+                duration=1.0,
+            )
+
+        with pytest.raises(GPUWorkerProtocolError, match="invalid segment timing"):
+            _parse_result(
+                {
+                    "status": "ok",
+                    "full_text": "synthetic",
+                    "segments": [{"text": "synthetic", "t0": 0.0, "t1": 2.01}],
+                },
+                duration=1.0,
+            )
+
+        result = _parse_result(
+            {
+                "status": "ok",
+                "full_text": "synthetic",
+                "segments": [{"text": "synthetic", "t0": 0.0, "t1": 2.0}],
+            },
+            duration=1.0,
+        )
+        assert result.segments[0].end_time == 2.0
+
+    def test_startup_hang_reaps_worker_and_replacement_recovers(self, monkeypatch):
+        import linux_whisper.stt.whisper_gpu as whisper_gpu
+
+        engine = _synthetic_gpu_engine()
+        monkeypatch.setattr(whisper_gpu, "_WORKER_STARTUP_TIMEOUT", 0.02)
+        with _synthetic_gpu_workers(monkeypatch, "startup_hang", "silence") as processes:
+            with pytest.raises(whisper_gpu.GPUWorkerTimeoutError, match="startup timed out"):
+                engine.start_stream()
+
+            assert engine._process is None
+            assert processes[0].poll() is not None
+            _assert_silence_recovery(engine)
+            assert processes[1].poll() is not None
+
+    def test_blocked_audio_write_reaps_worker_and_replacement_recovers(self, monkeypatch):
+        import linux_whisper.stt.whisper_gpu as whisper_gpu
+
+        engine = _synthetic_gpu_engine()
+        with _synthetic_gpu_workers(monkeypatch, "blocked_write", "silence") as processes:
+            engine.start_stream()
+            engine.feed_audio(b"\x00" * (8 * 1024 * 1024))
+            with pytest.raises(whisper_gpu.GPUWorkerTimeoutError, match="audio timed out"):
+                engine.finalize()
+
+            assert engine._process is None
+            assert processes[0].poll() is not None
+            _assert_silence_recovery(engine)
+
+    def test_inference_hang_escalates_to_kill_reap_then_recovers(self, monkeypatch):
+        import linux_whisper.stt.whisper_gpu as whisper_gpu
+
+        engine = _synthetic_gpu_engine()
+        with _synthetic_gpu_workers(monkeypatch, "inference_hang_kill", "silence") as processes:
+            engine.start_stream()
+            engine.feed_audio(b"\x00\x00" * 100)
+            with pytest.raises(whisper_gpu.GPUWorkerTimeoutError, match="response timed out"):
+                engine.finalize()
+
+            assert engine._process is None
+            assert processes[0].poll() == -signal.SIGKILL
+            _assert_silence_recovery(engine)
+
+    def test_worker_exit_reaps_process_and_replacement_recovers(self, monkeypatch):
+        import linux_whisper.stt.whisper_gpu as whisper_gpu
+
+        engine = _synthetic_gpu_engine()
+        with _synthetic_gpu_workers(monkeypatch, "exit", "silence") as processes:
+            engine.start_stream()
+            processes[0].wait(timeout=1)
+            engine.feed_audio(b"\x00\x00" * 100)
+            with pytest.raises(whisper_gpu.GPUWorkerError, match="unavailable"):
+                engine.finalize()
+
+            assert engine._process is None
+            assert processes[0].returncode == 7
+            _assert_silence_recovery(engine)
+
+    def test_malformed_frame_reaps_process_and_replacement_recovers(self, monkeypatch):
+        import linux_whisper.stt.whisper_gpu as whisper_gpu
+
+        engine = _synthetic_gpu_engine()
+        with _synthetic_gpu_workers(monkeypatch, "malformed", "silence") as processes:
+            engine.start_stream()
+            engine.feed_audio(b"\x00\x00" * 100)
+            with pytest.raises(whisper_gpu.GPUWorkerProtocolError, match="invalid JSON"):
+                engine.finalize()
+
+            assert engine._process is None
+            assert processes[0].poll() is not None
+            _assert_silence_recovery(engine)
 
     def test_worker_error_reaps_before_replacement_is_used(self):
         from linux_whisper.stt.whisper_gpu import GPUWorkerError, WhisperGPUEngine

@@ -36,6 +36,10 @@ _SAMPLE_WIDTH = 2
 _WORKER_STARTUP_TIMEOUT = 60.0  # model load can take ~10-15s on first run
 _WORKER_INFERENCE_TIMEOUT = 120.0
 _MAX_RESPONSE_BYTES = 1_048_576
+# whisper.cpp timestamps are quantized and may include a final padded decoding
+# frame. One second permits that boundary effect without accepting timings that
+# are unrelated to the submitted clip.
+_SEGMENT_END_TOLERANCE_S = 1.0
 
 
 class GPUWorkerError(RuntimeError):
@@ -67,22 +71,30 @@ def _parse_result(msg: dict, *, duration: float) -> TranscriptResult:
         start = raw.get("t0")
         end = raw.get("t1")
         if (
-            not isinstance(start, int | float)
+            isinstance(start, bool)
+            or isinstance(end, bool)
+            or not isinstance(start, int | float)
             or not isinstance(end, int | float)
             or not isfinite(start)
             or not isfinite(end)
             or start < 0
             or end < start
+            or end > duration + _SEGMENT_END_TOLERANCE_S
         ):
             raise GPUWorkerProtocolError("GPU worker response has invalid segment timing")
+        text = raw["text"]
+        if not text or text != text.strip():
+            raise GPUWorkerProtocolError("GPU worker response has invalid segment text")
         segments.append(
             TranscriptSegment(
-                text=raw["text"],
+                text=text,
                 start_time=float(start),
                 end_time=float(end),
                 is_partial=False,
             )
         )
+    if msg["full_text"] != " ".join(segment.text for segment in segments):
+        raise GPUWorkerProtocolError("GPU worker response has inconsistent text")
     return TranscriptResult(segments=segments, full_text=msg["full_text"], duration=duration)
 
 
