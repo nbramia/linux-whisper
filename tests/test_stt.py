@@ -248,6 +248,22 @@ class TestGPUWorkerIPC:
         finally:
             reader.close()
 
+    def test_malformed_success_response_is_a_protocol_error(self):
+        from linux_whisper.stt.whisper_gpu import GPUWorkerProtocolError, _parse_result
+
+        with pytest.raises(GPUWorkerProtocolError, match="no text field"):
+            _parse_result({"status": "ok", "segments": []}, duration=1.0)
+
+        with pytest.raises(GPUWorkerProtocolError, match="invalid segment timing"):
+            _parse_result(
+                {
+                    "status": "ok",
+                    "full_text": "synthetic",
+                    "segments": [{"text": "synthetic", "t0": 1.0, "t1": 0.0}],
+                },
+                duration=1.0,
+            )
+
     def test_worker_error_reaps_before_replacement_is_used(self):
         from linux_whisper.stt.whisper_gpu import GPUWorkerError, WhisperGPUEngine
 

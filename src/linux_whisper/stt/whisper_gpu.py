@@ -17,6 +17,7 @@ import struct
 import subprocess
 import sys
 import time
+from math import isfinite
 from pathlib import Path
 
 from linux_whisper.config import MODELS_DIR, Config
@@ -47,6 +48,42 @@ class GPUWorkerTimeoutError(GPUWorkerError):
 
 class GPUWorkerProtocolError(GPUWorkerError):
     """The worker returned a truncated, malformed, or unexpected response."""
+
+
+def _parse_result(msg: dict, *, duration: float) -> TranscriptResult:
+    """Validate a successful worker payload before it can resemble silence."""
+    if msg.get("status") != "ok":
+        raise GPUWorkerError("GPU worker reported an inference failure")
+    if not isinstance(msg.get("full_text"), str):
+        raise GPUWorkerProtocolError("GPU worker response has no text field")
+    raw_segments = msg.get("segments")
+    if not isinstance(raw_segments, list):
+        raise GPUWorkerProtocolError("GPU worker response has no segment list")
+
+    segments: list[TranscriptSegment] = []
+    for raw in raw_segments:
+        if not isinstance(raw, dict) or not isinstance(raw.get("text"), str):
+            raise GPUWorkerProtocolError("GPU worker response has an invalid segment")
+        start = raw.get("t0")
+        end = raw.get("t1")
+        if (
+            not isinstance(start, int | float)
+            or not isinstance(end, int | float)
+            or not isfinite(start)
+            or not isfinite(end)
+            or start < 0
+            or end < start
+        ):
+            raise GPUWorkerProtocolError("GPU worker response has invalid segment timing")
+        segments.append(
+            TranscriptSegment(
+                text=raw["text"],
+                start_time=float(start),
+                end_time=float(end),
+                is_partial=False,
+            )
+        )
+    return TranscriptResult(segments=segments, full_text=msg["full_text"], duration=duration)
 
 
 def _wait_for_fd(fd: int, *, write: bool, deadline: float, operation: str) -> None:
@@ -294,34 +331,20 @@ class WhisperGPUEngine:
                 operation="inference audio",
             )
             msg = _recv_msg(self._process.stdout, deadline=deadline, operation="inference response")
-            if msg.get("status") != "ok":
-                raise GPUWorkerError("GPU worker reported an inference failure")
+            result = _parse_result(msg, duration=duration)
         except Exception as exc:
             self._shutdown_worker()
             if isinstance(exc, GPUWorkerError):
                 raise
             raise GPUWorkerError("failed to communicate with GPU worker") from exc
 
-        segments = [
-            TranscriptSegment(
-                text=seg["text"],
-                start_time=seg["t0"],
-                end_time=seg["t1"],
-                is_partial=False,
-            )
-            for seg in msg.get("segments", [])
-        ]
-
-        full_text = msg.get("full_text", "")
         logger.debug(
-            "GPU STT: %.1fs → %d segments, %d chars", duration, len(segments), len(full_text)
+            "GPU STT: %.1fs → %d segments, %d chars",
+            duration,
+            len(result.segments),
+            len(result.full_text),
         )
-
-        return TranscriptResult(
-            segments=segments,
-            full_text=full_text,
-            duration=duration,
-        )
+        return result
 
     def reset(self) -> None:
         self._audio_buffer = bytearray()
