@@ -12,10 +12,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import select
 import struct
 import subprocess
 import sys
 import time
+from math import isfinite
 from pathlib import Path
 
 from linux_whisper.config import MODELS_DIR, Config
@@ -32,26 +34,136 @@ _WHISPER_CPP_MODELS: dict[str, str] = {
 _SAMPLE_RATE = 16_000
 _SAMPLE_WIDTH = 2
 _WORKER_STARTUP_TIMEOUT = 60.0  # model load can take ~10-15s on first run
+_WORKER_INFERENCE_TIMEOUT = 120.0
+_MAX_RESPONSE_BYTES = 1_048_576
+# whisper.cpp timestamps are quantized and may include a final padded decoding
+# frame. One second permits that boundary effect without accepting timings that
+# are unrelated to the submitted clip.
+_SEGMENT_END_TOLERANCE_S = 1.0
 
 
-def _send_msg(pipe, msg: dict) -> None:
+class GPUWorkerError(RuntimeError):
+    """The isolated whisper.cpp worker could not safely complete a request."""
+
+
+class GPUWorkerTimeoutError(GPUWorkerError):
+    """The worker did not complete its IPC operation before its deadline."""
+
+
+class GPUWorkerProtocolError(GPUWorkerError):
+    """The worker returned a truncated, malformed, or unexpected response."""
+
+
+def _parse_result(msg: dict, *, duration: float) -> TranscriptResult:
+    """Validate a successful worker payload before it can resemble silence."""
+    if msg.get("status") != "ok":
+        raise GPUWorkerError("GPU worker reported an inference failure")
+    if not isinstance(msg.get("full_text"), str):
+        raise GPUWorkerProtocolError("GPU worker response has no text field")
+    raw_segments = msg.get("segments")
+    if not isinstance(raw_segments, list):
+        raise GPUWorkerProtocolError("GPU worker response has no segment list")
+
+    segments: list[TranscriptSegment] = []
+    for raw in raw_segments:
+        if not isinstance(raw, dict) or not isinstance(raw.get("text"), str):
+            raise GPUWorkerProtocolError("GPU worker response has an invalid segment")
+        start = raw.get("t0")
+        end = raw.get("t1")
+        if (
+            isinstance(start, bool)
+            or isinstance(end, bool)
+            or not isinstance(start, int | float)
+            or not isinstance(end, int | float)
+            or not isfinite(start)
+            or not isfinite(end)
+            or start < 0
+            or end < start
+            or end > duration + _SEGMENT_END_TOLERANCE_S
+        ):
+            raise GPUWorkerProtocolError("GPU worker response has invalid segment timing")
+        text = raw["text"]
+        if not text or text != text.strip():
+            raise GPUWorkerProtocolError("GPU worker response has invalid segment text")
+        segments.append(
+            TranscriptSegment(
+                text=text,
+                start_time=float(start),
+                end_time=float(end),
+                is_partial=False,
+            )
+        )
+    if msg["full_text"] != " ".join(segment.text for segment in segments):
+        raise GPUWorkerProtocolError("GPU worker response has inconsistent text")
+    return TranscriptResult(segments=segments, full_text=msg["full_text"], duration=duration)
+
+
+def _wait_for_fd(fd: int, *, write: bool, deadline: float, operation: str) -> None:
+    """Wait for a pipe endpoint without letting an unresponsive worker block us."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise GPUWorkerTimeoutError(f"GPU worker {operation} timed out")
+    readable, writable, _ = select.select(
+        [] if write else [fd], [fd] if write else [], [], remaining
+    )
+    if not (writable if write else readable):
+        raise GPUWorkerTimeoutError(f"GPU worker {operation} timed out")
+
+
+def _write_all(pipe, data: bytes, *, deadline: float, operation: str) -> None:
+    """Write *data* using OS-level bounded writes rather than buffered I/O."""
+    fd = pipe.fileno()
+    offset = 0
+    while offset < len(data):
+        _wait_for_fd(fd, write=True, deadline=deadline, operation=operation)
+        try:
+            written = os.write(fd, data[offset:])
+        except BlockingIOError:
+            continue
+        except BrokenPipeError as exc:
+            raise GPUWorkerError(f"GPU worker closed stdin during {operation}") from exc
+        if written <= 0:
+            raise GPUWorkerError(f"GPU worker accepted no input during {operation}")
+        offset += written
+
+
+def _read_exact(pipe, length: int, *, deadline: float, operation: str) -> bytes:
+    """Read exactly *length* bytes with a single deadline for the whole frame."""
+    fd = pipe.fileno()
+    chunks: list[bytes] = []
+    remaining = length
+    while remaining:
+        _wait_for_fd(fd, write=False, deadline=deadline, operation=operation)
+        try:
+            chunk = os.read(fd, remaining)
+        except BlockingIOError:
+            continue
+        if not chunk:
+            raise GPUWorkerProtocolError(f"GPU worker closed stdout during {operation}")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _send_msg(pipe, msg: dict, *, deadline: float, operation: str) -> None:
     """Write a length-prefixed JSON message."""
     data = json.dumps(msg).encode()
-    pipe.write(struct.pack(">I", len(data)))
-    pipe.write(data)
-    pipe.flush()
+    _write_all(pipe, struct.pack(">I", len(data)) + data, deadline=deadline, operation=operation)
 
 
-def _recv_msg(pipe) -> dict | None:
+def _recv_msg(pipe, *, deadline: float, operation: str) -> dict:
     """Read a length-prefixed JSON message."""
-    header = pipe.read(4)
-    if len(header) < 4:
-        return None
+    header = _read_exact(pipe, 4, deadline=deadline, operation=operation)
     length = struct.unpack(">I", header)[0]
-    data = pipe.read(length)
-    if len(data) < length:
-        return None
-    return json.loads(data)
+    if length > _MAX_RESPONSE_BYTES:
+        raise GPUWorkerProtocolError(f"GPU worker response exceeds {_MAX_RESPONSE_BYTES} bytes")
+    try:
+        msg = json.loads(_read_exact(pipe, length, deadline=deadline, operation=operation))
+    except json.JSONDecodeError as exc:
+        raise GPUWorkerProtocolError("GPU worker sent invalid JSON") from exc
+    if not isinstance(msg, dict):
+        raise GPUWorkerProtocolError("GPU worker response is not an object")
+    return msg
 
 
 class WhisperGPUEngine:
@@ -67,6 +179,7 @@ class WhisperGPUEngine:
         self._model_path = self._resolve_model_path(self._model_name)
 
         self._process: subprocess.Popen | None = None
+        self._operation_timeout_s = _WORKER_INFERENCE_TIMEOUT
 
         self._stream_started = False
         self._audio_buffer = bytearray()
@@ -104,6 +217,10 @@ class WhisperGPUEngine:
         """Start the GPU worker subprocess if not already running."""
         if self._process is not None and self._process.poll() is None:
             return
+        if self._process is not None:
+            # ``poll`` observed an exit. Close the dead process's pipe ends
+            # before replacing it so repeated recovery cannot leak descriptors.
+            self._shutdown_worker()
 
         logger.info("Starting whisper.cpp GPU worker subprocess...")
 
@@ -117,51 +234,56 @@ class WhisperGPUEngine:
             stdout=subprocess.PIPE,
             stderr=None,  # inherit parent stderr for logging
         )
+        assert self._process.stdin is not None
+        assert self._process.stdout is not None
+        os.set_blocking(self._process.stdin.fileno(), False)
+        os.set_blocking(self._process.stdout.fileno(), False)
 
-        # Send init message with model path
-        _send_msg(self._process.stdin, {
-            "cmd": "init",
-            "model_path": str(self._model_path),
-            "n_threads": self._threads,
-        })
-
-        # Wait for ready signal
-        t0 = time.monotonic()
-        msg = _recv_msg(self._process.stdout)
-        dt = time.monotonic() - t0
-
-        if msg and msg.get("status") == "ready":
-            logger.info(
-                "Whisper GPU worker ready (pid=%d, %.1fs)",
-                self._process.pid,
-                dt,
+        deadline = time.monotonic() + _WORKER_STARTUP_TIMEOUT
+        try:
+            _send_msg(
+                self._process.stdin,
+                {"cmd": "init", "model_path": str(self._model_path), "n_threads": self._threads},
+                deadline=deadline,
+                operation="startup",
             )
-            return
-
-        # Worker failed
-        if self._process.poll() is not None:
-            logger.error(
-                "GPU worker exited with code %d", self._process.returncode
-            )
-        else:
-            logger.error("GPU worker did not signal ready after %.1fs", dt)
+            msg = _recv_msg(self._process.stdout, deadline=deadline, operation="startup")
+            if msg.get("status") != "ready":
+                raise GPUWorkerProtocolError("GPU worker did not acknowledge startup")
+        except Exception as exc:
             self._shutdown_worker()
+            if isinstance(exc, GPUWorkerError):
+                raise
+            raise GPUWorkerError("GPU worker failed to start") from exc
 
-        raise RuntimeError("Whisper GPU worker failed to start")
+        logger.info("Whisper GPU worker ready (pid=%d)", self._process.pid)
 
     def _shutdown_worker(self) -> None:
-        if self._process is None:
+        process = getattr(self, "_process", None)
+        self._process = None
+        if process is None:
             return
         try:
-            if self._process.poll() is None:
-                _send_msg(self._process.stdin, {"cmd": "shutdown"})
-                self._process.wait(timeout=5)
-        except Exception:
-            pass
+            if process.poll() is None and process.stdin is not None:
+                try:
+                    _send_msg(
+                        process.stdin,
+                        {"cmd": "shutdown"},
+                        deadline=time.monotonic() + 1.0,
+                        operation="shutdown",
+                    )
+                    process.wait(timeout=1.0)
+                except Exception:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=1.0)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=1.0)
         finally:
-            if self._process.poll() is None:
-                self._process.terminate()
-            self._process = None
+            for pipe in (process.stdin, process.stdout):
+                if pipe is not None:
+                    pipe.close()
 
     # ------------------------------------------------------------------
     # STTEngine protocol
@@ -169,6 +291,12 @@ class WhisperGPUEngine:
 
     def _audio_duration(self) -> float:
         return len(self._audio_buffer) / (_SAMPLE_RATE * _SAMPLE_WIDTH)
+
+    def set_operation_timeout(self, timeout_s: float) -> None:
+        """Set the bounded IPC deadline for a caller that owns this engine."""
+        if timeout_s <= 0:
+            raise ValueError("operation timeout must be positive")
+        self._operation_timeout_s = timeout_s
 
     def start_stream(self) -> None:
         self._ensure_worker()
@@ -189,52 +317,46 @@ class WhisperGPUEngine:
         duration = self._audio_duration()
         self._stream_started = False
 
-        if not self._audio_buffer or self._process is None:
+        if not self._audio_buffer:
             return TranscriptResult(duration=duration)
+        if self._process is None or self._process.poll() is not None:
+            self._shutdown_worker()
+            raise GPUWorkerError("GPU worker is unavailable")
 
         audio_bytes = bytes(self._audio_buffer)
 
         logger.debug("Sending %.1fs audio to GPU worker...", duration)
 
         try:
+            deadline = time.monotonic() + self._operation_timeout_s
             # Send transcribe command + raw audio
-            _send_msg(self._process.stdin, {
-                "cmd": "transcribe",
-                "audio_length": len(audio_bytes),
-            })
-            self._process.stdin.write(audio_bytes)
-            self._process.stdin.flush()
-
-            msg = _recv_msg(self._process.stdout)
-        except Exception:
-            logger.exception("Failed to communicate with GPU worker")
-            return TranscriptResult(duration=duration)
-
-        if msg is None or msg.get("status") != "ok":
-            error = msg.get("error", "unknown") if msg else "no response"
-            logger.warning("GPU worker error: %s", error)
-            return TranscriptResult(duration=duration)
-
-        segments = [
-            TranscriptSegment(
-                text=seg["text"],
-                start_time=seg["t0"],
-                end_time=seg["t1"],
-                is_partial=False,
+            _send_msg(
+                self._process.stdin,
+                {"cmd": "transcribe", "audio_length": len(audio_bytes)},
+                deadline=deadline,
+                operation="inference request",
             )
-            for seg in msg.get("segments", [])
-        ]
+            _write_all(
+                self._process.stdin,
+                audio_bytes,
+                deadline=deadline,
+                operation="inference audio",
+            )
+            msg = _recv_msg(self._process.stdout, deadline=deadline, operation="inference response")
+            result = _parse_result(msg, duration=duration)
+        except Exception as exc:
+            self._shutdown_worker()
+            if isinstance(exc, GPUWorkerError):
+                raise
+            raise GPUWorkerError("failed to communicate with GPU worker") from exc
 
-        full_text = msg.get("full_text", "")
         logger.debug(
-            "GPU STT: %.1fs → %d segments, %d chars", duration, len(segments), len(full_text)
+            "GPU STT: %.1fs → %d segments, %d chars",
+            duration,
+            len(result.segments),
+            len(result.full_text),
         )
-
-        return TranscriptResult(
-            segments=segments,
-            full_text=full_text,
-            duration=duration,
-        )
+        return result
 
     def reset(self) -> None:
         self._audio_buffer = bytearray()

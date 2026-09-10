@@ -5,7 +5,15 @@ Actual model inference is NOT tested (requires downloaded models).
 
 from __future__ import annotations
 
+import json
+import os
+import signal
+import struct
+import subprocess
 import sys
+import time
+from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -22,7 +30,6 @@ from linux_whisper.stt.engine import (
 
 
 class TestTranscriptDataTypes:
-
     def test_transcript_segment_fields(self):
         seg = TranscriptSegment(
             text="hello world",
@@ -63,12 +70,13 @@ class TestTranscriptDataTypes:
 
 
 class TestSTTEngineProtocol:
-
     def test_protocol_is_runtime_checkable(self):
         """The STTEngine protocol can be used with isinstance at runtime."""
-        assert hasattr(STTEngine, "__protocol_attrs__") or hasattr(
-            STTEngine, "__abstractmethods__"
-        ) or True  # Protocol existence is sufficient
+        assert (
+            hasattr(STTEngine, "__protocol_attrs__")
+            or hasattr(STTEngine, "__abstractmethods__")
+            or True
+        )  # Protocol existence is sufficient
 
     def test_mock_engine_satisfies_protocol(self):
         """A mock object with the right methods satisfies the STTEngine protocol."""
@@ -94,7 +102,6 @@ class TestSTTEngineProtocol:
 
 
 class TestCreateEngine:
-
     def test_unknown_backend_raises_value_error(self):
         cfg = Config.from_dict({"stt": {"backend": "openai"}})
         with pytest.raises(ValueError, match="Unknown STT backend"):
@@ -102,9 +109,11 @@ class TestCreateEngine:
 
     def test_moonshine_backend_import(self):
         """Test that create_engine attempts to import MoonshineEngine for moonshine backend."""
-        cfg = Config.from_dict({
-            "stt": {"backend": "moonshine", "model": "moonshine-medium"},
-        })
+        cfg = Config.from_dict(
+            {
+                "stt": {"backend": "moonshine", "model": "moonshine-medium"},
+            }
+        )
 
         # Patch the import inside create_engine so it returns a mock engine
         mock_engine = MagicMock()
@@ -117,9 +126,15 @@ class TestCreateEngine:
 
     def test_whisper_cpp_gpu_backend_import(self):
         """Test that create_engine selects WhisperGPUEngine for whisper-cpp + rocm."""
-        cfg = Config.from_dict({
-            "stt": {"backend": "whisper-cpp", "device": "rocm", "model": "whisper-large-v3-turbo"},
-        })
+        cfg = Config.from_dict(
+            {
+                "stt": {
+                    "backend": "whisper-cpp",
+                    "device": "rocm",
+                    "model": "whisper-large-v3-turbo",
+                },
+            }
+        )
 
         mock_engine = MagicMock()
         mock_cls = MagicMock(return_value=mock_engine)
@@ -131,9 +146,15 @@ class TestCreateEngine:
 
     def test_whisper_cpp_cpu_backend_import(self):
         """Test that create_engine selects WhisperCppEngine for whisper-cpp + cpu."""
-        cfg = Config.from_dict({
-            "stt": {"backend": "whisper-cpp", "device": "cpu", "model": "whisper-large-v3-turbo"},
-        })
+        cfg = Config.from_dict(
+            {
+                "stt": {
+                    "backend": "whisper-cpp",
+                    "device": "cpu",
+                    "model": "whisper-large-v3-turbo",
+                },
+            }
+        )
 
         mock_engine = MagicMock()
         mock_cls = MagicMock(return_value=mock_engine)
@@ -195,8 +216,345 @@ class TestWorkerImportOrder:
         )
 
 
-class TestMoonshineEngine:
+_SYNTHETIC_GPU_WORKER = r"""
+import json
+import signal
+import struct
+import sys
+import time
 
+mode = sys.argv[1]
+stdin = sys.stdin.buffer
+stdout = sys.stdout.buffer
+
+
+def recv():
+    header = stdin.read(4)
+    if len(header) < 4:
+        return None
+    length = struct.unpack(">I", header)[0]
+    data = stdin.read(length)
+    if len(data) < length:
+        return None
+    return json.loads(data)
+
+
+def send(message):
+    data = json.dumps(message).encode()
+    stdout.write(struct.pack(">I", len(data)) + data)
+    stdout.flush()
+
+
+if mode == "startup_hang":
+    time.sleep(10)
+
+recv()
+send({"status": "ready"})
+
+if mode == "exit":
+    raise SystemExit(7)
+if mode == "blocked_write":
+    time.sleep(10)
+
+message = recv()
+audio_length = message["audio_length"]
+stdin.read(audio_length)
+
+if mode == "inference_hang_kill":
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    time.sleep(10)
+elif mode == "malformed":
+    payload = b"not-json"
+    stdout.write(struct.pack(">I", len(payload)) + payload)
+    stdout.flush()
+    recv()
+elif mode == "silence":
+    send({"status": "ok", "segments": [], "full_text": ""})
+    recv()
+"""
+
+
+def _synthetic_gpu_engine():
+    from linux_whisper.stt.whisper_gpu import WhisperGPUEngine
+
+    engine = object.__new__(WhisperGPUEngine)
+    engine._model_path = Path("/synthetic/model")
+    engine._threads = 1
+    engine._process = None
+    engine._operation_timeout_s = 0.02
+    engine._stream_started = False
+    engine._audio_buffer = bytearray()
+    engine._stream_start_time = 0.0
+    return engine
+
+
+@contextmanager
+def _synthetic_gpu_workers(monkeypatch, *modes):
+    import linux_whisper.stt.whisper_gpu as whisper_gpu
+
+    pending_modes = list(modes)
+    processes = []
+    real_popen = subprocess.Popen
+
+    def start(_command, **kwargs):
+        mode = pending_modes.pop(0)
+        process = real_popen(
+            [sys.executable, "-u", "-c", _SYNTHETIC_GPU_WORKER, mode],
+            **kwargs,
+        )
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(whisper_gpu.subprocess, "Popen", start)
+    try:
+        yield processes
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=1)
+
+
+def _assert_silence_recovery(engine) -> None:
+    engine.start_stream()
+    engine.feed_audio(b"\x00\x00" * 100)
+    result = engine.finalize()
+    assert result.full_text == ""
+    assert result.segments == []
+    engine._shutdown_worker()
+
+
+class TestGPUWorkerIPC:
+    """Synthetic pipe tests for the worker boundary; no model or GPU is needed."""
+
+    def test_response_timeout_is_typed(self):
+        from linux_whisper.stt.whisper_gpu import GPUWorkerTimeoutError, _recv_msg
+
+        read_fd, write_fd = os.pipe()
+        reader = os.fdopen(read_fd, "rb", buffering=0)
+        try:
+            with pytest.raises(GPUWorkerTimeoutError, match="startup timed out"):
+                _recv_msg(
+                    reader,
+                    deadline=time.monotonic() + 0.01,
+                    operation="startup",
+                )
+        finally:
+            reader.close()
+            os.close(write_fd)
+
+    def test_truncated_response_is_not_silence(self):
+        from linux_whisper.stt.whisper_gpu import GPUWorkerProtocolError, _recv_msg
+
+        read_fd, write_fd = os.pipe()
+        reader = os.fdopen(read_fd, "rb", buffering=0)
+        try:
+            os.write(write_fd, struct.pack(">I", 8) + b"{}")
+            os.close(write_fd)
+            with pytest.raises(GPUWorkerProtocolError, match="closed stdout"):
+                _recv_msg(
+                    reader,
+                    deadline=time.monotonic() + 1,
+                    operation="inference response",
+                )
+        finally:
+            reader.close()
+
+    def test_malformed_success_response_is_a_protocol_error(self):
+        from linux_whisper.stt.whisper_gpu import GPUWorkerProtocolError, _parse_result
+
+        with pytest.raises(GPUWorkerProtocolError, match="no text field"):
+            _parse_result({"status": "ok", "segments": []}, duration=1.0)
+
+        with pytest.raises(GPUWorkerProtocolError, match="invalid segment timing"):
+            _parse_result(
+                {
+                    "status": "ok",
+                    "full_text": "synthetic",
+                    "segments": [{"text": "synthetic", "t0": 1.0, "t1": 0.0}],
+                },
+                duration=1.0,
+            )
+
+        with pytest.raises(GPUWorkerProtocolError, match="invalid segment timing"):
+            _parse_result(
+                {
+                    "status": "ok",
+                    "full_text": "synthetic",
+                    "segments": [{"text": "synthetic", "t0": True, "t1": 1.0}],
+                },
+                duration=1.0,
+            )
+
+        with pytest.raises(GPUWorkerProtocolError, match="inconsistent text"):
+            _parse_result(
+                {
+                    "status": "ok",
+                    "full_text": "",
+                    "segments": [{"text": "synthetic", "t0": 0.0, "t1": 1.0}],
+                },
+                duration=1.0,
+            )
+
+        with pytest.raises(GPUWorkerProtocolError, match="invalid segment timing"):
+            _parse_result(
+                {
+                    "status": "ok",
+                    "full_text": "synthetic",
+                    "segments": [{"text": "synthetic", "t0": 0.0, "t1": 2.01}],
+                },
+                duration=1.0,
+            )
+
+        result = _parse_result(
+            {
+                "status": "ok",
+                "full_text": "synthetic",
+                "segments": [{"text": "synthetic", "t0": 0.0, "t1": 2.0}],
+            },
+            duration=1.0,
+        )
+        assert result.segments[0].end_time == 2.0
+
+    def test_startup_hang_reaps_worker_and_replacement_recovers(self, monkeypatch):
+        import linux_whisper.stt.whisper_gpu as whisper_gpu
+
+        engine = _synthetic_gpu_engine()
+        monkeypatch.setattr(whisper_gpu, "_WORKER_STARTUP_TIMEOUT", 0.02)
+        with _synthetic_gpu_workers(monkeypatch, "startup_hang", "silence") as processes:
+            with pytest.raises(whisper_gpu.GPUWorkerTimeoutError, match="startup timed out"):
+                engine.start_stream()
+
+            assert engine._process is None
+            assert processes[0].poll() is not None
+            monkeypatch.setattr(whisper_gpu, "_WORKER_STARTUP_TIMEOUT", 1.0)
+            _assert_silence_recovery(engine)
+            assert processes[1].poll() is not None
+
+    def test_blocked_audio_write_reaps_worker_and_replacement_recovers(self, monkeypatch):
+        import linux_whisper.stt.whisper_gpu as whisper_gpu
+
+        engine = _synthetic_gpu_engine()
+        with _synthetic_gpu_workers(monkeypatch, "blocked_write", "silence") as processes:
+            engine.start_stream()
+            engine.feed_audio(b"\x00" * (8 * 1024 * 1024))
+            with pytest.raises(whisper_gpu.GPUWorkerTimeoutError, match="audio timed out"):
+                engine.finalize()
+
+            assert engine._process is None
+            assert processes[0].poll() is not None
+            _assert_silence_recovery(engine)
+
+    def test_inference_hang_escalates_to_kill_reap_then_recovers(self, monkeypatch):
+        import linux_whisper.stt.whisper_gpu as whisper_gpu
+
+        engine = _synthetic_gpu_engine()
+        with _synthetic_gpu_workers(monkeypatch, "inference_hang_kill", "silence") as processes:
+            engine.start_stream()
+            engine.feed_audio(b"\x00\x00" * 100)
+            with pytest.raises(whisper_gpu.GPUWorkerTimeoutError, match="response timed out"):
+                engine.finalize()
+
+            assert engine._process is None
+            assert processes[0].poll() == -signal.SIGKILL
+            _assert_silence_recovery(engine)
+
+    def test_worker_exit_reaps_process_and_replacement_recovers(self, monkeypatch):
+        import linux_whisper.stt.whisper_gpu as whisper_gpu
+
+        engine = _synthetic_gpu_engine()
+        with _synthetic_gpu_workers(monkeypatch, "exit", "silence") as processes:
+            engine.start_stream()
+            processes[0].wait(timeout=1)
+            engine.feed_audio(b"\x00\x00" * 100)
+            with pytest.raises(whisper_gpu.GPUWorkerError, match="unavailable"):
+                engine.finalize()
+
+            assert engine._process is None
+            assert processes[0].returncode == 7
+            _assert_silence_recovery(engine)
+
+    def test_malformed_frame_reaps_process_and_replacement_recovers(self, monkeypatch):
+        import linux_whisper.stt.whisper_gpu as whisper_gpu
+
+        engine = _synthetic_gpu_engine()
+        with _synthetic_gpu_workers(monkeypatch, "malformed", "silence") as processes:
+            engine.start_stream()
+            engine.feed_audio(b"\x00\x00" * 100)
+            with pytest.raises(whisper_gpu.GPUWorkerProtocolError, match="invalid JSON"):
+                engine.finalize()
+
+            assert engine._process is None
+            assert processes[0].poll() is not None
+            _assert_silence_recovery(engine)
+
+    def test_worker_error_reaps_before_replacement_is_used(self):
+        from linux_whisper.stt.whisper_gpu import GPUWorkerError, WhisperGPUEngine
+
+        class FakeWorker:
+            def __init__(self, response: dict):
+                input_read, input_write = os.pipe()
+                output_read, output_write = os.pipe()
+                self.stdin = os.fdopen(input_write, "wb", buffering=0)
+                self.stdout = os.fdopen(output_read, "rb", buffering=0)
+                self._input_read = input_read
+                payload = json.dumps(response).encode()
+                os.write(output_write, struct.pack(">I", len(payload)) + payload)
+                os.close(output_write)
+                self.returncode: int | None = None
+                self.terminated = False
+                self.pid = 1234
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout: float):
+                if self.returncode is None:
+                    raise TimeoutError
+                return self.returncode
+
+            def terminate(self):
+                self.terminated = True
+                self.returncode = 15
+
+            def kill(self):
+                self.returncode = 9
+
+            def close_input(self):
+                os.close(self._input_read)
+
+        engine = object.__new__(WhisperGPUEngine)
+        engine._operation_timeout_s = 1
+        engine._stream_started = True
+        engine._audio_buffer = bytearray(b"\x00\x00" * 10)
+        failed = FakeWorker({"status": "error", "error": "synthetic"})
+        engine._process = failed
+
+        with pytest.raises(GPUWorkerError, match="reported an inference failure"):
+            engine.finalize()
+
+        assert failed.terminated is True
+        assert engine._process is None
+        failed.close_input()
+
+        replacement = FakeWorker({"status": "ok", "segments": [], "full_text": ""})
+        engine._process = replacement
+        engine.start_stream()
+        engine.feed_audio(b"\x00\x00" * 10)
+        assert engine.finalize().full_text == ""
+        engine._shutdown_worker()
+        replacement.close_input()
+
+    def test_operation_timeout_must_be_positive(self):
+        from linux_whisper.stt.whisper_gpu import WhisperGPUEngine
+
+        engine = object.__new__(WhisperGPUEngine)
+        engine._process = None
+        with pytest.raises(ValueError, match="positive"):
+            engine.set_operation_timeout(0)
+
+
+class TestMoonshineEngine:
     @pytest.fixture(autouse=True)
     def _require_backend(self):
         """Skip when the optional Moonshine backend is not installed.
@@ -214,9 +572,11 @@ class TestMoonshineEngine:
     def test_invalid_model_raises_value_error(self):
         from linux_whisper.stt.moonshine import MoonshineEngine
 
-        cfg = Config.from_dict({
-            "stt": {"backend": "moonshine", "model": "nonexistent-model"},
-        })
+        cfg = Config.from_dict(
+            {
+                "stt": {"backend": "moonshine", "model": "nonexistent-model"},
+            }
+        )
         with pytest.raises(ValueError, match="Unknown Moonshine model"):
             MoonshineEngine(cfg)
 
@@ -227,9 +587,11 @@ class TestMoonshineEngine:
         original = moonshine_module._HAS_MOONSHINE
         try:
             moonshine_module._HAS_MOONSHINE = False
-            cfg = Config.from_dict({
-                "stt": {"backend": "moonshine", "model": "moonshine-medium"},
-            })
+            cfg = Config.from_dict(
+                {
+                    "stt": {"backend": "moonshine", "model": "moonshine-medium"},
+                }
+            )
             with pytest.raises(ImportError, match="moonshine"):
                 moonshine_module.MoonshineEngine(cfg)
         finally:
@@ -239,9 +601,11 @@ class TestMoonshineEngine:
         """feed_audio before start_stream should raise RuntimeError."""
         from linux_whisper.stt.moonshine import MoonshineEngine
 
-        cfg = Config.from_dict({
-            "stt": {"backend": "moonshine", "model": "moonshine-medium"},
-        })
+        cfg = Config.from_dict(
+            {
+                "stt": {"backend": "moonshine", "model": "moonshine-medium"},
+            }
+        )
         engine = MoonshineEngine(cfg)
         engine._stream_started = False  # ensure not started
         with pytest.raises(RuntimeError, match="start_stream"):
@@ -250,9 +614,11 @@ class TestMoonshineEngine:
     def test_finalize_without_start_returns_empty(self):
         from linux_whisper.stt.moonshine import MoonshineEngine
 
-        cfg = Config.from_dict({
-            "stt": {"backend": "moonshine", "model": "moonshine-medium"},
-        })
+        cfg = Config.from_dict(
+            {
+                "stt": {"backend": "moonshine", "model": "moonshine-medium"},
+            }
+        )
         engine = MoonshineEngine(cfg)
         result = engine.finalize()
         assert result.full_text == ""
@@ -261,9 +627,11 @@ class TestMoonshineEngine:
     def test_reset_clears_state(self):
         from linux_whisper.stt.moonshine import MoonshineEngine
 
-        cfg = Config.from_dict({
-            "stt": {"backend": "moonshine", "model": "moonshine-medium"},
-        })
+        cfg = Config.from_dict(
+            {
+                "stt": {"backend": "moonshine", "model": "moonshine-medium"},
+            }
+        )
         engine = MoonshineEngine(cfg)
         engine._audio_buffer = bytearray(b"\x00" * 100)
         engine._stream_started = True
@@ -277,7 +645,6 @@ class TestMoonshineEngine:
 
 
 class TestParakeetEngine:
-
     @pytest.fixture(autouse=True)
     def _require_backend(self):
         """Skip when the optional Parakeet backend is not installed.
@@ -391,14 +758,15 @@ class TestParakeetEngine:
 
 
 class TestWhisperCppEngine:
-
     def test_invalid_model_raises_value_error(self, monkeypatch):
         import linux_whisper.stt.whisper_cpp as wcpp_module
 
         monkeypatch.setattr(wcpp_module, "_check_whispercpp", lambda: True)
-        cfg = Config.from_dict({
-            "stt": {"backend": "whisper-cpp", "model": "nonexistent-model"},
-        })
+        cfg = Config.from_dict(
+            {
+                "stt": {"backend": "whisper-cpp", "model": "nonexistent-model"},
+            }
+        )
         with pytest.raises(ValueError, match="Unknown whisper.cpp model"):
             wcpp_module.WhisperCppEngine(cfg)
 
@@ -406,9 +774,11 @@ class TestWhisperCppEngine:
         import linux_whisper.stt.whisper_cpp as wcpp_module
 
         monkeypatch.setattr(wcpp_module, "_check_whispercpp", lambda: False)
-        cfg = Config.from_dict({
-            "stt": {"backend": "whisper-cpp", "model": "whisper-large-v3-turbo"},
-        })
+        cfg = Config.from_dict(
+            {
+                "stt": {"backend": "whisper-cpp", "model": "whisper-large-v3-turbo"},
+            }
+        )
         with pytest.raises(ImportError, match="whispercpp"):
             wcpp_module.WhisperCppEngine(cfg)
 
@@ -417,9 +787,11 @@ class TestWhisperCppEngine:
         import linux_whisper.stt.whisper_cpp as wcpp_module
 
         monkeypatch.setattr(wcpp_module, "_check_whispercpp", lambda: True)
-        cfg = Config.from_dict({
-            "stt": {"backend": "whisper-cpp", "model": "distil-large-v3.5"},
-        })
+        cfg = Config.from_dict(
+            {
+                "stt": {"backend": "whisper-cpp", "model": "distil-large-v3.5"},
+            }
+        )
         with pytest.raises(FileNotFoundError, match="Model file not found"):
             wcpp_module.WhisperCppEngine(cfg)
 
@@ -471,9 +843,9 @@ class TestSTTDeviceConfig:
         assert cfg.stt.device == "rocm"
 
     def test_device_preserved_with_other_overrides(self):
-        cfg = Config.from_dict({
-            "stt": {"backend": "whisper-cpp", "device": "rocm", "model": "whisper-large-v3-turbo"}
-        })
+        cfg = Config.from_dict(
+            {"stt": {"backend": "whisper-cpp", "device": "rocm", "model": "whisper-large-v3-turbo"}}
+        )
         assert cfg.stt.backend == "whisper-cpp"
         assert cfg.stt.device == "rocm"
         assert cfg.stt.model == "whisper-large-v3-turbo"
@@ -501,9 +873,7 @@ class TestWhisperCppGPUDetection:
         monkeypatch.setattr(wcpp, "_check_whispercpp", lambda: True)
 
         mock_pw = MagicMock()
-        mock_pw.whisper_print_system_info.return_value = (
-            "WHISPER : CPU : SSE3 = 1 | AVX = 1"
-        )
+        mock_pw.whisper_print_system_info.return_value = "WHISPER : CPU : SSE3 = 1 | AVX = 1"
         monkeypatch.setitem(sys.modules, "_pywhispercpp", mock_pw)
 
         assert wcpp._detect_gpu_available() is False
