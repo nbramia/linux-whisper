@@ -427,6 +427,7 @@ class TestGPUWorkerIPC:
 
             assert engine._process is None
             assert processes[0].poll() is not None
+            monkeypatch.setattr(whisper_gpu, "_WORKER_STARTUP_TIMEOUT", 1.0)
             _assert_silence_recovery(engine)
             assert processes[1].poll() is not None
 
