@@ -27,6 +27,9 @@ class STTConfig:
     model: str = "whisper-large-v3-turbo"
     device: str = "rocm"  # cpu | rocm
     threads: int = 0  # 0 = auto
+    # Stop the GPU whisper worker after this many idle seconds, releasing its
+    # VRAM and SDMA queue; the next dictation reloads it (~4s). 0 = never.
+    gpu_idle_unload_s: int = 1200
 
     VALID_BACKENDS = ("faster-whisper", "moonshine", "parakeet", "whisper-cpp")
     VALID_MODELS = (
@@ -136,6 +139,10 @@ class Config:
             errors.append(
                 f"Invalid stt.backend '{self.stt.backend}', "
                 f"must be one of {STTConfig.VALID_BACKENDS}"
+            )
+        if self.stt.gpu_idle_unload_s < 0:
+            errors.append(
+                f"stt.gpu_idle_unload_s must be >= 0 (0 disables), got {self.stt.gpu_idle_unload_s}"
             )
         if self.inject.method not in InjectConfig.VALID_METHODS:
             errors.append(

@@ -50,7 +50,7 @@ Press hotkey         Capture audio        Transcribe            Polish text     
  CPU-only fallback:   ~2.6s total (simple) / ~2.9s (with LLM)
 ```
 
-**Process isolation:** The GPU STT engine (whisper.cpp/pywhispercpp) runs in a separate subprocess to avoid a ROCm shared-library conflict with onnxruntime (used by Silero VAD, BERT, ELECTRA). The worker process loads the model once, stays warm between transcriptions, and communicates via deadline-bounded stdin/stdout frames. A startup, pipe, protocol, or inference failure terminates and reaps that worker before the next stream creates a replacement; malformed success payloads are failures, while genuine no-speech remains a normal empty result. Segment ends may exceed the measured clip by at most one second for whisper.cpp's final padded decoding frame; larger overruns are protocol failures. This is transparent — the `WhisperGPUEngine` implements the same `STTEngine` protocol as all other backends.
+**Process isolation:** The GPU STT engine (whisper.cpp/pywhispercpp) runs in a separate subprocess to avoid a ROCm shared-library conflict with onnxruntime (used by Silero VAD, BERT, ELECTRA). The worker process loads the model once, stays warm between transcriptions, and communicates via deadline-bounded stdin/stdout frames. A startup, pipe, protocol, or inference failure terminates and reaps that worker before the next stream creates a replacement; malformed success payloads are failures, while genuine no-speech remains a normal empty result. Segment ends may exceed the measured clip by at most one second for whisper.cpp's final padded decoding frame; larger overruns are protocol failures. After `stt.gpu_idle_unload_s` seconds (default 1200, i.e. 20 minutes) with no stream in progress and no transcription, the worker is stopped, releasing its GPU memory and its hardware SDMA queue for other GPU jobs; the next dictation starts a fresh worker and pays the ~4s model load once. Set it to `0` to keep the worker loaded indefinitely. This is transparent — the `WhisperGPUEngine` implements the same `STTEngine` protocol as all other backends.
 
 The polish pipeline uses a hybrid approach:
 
@@ -189,6 +189,7 @@ stt:
   model: "whisper-large-v3-turbo"
   device: "rocm"               # rocm (GPU) | cpu — auto-falls back to CPU
   threads: 0                   # CPU threads (0 = auto)
+  gpu_idle_unload_s: 1200      # stop the GPU worker after 20 min idle (0 = never)
 
 # Polish pipeline — cleans up raw transcripts
 polish:

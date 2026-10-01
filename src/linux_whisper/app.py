@@ -335,7 +335,12 @@ class App:
         logger.info("Switching STT engine to %s/%s...", backend, model)
 
         # Update in-memory config
-        new_stt = STTConfig(backend=backend, model=model, threads=self.config.stt.threads)
+        new_stt = STTConfig(
+            backend=backend,
+            model=model,
+            threads=self.config.stt.threads,
+            gpu_idle_unload_s=self.config.stt.gpu_idle_unload_s,
+        )
         self.config = Config(
             hotkey=self.config.hotkey,
             mode=self.config.mode,
