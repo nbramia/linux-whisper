@@ -271,9 +271,12 @@ elif mode == "malformed":
 elif mode == "silence":
     send({"status": "ok", "segments": [], "full_text": ""})
     recv()
-elif mode == "serve":
-    # Answer every transcription with silence until shutdown or EOF.
+elif mode in ("serve", "slow_serve"):
+    # Answer every transcription with silence until shutdown or EOF;
+    # ``slow_serve`` takes half a second over each one.
     while True:
+        if mode == "slow_serve":
+            time.sleep(0.5)
         send({"status": "ok", "segments": [], "full_text": ""})
         message = recv()
         if message is None or message.get("cmd") != "transcribe":
@@ -743,6 +746,70 @@ class TestGPUIdleUnload:
             assert len(processes) == (2 if unload_first else 1)
             engine.close()
             assert all(p.wait(timeout=2) is not None for p in processes)
+
+    def test_abandoned_stream_is_unloaded(self, monkeypatch, manual_timers):
+        engine = _synthetic_gpu_engine(idle_unload_s=1200)
+        with _synthetic_gpu_workers(monkeypatch, "serve") as processes:
+            engine.start_stream()
+            engine.feed_audio(b"\x00\x00" * 100)
+            engine.reset()  # the stream is dropped without a finalize()
+
+            manual_timers[-1].fire()
+            assert engine._process is None
+            assert processes[0].wait(timeout=2) is not None
+
+    def test_start_stream_does_not_wait_for_inflight_finalize(
+        self, monkeypatch, manual_timers
+    ):
+        import threading
+
+        engine = _synthetic_gpu_engine(idle_unload_s=1200)
+        engine._operation_timeout_s = 5.0
+        with _synthetic_gpu_workers(monkeypatch, "slow_serve") as processes:
+            engine.start_stream()
+            engine.feed_audio(b"\x00\x00" * 100)
+            results = []
+            finalizing = threading.Thread(target=lambda: results.append(engine.finalize()))
+            finalizing.start()
+            assert _wait_until(lambda: engine._inflight == 1)
+
+            # The hotkey thread starts the next recording mid-inference.
+            starting = threading.Thread(target=engine.start_stream)
+            starting.start()
+            starting.join(timeout=0.2)
+            assert not starting.is_alive()
+            assert finalizing.is_alive()  # the 0.5s transcription is still running
+
+            # An idle fire during the transcription must not unload its worker.
+            engine._unload_if_idle(engine._idle_generation)
+            assert engine._process is processes[0]
+
+            finalizing.join(timeout=3)
+            assert results[0].full_text == ""
+            # The new stream is open, so the first finalize arms no countdown.
+            assert engine._idle_timer is None
+
+            engine.feed_audio(b"\x00\x00" * 100)
+            assert engine.finalize().full_text == ""
+            assert engine._idle_timer is not None
+            assert engine._process is processes[0]
+            engine.close()
+
+    def test_discarded_engine_with_pending_timer_stops_its_worker(
+        self, monkeypatch, manual_timers
+    ):
+        import gc
+
+        engine = _synthetic_gpu_engine(idle_unload_s=1200)
+        with _synthetic_gpu_workers(monkeypatch, "serve") as processes:
+            _transcribe_silence(engine)
+            pending = manual_timers[-1]
+            assert not pending.cancelled
+
+            del engine
+            gc.collect()
+            assert processes[0].wait(timeout=2) is not None
+            pending.fire()  # the timer outlives the engine: a silent no-op
 
     def test_close_stops_timer_and_worker(self, monkeypatch):
         import threading

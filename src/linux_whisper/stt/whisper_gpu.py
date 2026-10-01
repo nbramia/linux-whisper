@@ -206,10 +206,18 @@ class WhisperGPUEngine:
         )
 
     def _init_idle_unload(self, idle_unload_s: float) -> None:
-        # One lock guards ``_process`` and the stream flag against the idle
-        # timer thread. Re-entrant because ``_ensure_worker`` reaps a dead
-        # worker through ``_shutdown_worker`` while holding it.
+        # ``_lock`` guards ``_process``, the stream flag and the in-flight
+        # count against the idle timer thread. It is never held across
+        # inference IPC, so ``start_stream`` on the hotkey thread cannot wait
+        # behind a transcription. Re-entrant because ``_ensure_worker`` reaps
+        # a dead worker through ``_shutdown_worker`` while holding it.
         self._lock = threading.RLock()
+        # Serialises request/response pairs on the worker's pipes. Only
+        # ``finalize`` takes it, and never while holding ``_lock``.
+        self._ipc_lock = threading.Lock()
+        # Transcriptions sent to the worker and not yet answered. Like an
+        # open stream, an in-flight transcription blocks idle unload.
+        self._inflight = 0
         self._idle_unload_s: float = idle_unload_s
         self._idle_timer: threading.Timer | None = None
         # Bumped on every arm/cancel so a timer that fired just before being
@@ -283,9 +291,18 @@ class WhisperGPUEngine:
         logger.info("Whisper GPU worker ready (pid=%d)", self._process.pid)
 
     def _arm_idle_timer(self) -> None:
-        """(Re)start the idle countdown; caller holds ``_lock``."""
+        """(Re)start the idle countdown; caller holds ``_lock``.
+
+        A no-op while a stream is open or a transcription is in flight: the
+        countdown restarts when the last of them finishes.
+        """
         self._cancel_idle_timer()
-        if self._idle_unload_s <= 0 or self._process is None:
+        if (
+            self._idle_unload_s <= 0
+            or self._process is None
+            or self._stream_started
+            or self._inflight
+        ):
             return
         timer = threading.Timer(
             self._idle_unload_s,
@@ -312,6 +329,7 @@ class WhisperGPUEngine:
             if (
                 generation != self._idle_generation
                 or self._stream_started
+                or self._inflight
                 or self._process is None
             ):
                 return
@@ -384,56 +402,74 @@ class WhisperGPUEngine:
         return []
 
     def finalize(self) -> TranscriptResult:
+        # Snapshot under the lock, run the IPC without it, then settle under
+        # it again. Holding ``_lock`` across inference would block a
+        # concurrent ``start_stream`` (the hotkey thread) for the whole
+        # transcription — up to the operation timeout on a hung worker.
         with self._lock:
-            was_streaming = self._stream_started
-            try:
-                return self._finalize_locked()
-            finally:
-                # Every completed (or failed) transcription restarts the idle
-                # countdown; a failure has already reaped the worker, so
-                # ``_arm_idle_timer`` is then a no-op.
-                if was_streaming:
-                    self._arm_idle_timer()
+            if not self._stream_started:
+                return TranscriptResult()
 
-    def _finalize_locked(self) -> TranscriptResult:
-        if not self._stream_started:
-            return TranscriptResult()
+            duration = self._audio_duration()
+            self._stream_started = False
 
-        duration = self._audio_duration()
-        self._stream_started = False
+            if not self._audio_buffer:
+                self._arm_idle_timer()
+                return TranscriptResult(duration=duration)
+            process = self._process
+            if process is None or process.poll() is not None:
+                self._shutdown_worker()
+                raise GPUWorkerError("GPU worker is unavailable")
 
-        if not self._audio_buffer:
-            return TranscriptResult(duration=duration)
-        if self._process is None or self._process.poll() is not None:
-            self._shutdown_worker()
-            raise GPUWorkerError("GPU worker is unavailable")
-
-        audio_bytes = bytes(self._audio_buffer)
-
-        logger.debug("Sending %.1fs audio to GPU worker...", duration)
+            audio_bytes = bytes(self._audio_buffer)
+            timeout_s = self._operation_timeout_s
+            self._inflight += 1
 
         try:
-            deadline = time.monotonic() + self._operation_timeout_s
-            # Send transcribe command + raw audio
+            return self._transcribe(process, audio_bytes, duration, timeout_s)
+        except Exception as exc:
+            with self._lock:
+                # Reap only the worker this request used; if it has already
+                # been replaced (or closed), the replacement is not at fault.
+                if self._process is process:
+                    self._shutdown_worker()
+            if isinstance(exc, GPUWorkerError):
+                raise
+            raise GPUWorkerError("failed to communicate with GPU worker") from exc
+        finally:
+            with self._lock:
+                self._inflight -= 1
+                # Restart the countdown unless a new stream has begun (or
+                # another request is still in flight); a no-op after a
+                # failure, which has already reaped the worker.
+                self._arm_idle_timer()
+
+    def _transcribe(
+        self,
+        process: subprocess.Popen,
+        audio_bytes: bytes,
+        duration: float,
+        timeout_s: float,
+    ) -> TranscriptResult:
+        """Send one transcription to *process* and parse its reply."""
+        logger.debug("Sending %.1fs audio to GPU worker...", duration)
+
+        with self._ipc_lock:
+            deadline = time.monotonic() + timeout_s
             _send_msg(
-                self._process.stdin,
+                process.stdin,
                 {"cmd": "transcribe", "audio_length": len(audio_bytes)},
                 deadline=deadline,
                 operation="inference request",
             )
             _write_all(
-                self._process.stdin,
+                process.stdin,
                 audio_bytes,
                 deadline=deadline,
                 operation="inference audio",
             )
-            msg = _recv_msg(self._process.stdout, deadline=deadline, operation="inference response")
-            result = _parse_result(msg, duration=duration)
-        except Exception as exc:
-            self._shutdown_worker()
-            if isinstance(exc, GPUWorkerError):
-                raise
-            raise GPUWorkerError("failed to communicate with GPU worker") from exc
+            msg = _recv_msg(process.stdout, deadline=deadline, operation="inference response")
+        result = _parse_result(msg, duration=duration)
 
         logger.debug(
             "GPU STT: %.1fs → %d segments, %d chars",
