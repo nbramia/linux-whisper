@@ -301,6 +301,25 @@ class TestProcessPipeline:
 
         result = await app._process_pipeline()
         assert result is None
+        # The stream opened at recording start is still closed (#60).
+        app._stt.reset.assert_called_once()
+        app._stt.finalize.assert_not_called()
+
+    async def test_stt_stream_is_reset_when_audio_processing_raises(self):
+        app = _make_app(_make_config(audio=AudioConfig(auto_gain=True)))
+        app._audio = MagicMock()
+        app._stt = MagicMock()
+
+        speech = np.random.randn(16000).astype(np.float32) * 0.5
+
+        async def _fake_chunks():
+            yield FakeAudioChunk(samples=speech, is_final=True)
+
+        app._audio.audio_chunks = _fake_chunks
+        with patch("linux_whisper.audio.apply_agc", side_effect=RuntimeError("agc")), \
+             pytest.raises(RuntimeError, match="agc"):
+            await app._process_pipeline()
+        app._stt.reset.assert_called_once()
 
     async def test_returns_none_on_empty_stt_result(self):
         app = _make_app(_make_config(audio=AudioConfig(auto_gain=False)))
@@ -1127,6 +1146,27 @@ class TestConfigReconstruction:
         assert app.config.stt.threads == 8
         assert app.config.stt.backend == "moonshine"
         assert app.config.stt.model == "moonshine-tiny"
+
+    async def test_model_change_preserves_gpu_idle_unload(self):
+        config = _make_config(
+            stt=STTConfig(
+                backend="whisper-cpp", model="whisper-large-v3-turbo", gpu_idle_unload_s=60
+            ),
+        )
+        app = _make_app(config)
+        app._loop = asyncio.get_running_loop()
+
+        with patch("linux_whisper.stt.engine.create_engine", return_value=MagicMock()), \
+             patch("builtins.open", MagicMock()), \
+             patch("yaml.dump"):
+            import linux_whisper.config as cfg_mod
+            mock_path_obj = MagicMock()
+            mock_path_obj.parent.mkdir = MagicMock()
+            with patch.object(cfg_mod, "CONFIG_PATH", mock_path_obj):
+                await app._handle_model_change("whisper-cpp", "distil-large-v3.5")
+
+        assert app.config.stt.gpu_idle_unload_s == 60
+        assert app.config.stt.model == "distil-large-v3.5"
 
 
 # ---------------------------------------------------------------------------
