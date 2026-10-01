@@ -271,13 +271,25 @@ elif mode == "malformed":
 elif mode == "silence":
     send({"status": "ok", "segments": [], "full_text": ""})
     recv()
+elif mode in ("serve", "slow_serve"):
+    # Answer every transcription with silence until shutdown or EOF;
+    # ``slow_serve`` takes half a second over each one.
+    while True:
+        if mode == "slow_serve":
+            time.sleep(0.5)
+        send({"status": "ok", "segments": [], "full_text": ""})
+        message = recv()
+        if message is None or message.get("cmd") != "transcribe":
+            break
+        stdin.read(message["audio_length"])
 """
 
 
-def _synthetic_gpu_engine():
+def _synthetic_gpu_engine(idle_unload_s: float = 0):
     from linux_whisper.stt.whisper_gpu import WhisperGPUEngine
 
     engine = object.__new__(WhisperGPUEngine)
+    engine._init_idle_unload(idle_unload_s)
     engine._model_path = Path("/synthetic/model")
     engine._threads = 1
     engine._process = None
@@ -524,6 +536,7 @@ class TestGPUWorkerIPC:
                 os.close(self._input_read)
 
         engine = object.__new__(WhisperGPUEngine)
+        engine._init_idle_unload(0)
         engine._operation_timeout_s = 1
         engine._stream_started = True
         engine._audio_buffer = bytearray(b"\x00\x00" * 10)
@@ -552,6 +565,339 @@ class TestGPUWorkerIPC:
         engine._process = None
         with pytest.raises(ValueError, match="positive"):
             engine.set_operation_timeout(0)
+
+
+class _ManualTimer:
+    """Stand-in for ``threading.Timer`` that only fires when a test says so.
+
+    ``fire`` runs the callback even after ``cancel`` — exactly what a real
+    timer does when it expires just before being cancelled — so tests can
+    replay that late-fire interleaving deterministically.
+    """
+
+    def __init__(self, interval, function, args=()):
+        self.interval = interval
+        self.function = function
+        self.args = args
+        self.daemon = False
+        self.name = ""
+        self.started = False
+        self.cancelled = False
+
+    def start(self):
+        self.started = True
+
+    def cancel(self):
+        self.cancelled = True
+
+    def fire(self):
+        self.function(*self.args)
+
+
+@pytest.fixture
+def manual_timers(monkeypatch):
+    import linux_whisper.stt.whisper_gpu as whisper_gpu
+
+    timers: list[_ManualTimer] = []
+
+    def make(interval, function, args=()):
+        timer = _ManualTimer(interval, function, args)
+        timers.append(timer)
+        return timer
+
+    monkeypatch.setattr(whisper_gpu.threading, "Timer", make)
+    return timers
+
+
+def _transcribe_silence(engine) -> None:
+    engine.start_stream()
+    engine.feed_audio(b"\x00\x00" * 100)
+    assert engine.finalize().full_text == ""
+    engine.reset()
+
+
+def _wait_until(predicate, timeout: float = 3.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
+
+
+class TestGPUIdleUnload:
+    """Idle unload of the GPU worker (#60), using the synthetic worker."""
+
+    def test_idle_worker_is_unloaded_and_logged(self, monkeypatch, caplog):
+        engine = _synthetic_gpu_engine(idle_unload_s=0.2)
+        with _synthetic_gpu_workers(monkeypatch, "serve") as processes:
+            with caplog.at_level("INFO", logger="linux_whisper.stt.whisper_gpu"):
+                _transcribe_silence(engine)
+                assert processes[0].poll() is None
+
+                assert _wait_until(lambda: engine._process is None)
+                assert processes[0].wait(timeout=2) is not None
+
+            unload_lines = [r for r in caplog.records if "idle" in r.getMessage().lower()]
+            assert len(unload_lines) == 1
+            assert unload_lines[0].levelname == "INFO"
+            assert "0.2s idle" in unload_lines[0].getMessage()
+
+    def test_unloaded_worker_reloads_on_next_stream(self, monkeypatch, manual_timers):
+        engine = _synthetic_gpu_engine(idle_unload_s=1200)
+        with _synthetic_gpu_workers(monkeypatch, "serve", "serve") as processes:
+            _transcribe_silence(engine)
+            manual_timers[-1].fire()
+            assert engine._process is None
+            assert processes[0].wait(timeout=2) is not None
+
+            _transcribe_silence(engine)
+            assert len(processes) == 2
+            assert engine._process is processes[1]
+            assert processes[1].poll() is None
+            engine.close()
+
+    def test_stream_in_progress_is_never_unloaded(self, monkeypatch):
+        engine = _synthetic_gpu_engine(idle_unload_s=0.1)
+        with _synthetic_gpu_workers(monkeypatch, "serve") as processes:
+            _transcribe_silence(engine)
+            engine.start_stream()
+            engine.feed_audio(b"\x00\x00" * 100)
+            time.sleep(0.5)  # the stream outlasts the idle period several times
+
+            assert engine._process is processes[0]
+            assert processes[0].poll() is None
+            assert engine.finalize().full_text == ""
+            engine.close()
+
+    def test_timer_that_fires_after_stream_start_is_a_no_op(self, monkeypatch, manual_timers):
+        engine = _synthetic_gpu_engine(idle_unload_s=1200)
+        with _synthetic_gpu_workers(monkeypatch, "serve") as processes:
+            _transcribe_silence(engine)
+            expired = manual_timers[-1]
+            engine.start_stream()
+            assert expired.cancelled
+
+            expired.fire()
+            assert engine._process is processes[0]
+            engine.feed_audio(b"\x00\x00" * 100)
+            assert engine.finalize().full_text == ""
+            engine.close()
+
+    def test_each_transcription_restarts_the_countdown(self, monkeypatch, manual_timers):
+        engine = _synthetic_gpu_engine(idle_unload_s=1200)
+        with _synthetic_gpu_workers(monkeypatch, "serve") as processes:
+            _transcribe_silence(engine)
+            first = manual_timers[-1]
+            # A second transcription just before the first countdown expires
+            # replaces it with a full-length one.
+            _transcribe_silence(engine)
+            second = manual_timers[-1]
+            assert second is not first
+            assert first.cancelled and not second.cancelled
+            assert second.interval == 1200
+
+            first.fire()  # the old deadline (t = idle) passes: still loaded
+            assert engine._process is processes[0]
+            second.fire()  # the new deadline (t = 2 * idle - 1) unloads
+            assert engine._process is None
+            assert processes[0].wait(timeout=2) is not None
+
+    def test_zero_disables_idle_unload(self, monkeypatch, manual_timers):
+        engine = _synthetic_gpu_engine(idle_unload_s=0)
+        with _synthetic_gpu_workers(monkeypatch, "serve") as processes:
+            _transcribe_silence(engine)
+            assert manual_timers == []
+            assert engine._idle_timer is None
+            assert engine._process is processes[0]
+            engine.close()
+
+    @pytest.mark.parametrize("unload_first", [True, False])
+    def test_unload_racing_start_stream_leaves_one_working_worker(
+        self, monkeypatch, manual_timers, unload_first
+    ):
+        import threading
+
+        engine = _synthetic_gpu_engine(idle_unload_s=1200)
+        with _synthetic_gpu_workers(monkeypatch, "serve", "serve") as processes:
+            _transcribe_silence(engine)
+            expired = manual_timers[-1]
+
+            firing = threading.Thread(target=expired.fire)
+            if unload_first:
+                firing.start()
+                firing.join(timeout=2)
+                engine.start_stream()
+            else:
+                # The timer thread wakes while start_stream holds the lock and
+                # only gets it once the stream has begun.
+                with engine._lock:
+                    firing.start()
+                    time.sleep(0.05)
+                    assert firing.is_alive()
+                    engine.start_stream()
+                firing.join(timeout=2)
+            assert not firing.is_alive()
+
+            engine.feed_audio(b"\x00\x00" * 100)
+            assert engine.finalize().full_text == ""
+            live = [p for p in processes if p.poll() is None]
+            assert live == [engine._process]
+            assert len(processes) == (2 if unload_first else 1)
+            engine.close()
+            assert all(p.wait(timeout=2) is not None for p in processes)
+
+    def test_abandoned_stream_is_unloaded(self, monkeypatch, manual_timers):
+        engine = _synthetic_gpu_engine(idle_unload_s=1200)
+        with _synthetic_gpu_workers(monkeypatch, "serve") as processes:
+            engine.start_stream()
+            engine.feed_audio(b"\x00\x00" * 100)
+            engine.reset()  # the stream is dropped without a finalize()
+
+            manual_timers[-1].fire()
+            assert engine._process is None
+            assert processes[0].wait(timeout=2) is not None
+
+    def test_start_stream_does_not_wait_for_inflight_finalize(
+        self, monkeypatch, manual_timers
+    ):
+        import threading
+
+        engine = _synthetic_gpu_engine(idle_unload_s=1200)
+        engine._operation_timeout_s = 5.0
+        with _synthetic_gpu_workers(monkeypatch, "slow_serve") as processes:
+            engine.start_stream()
+            engine.feed_audio(b"\x00\x00" * 100)
+            results = []
+            finalizing = threading.Thread(target=lambda: results.append(engine.finalize()))
+            finalizing.start()
+            assert _wait_until(lambda: engine._inflight == 1)
+
+            # The hotkey thread starts the next recording mid-inference.
+            starting = threading.Thread(target=engine.start_stream)
+            starting.start()
+            starting.join(timeout=0.2)
+            assert not starting.is_alive()
+            assert finalizing.is_alive()  # the 0.5s transcription is still running
+
+            # An idle fire during the transcription must not unload its worker.
+            engine._unload_if_idle(engine._idle_generation)
+            assert engine._process is processes[0]
+
+            finalizing.join(timeout=3)
+            assert results[0].full_text == ""
+            # The new stream is open, so the first finalize arms no countdown.
+            assert engine._idle_timer is None
+
+            engine.feed_audio(b"\x00\x00" * 100)
+            assert engine.finalize().full_text == ""
+            assert engine._idle_timer is not None
+            assert engine._process is processes[0]
+            engine.close()
+
+    def test_failed_finalize_spares_a_replacement_worker(self, monkeypatch, manual_timers):
+        import threading
+
+        from linux_whisper.stt.whisper_gpu import GPUWorkerError
+
+        engine = _synthetic_gpu_engine(idle_unload_s=1200)
+        engine._operation_timeout_s = 5.0
+        with _synthetic_gpu_workers(
+            monkeypatch, "inference_hang_kill", "serve"
+        ) as processes:
+            engine.start_stream()
+            engine.feed_audio(b"\x00\x00" * 100)
+            errors = []
+
+            def run_finalize():
+                try:
+                    engine.finalize()
+                except GPUWorkerError as exc:
+                    errors.append(exc)
+
+            finalizing = threading.Thread(target=run_finalize)
+            finalizing.start()
+            assert _wait_until(lambda: engine._inflight == 1)
+
+            # Holding the lock orders the steps: the first worker dies
+            # mid-inference and the next stream replaces it before the
+            # failed finalize can settle.
+            with engine._lock:
+                processes[0].kill()
+                processes[0].wait(timeout=2)
+                engine.start_stream()
+                assert engine._process is processes[1]
+            finalizing.join(timeout=3)
+            assert not finalizing.is_alive()
+
+            assert len(errors) == 1
+            assert engine._process is processes[1]
+            assert processes[1].poll() is None
+            engine.feed_audio(b"\x00\x00" * 100)
+            assert engine.finalize().full_text == ""
+            engine.close()
+            assert processes[1].wait(timeout=2) is not None
+
+    def test_discarded_engine_with_pending_timer_stops_its_worker(
+        self, monkeypatch, manual_timers
+    ):
+        import gc
+
+        engine = _synthetic_gpu_engine(idle_unload_s=1200)
+        with _synthetic_gpu_workers(monkeypatch, "serve") as processes:
+            _transcribe_silence(engine)
+            pending = manual_timers[-1]
+            assert not pending.cancelled
+
+            del engine
+            gc.collect()
+            assert processes[0].wait(timeout=2) is not None
+            pending.fire()  # the timer outlives the engine: a silent no-op
+
+    def test_close_stops_timer_and_worker(self, monkeypatch):
+        import threading
+
+        engine = _synthetic_gpu_engine(idle_unload_s=60)
+        with _synthetic_gpu_workers(monkeypatch, "serve") as processes:
+            _transcribe_silence(engine)
+            timer = engine._idle_timer
+            assert timer is not None and timer.is_alive()
+
+            engine.close()
+            timer.join(timeout=2)
+            assert not timer.is_alive()
+            assert engine._idle_timer is None
+            assert engine._process is None
+            assert processes[0].wait(timeout=2) is not None
+            assert not any(
+                t.name == "whisper-gpu-idle-unload" and t.is_alive()
+                for t in threading.enumerate()
+            )
+
+    def test_config_value_reaches_engine(self, monkeypatch):
+        from linux_whisper.stt.whisper_gpu import WhisperGPUEngine
+
+        monkeypatch.setattr(
+            WhisperGPUEngine, "_resolve_model_path", staticmethod(lambda _: Path("/m"))
+        )
+        cfg = Config.from_dict({"stt": {"device": "rocm", "gpu_idle_unload_s": 45}})
+        engine = WhisperGPUEngine(cfg)
+        assert engine._idle_unload_s == 45
+        assert WhisperGPUEngine(Config())._idle_unload_s == 1200
+
+
+class TestGPUIdleUnloadConfig:
+    def test_default_is_twenty_minutes(self):
+        assert STTConfig().gpu_idle_unload_s == 1200
+        assert Config().validate() == []
+
+    @pytest.mark.parametrize("value", [0, 1, 1200])
+    def test_non_negative_is_valid(self, value):
+        assert Config.from_dict({"stt": {"gpu_idle_unload_s": value}}).validate() == []
+
+    def test_negative_is_rejected(self):
+        errors = Config.from_dict({"stt": {"gpu_idle_unload_s": -1}}).validate()
+        assert any("gpu_idle_unload_s" in e for e in errors)
 
 
 class TestMoonshineEngine:

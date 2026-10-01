@@ -163,7 +163,7 @@ Referenced during planning to assess whether a change is safe.
 | **Total (simple)** | **~340ms** | **~2.6s** |
 | **Total (with LLM)** | **~490ms** | **~2.9s** |
 
-The default STT backend is whisper.cpp large-v3-turbo on the ROCm GPU, in a subprocess worker (the pywhispercpp/onnxruntime `libamdhip64` conflict is why).
+The default STT backend is whisper.cpp large-v3-turbo on the ROCm GPU, in a subprocess worker (the pywhispercpp/onnxruntime `libamdhip64` conflict is why). The worker is stopped after `stt.gpu_idle_unload_s` idle seconds (default 1200, `0` = never) to free its VRAM and SDMA queue, so the first dictation after a long idle pays a ~4s model reload.
 
 **Benchmark corpora do not decide the default; recorded dictation does.** Parakeet TDT v3 beat whisper on LibriSpeech (0.54% vs 1.48% WER, 191ms vs 285ms p50) and was made default on that basis — then lost 49.3% to 21.5% on 28 real dictation clips. LibriSpeech contains no digits, symbols, or filenames, so it never tested inverse text normalisation, which is most of what dictation is. Always confirm an STT change against `--fixtures-dir` recordings before touching the default.
 

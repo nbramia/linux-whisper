@@ -335,7 +335,12 @@ class App:
         logger.info("Switching STT engine to %s/%s...", backend, model)
 
         # Update in-memory config
-        new_stt = STTConfig(backend=backend, model=model, threads=self.config.stt.threads)
+        new_stt = STTConfig(
+            backend=backend,
+            model=model,
+            threads=self.config.stt.threads,
+            gpu_idle_unload_s=self.config.stt.gpu_idle_unload_s,
+        )
         self.config = Config(
             hotkey=self.config.hotkey,
             mode=self.config.mode,
@@ -531,42 +536,49 @@ class App:
         if not self._audio or not self._stt:
             return None
 
-        # Stop recording — this emits final audio chunks into the queue
-        self._audio.stop_recording()
+        # The stream opened by start_stream() must always be closed: the
+        # early returns below (a short tap, empty audio) and any exception
+        # would otherwise leave it open, and an open stream pins the GPU
+        # worker past its idle-unload countdown. reset() after finalize()
+        # is a no-op for the engine's stream state.
+        try:
+            # Stop recording — this emits final audio chunks into the queue
+            self._audio.stop_recording()
 
-        # Collect all audio chunks from this recording session
-        audio_segments: list[np.ndarray] = []
-        async for chunk in self._audio.audio_chunks():
-            if chunk.samples is not None and len(chunk.samples) > 0:
-                audio_segments.append(chunk.samples)
-            if chunk.is_final:
-                break
+            # Collect all audio chunks from this recording session
+            audio_segments: list[np.ndarray] = []
+            async for chunk in self._audio.audio_chunks():
+                if chunk.samples is not None and len(chunk.samples) > 0:
+                    audio_segments.append(chunk.samples)
+                if chunk.is_final:
+                    break
 
-        if not audio_segments:
-            return None
+            if not audio_segments:
+                return None
 
-        # Concatenate all audio
-        audio_float = np.concatenate(audio_segments)
-        if len(audio_float) == 0:
-            return None
+            # Concatenate all audio
+            audio_float = np.concatenate(audio_segments)
+            if len(audio_float) == 0:
+                return None
 
-        duration = len(audio_float) / 16000
-        logger.info("Recording: %.1fs audio (%d samples)", duration, len(audio_float))
+            duration = len(audio_float) / 16000
+            logger.info("Recording: %.1fs audio (%d samples)", duration, len(audio_float))
 
-        # Apply automatic gain control for quiet/whispered speech
-        if self.config.audio.auto_gain:
-            from linux_whisper.audio import apply_agc
+            # Apply automatic gain control for quiet/whispered speech
+            if self.config.audio.auto_gain:
+                from linux_whisper.audio import apply_agc
 
-            audio_float = apply_agc(audio_float)
+                audio_float = apply_agc(audio_float)
 
-        # Convert float32 [-1.0, 1.0] to int16 PCM bytes
-        audio_int16 = (audio_float * 32767).astype(np.int16)
-        audio_bytes = audio_int16.tobytes()
+            # Convert float32 [-1.0, 1.0] to int16 PCM bytes
+            audio_int16 = (audio_float * 32767).astype(np.int16)
+            audio_bytes = audio_int16.tobytes()
 
-        # Feed audio to STT
-        self._stt.feed_audio(audio_bytes)
-        result = self._stt.finalize()
-        self._stt.reset()
+            # Feed audio to STT
+            self._stt.feed_audio(audio_bytes)
+            result = self._stt.finalize()
+        finally:
+            self._stt.reset()
 
         if not result or not result.full_text.strip():
             return None

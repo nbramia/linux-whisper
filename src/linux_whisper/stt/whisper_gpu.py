@@ -2,7 +2,9 @@
 
 Runs pywhispercpp in a completely separate process (subprocess.Popen)
 to avoid the ROCm shared-library conflict with onnxruntime.  The worker
-loads the model once and stays warm between transcriptions.
+loads the model once and stays warm between transcriptions, until it has
+been idle for ``stt.gpu_idle_unload_s`` seconds; it is then stopped to release
+its GPU memory and SDMA queue, and the next stream starts a fresh worker.
 
 Communication uses length-prefixed JSON over stdin/stdout pipes.
 """
@@ -16,7 +18,9 @@ import select
 import struct
 import subprocess
 import sys
+import threading
 import time
+import weakref
 from math import isfinite
 from pathlib import Path
 
@@ -166,6 +170,13 @@ def _recv_msg(pipe, *, deadline: float, operation: str) -> dict:
     return msg
 
 
+def _idle_unload_callback(engine_ref: weakref.ref[WhisperGPUEngine], generation: int) -> None:
+    """Timer entry point that does not keep a discarded engine alive."""
+    engine = engine_ref()
+    if engine is not None:
+        engine._unload_if_idle(generation)
+
+
 class WhisperGPUEngine:
     """whisper.cpp STT engine with GPU acceleration via process isolation.
 
@@ -184,13 +195,34 @@ class WhisperGPUEngine:
         self._stream_started = False
         self._audio_buffer = bytearray()
         self._stream_start_time: float = 0.0
+        self._init_idle_unload(config.stt.gpu_idle_unload_s)
 
         logger.info(
-            "WhisperGPUEngine created: model=%s, threads=%d, path=%s",
+            "WhisperGPUEngine created: model=%s, threads=%d, idle_unload=%ss, path=%s",
             self._model_name,
             self._threads,
+            self._idle_unload_s,
             self._model_path,
         )
+
+    def _init_idle_unload(self, idle_unload_s: float) -> None:
+        # ``_lock`` guards ``_process``, the stream flag and the in-flight
+        # count against the idle timer thread. It is never held across
+        # inference IPC, so ``start_stream`` on the hotkey thread cannot wait
+        # behind a transcription. Re-entrant because ``_ensure_worker`` reaps
+        # a dead worker through ``_shutdown_worker`` while holding it.
+        self._lock = threading.RLock()
+        # Serialises request/response pairs on the worker's pipes. Only
+        # ``finalize`` takes it, and never while holding ``_lock``.
+        self._ipc_lock = threading.Lock()
+        # Transcriptions sent to the worker and not yet answered. Like an
+        # open stream, an in-flight transcription blocks idle unload.
+        self._inflight = 0
+        self._idle_unload_s: float = idle_unload_s
+        self._idle_timer: threading.Timer | None = None
+        # Bumped on every arm/cancel so a timer that fired just before being
+        # cancelled recognises itself as stale once it gets the lock.
+        self._idle_generation = 0
 
     @staticmethod
     def _resolve_model_path(model_name: str) -> Path:
@@ -258,7 +290,58 @@ class WhisperGPUEngine:
 
         logger.info("Whisper GPU worker ready (pid=%d)", self._process.pid)
 
+    def _arm_idle_timer(self) -> None:
+        """(Re)start the idle countdown; caller holds ``_lock``.
+
+        A no-op while a stream is open or a transcription is in flight: the
+        countdown restarts when the last of them finishes.
+        """
+        self._cancel_idle_timer()
+        if (
+            self._idle_unload_s <= 0
+            or self._process is None
+            or self._stream_started
+            or self._inflight
+        ):
+            return
+        timer = threading.Timer(
+            self._idle_unload_s,
+            _idle_unload_callback,
+            args=(weakref.ref(self), self._idle_generation),
+        )
+        timer.daemon = True
+        timer.name = "whisper-gpu-idle-unload"
+        self._idle_timer = timer
+        timer.start()
+
+    def _cancel_idle_timer(self) -> None:
+        """Stop any pending idle countdown; caller holds ``_lock``."""
+        lock = getattr(self, "_lock", None)
+        if lock is None:  # partially constructed engine
+            return
+        self._idle_generation += 1
+        timer, self._idle_timer = self._idle_timer, None
+        if timer is not None:
+            timer.cancel()
+
+    def _unload_if_idle(self, generation: int) -> None:
+        with self._lock:
+            if (
+                generation != self._idle_generation
+                or self._stream_started
+                or self._inflight
+                or self._process is None
+            ):
+                return
+            logger.info(
+                "Unloading idle whisper.cpp GPU worker (pid=%d) after %ss idle",
+                self._process.pid,
+                self._idle_unload_s,
+            )
+            self._shutdown_worker()
+
     def _shutdown_worker(self) -> None:
+        self._cancel_idle_timer()
         process = getattr(self, "_process", None)
         self._process = None
         if process is None:
@@ -299,10 +382,18 @@ class WhisperGPUEngine:
         self._operation_timeout_s = timeout_s
 
     def start_stream(self) -> None:
-        self._ensure_worker()
-        self._audio_buffer = bytearray()
-        self._stream_started = True
-        self._stream_start_time = time.monotonic()
+        with self._lock:
+            self._cancel_idle_timer()
+            # Mark the stream before (re)loading so an idle unload can never
+            # act on this worker, even if startup raises part-way through.
+            self._stream_started = True
+            try:
+                self._ensure_worker()
+            except BaseException:
+                self._stream_started = False
+                raise
+            self._audio_buffer = bytearray()
+            self._stream_start_time = time.monotonic()
 
     def feed_audio(self, chunk: bytes) -> list[TranscriptSegment]:
         if not self._stream_started:
@@ -311,44 +402,74 @@ class WhisperGPUEngine:
         return []
 
     def finalize(self) -> TranscriptResult:
-        if not self._stream_started:
-            return TranscriptResult()
+        # Snapshot under the lock, run the IPC without it, then settle under
+        # it again. Holding ``_lock`` across inference would block a
+        # concurrent ``start_stream`` (the hotkey thread) for the whole
+        # transcription — up to the operation timeout on a hung worker.
+        with self._lock:
+            if not self._stream_started:
+                return TranscriptResult()
 
-        duration = self._audio_duration()
-        self._stream_started = False
+            duration = self._audio_duration()
+            self._stream_started = False
 
-        if not self._audio_buffer:
-            return TranscriptResult(duration=duration)
-        if self._process is None or self._process.poll() is not None:
-            self._shutdown_worker()
-            raise GPUWorkerError("GPU worker is unavailable")
+            if not self._audio_buffer:
+                self._arm_idle_timer()
+                return TranscriptResult(duration=duration)
+            process = self._process
+            if process is None or process.poll() is not None:
+                self._shutdown_worker()
+                raise GPUWorkerError("GPU worker is unavailable")
 
-        audio_bytes = bytes(self._audio_buffer)
-
-        logger.debug("Sending %.1fs audio to GPU worker...", duration)
+            audio_bytes = bytes(self._audio_buffer)
+            timeout_s = self._operation_timeout_s
+            self._inflight += 1
 
         try:
-            deadline = time.monotonic() + self._operation_timeout_s
-            # Send transcribe command + raw audio
+            return self._transcribe(process, audio_bytes, duration, timeout_s)
+        except Exception as exc:
+            with self._lock:
+                # Reap only the worker this request used; if it has already
+                # been replaced (or closed), the replacement is not at fault.
+                if self._process is process:
+                    self._shutdown_worker()
+            if isinstance(exc, GPUWorkerError):
+                raise
+            raise GPUWorkerError("failed to communicate with GPU worker") from exc
+        finally:
+            with self._lock:
+                self._inflight -= 1
+                # Restart the countdown unless a new stream has begun (or
+                # another request is still in flight); a no-op after a
+                # failure, which has already reaped the worker.
+                self._arm_idle_timer()
+
+    def _transcribe(
+        self,
+        process: subprocess.Popen,
+        audio_bytes: bytes,
+        duration: float,
+        timeout_s: float,
+    ) -> TranscriptResult:
+        """Send one transcription to *process* and parse its reply."""
+        logger.debug("Sending %.1fs audio to GPU worker...", duration)
+
+        with self._ipc_lock:
+            deadline = time.monotonic() + timeout_s
             _send_msg(
-                self._process.stdin,
+                process.stdin,
                 {"cmd": "transcribe", "audio_length": len(audio_bytes)},
                 deadline=deadline,
                 operation="inference request",
             )
             _write_all(
-                self._process.stdin,
+                process.stdin,
                 audio_bytes,
                 deadline=deadline,
                 operation="inference audio",
             )
-            msg = _recv_msg(self._process.stdout, deadline=deadline, operation="inference response")
-            result = _parse_result(msg, duration=duration)
-        except Exception as exc:
-            self._shutdown_worker()
-            if isinstance(exc, GPUWorkerError):
-                raise
-            raise GPUWorkerError("failed to communicate with GPU worker") from exc
+            msg = _recv_msg(process.stdout, deadline=deadline, operation="inference response")
+        result = _parse_result(msg, duration=duration)
 
         logger.debug(
             "GPU STT: %.1fs → %d segments, %d chars",
@@ -359,8 +480,21 @@ class WhisperGPUEngine:
         return result
 
     def reset(self) -> None:
-        self._audio_buffer = bytearray()
-        self._stream_started = False
+        with self._lock:
+            self._audio_buffer = bytearray()
+            was_streaming = self._stream_started
+            self._stream_started = False
+            if was_streaming:
+                self._arm_idle_timer()
+
+    def close(self) -> None:
+        """Stop the idle timer and the worker. Safe to call more than once."""
+        lock = getattr(self, "_lock", None)
+        if lock is None:
+            self._shutdown_worker()
+            return
+        with lock:
+            self._shutdown_worker()
 
     def __del__(self) -> None:
-        self._shutdown_worker()
+        self.close()
