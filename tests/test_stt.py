@@ -795,6 +795,49 @@ class TestGPUIdleUnload:
             assert engine._process is processes[0]
             engine.close()
 
+    def test_failed_finalize_spares_a_replacement_worker(self, monkeypatch, manual_timers):
+        import threading
+
+        from linux_whisper.stt.whisper_gpu import GPUWorkerError
+
+        engine = _synthetic_gpu_engine(idle_unload_s=1200)
+        engine._operation_timeout_s = 5.0
+        with _synthetic_gpu_workers(
+            monkeypatch, "inference_hang_kill", "serve"
+        ) as processes:
+            engine.start_stream()
+            engine.feed_audio(b"\x00\x00" * 100)
+            errors = []
+
+            def run_finalize():
+                try:
+                    engine.finalize()
+                except GPUWorkerError as exc:
+                    errors.append(exc)
+
+            finalizing = threading.Thread(target=run_finalize)
+            finalizing.start()
+            assert _wait_until(lambda: engine._inflight == 1)
+
+            # Holding the lock orders the steps: the first worker dies
+            # mid-inference and the next stream replaces it before the
+            # failed finalize can settle.
+            with engine._lock:
+                processes[0].kill()
+                processes[0].wait(timeout=2)
+                engine.start_stream()
+                assert engine._process is processes[1]
+            finalizing.join(timeout=3)
+            assert not finalizing.is_alive()
+
+            assert len(errors) == 1
+            assert engine._process is processes[1]
+            assert processes[1].poll() is None
+            engine.feed_audio(b"\x00\x00" * 100)
+            assert engine.finalize().full_text == ""
+            engine.close()
+            assert processes[1].wait(timeout=2) is not None
+
     def test_discarded_engine_with_pending_timer_stops_its_worker(
         self, monkeypatch, manual_timers
     ):
