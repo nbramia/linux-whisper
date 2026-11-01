@@ -4,7 +4,7 @@ Measures whether a model change is actually an improvement. Every model swap in
 the pipeline is gated on a before/after run from this harness.
 
 This code is **not** part of `pytest tests/`. It loads real models and real
-audio, which the CI rules in `CLAUDE.md` forbid. Only the pure scoring functions
+audio, which the CI rules in `AGENTS.md` forbid. Only the pure scoring functions
 in `metrics.py` are unit-tested (`tests/test_benchmarks.py`).
 
 ## Quick start

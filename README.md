@@ -431,7 +431,7 @@ ruff format src tests
 
 This project uses a [Claude Code](https://claude.ai/claude-code) agent framework for development. The agent can autonomously plan, implement, test, review, and merge changes through an orchestrated skill system with explicit escalation rules for safety-critical areas of the codebase.
 
-See [CLAUDE.md](CLAUDE.md) for the agent operating rules and [.claude/skills/](.claude/skills/) for the skill definitions.
+See [AGENTS.md](AGENTS.md) for the agent operating rules and [.claude/skills/](.claude/skills/) for the skill definitions.
 
 ## Technical Decisions
 

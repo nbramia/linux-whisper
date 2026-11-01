@@ -2,7 +2,7 @@
 
 Scores the real pipeline — real models, real audio — and writes a JSON result
 that can be diffed against a committed baseline.  Deliberately outside the
-default pytest run: ``CLAUDE.md`` requires CI tests to mock every model, and
+default pytest run: ``AGENTS.md`` requires CI tests to mock every model, and
 this does the opposite on purpose.
 
 Usage::

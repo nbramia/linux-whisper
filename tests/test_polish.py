@@ -157,7 +157,7 @@ class TestPhraseRemovalTokenBoundaries:
         # R2 (MAJOR): the old re-split-the-prefix-per-match approach was
         # O(n^2). 2001 tokens ("you know" x1000 + "done") took 35.7ms on the
         # buggy branch against 9.9ms on main — over the stage 4a latency
-        # budget in CLAUDE.md (< 15ms). Assert both correctness and that the
+        # budget in AGENTS.md (< 15ms). Assert both correctness and that the
         # pass is fast enough to stay well inside budget, so a future
         # regression back to O(n^2) fails loudly instead of silently
         # returning (the note that shipped this test).
@@ -172,7 +172,7 @@ class TestPhraseRemovalTokenBoundaries:
         assert result == "done"
         assert elapsed_ms < 15.0, (
             f"_remove_fillers took {elapsed_ms:.2f}ms on 2001 tokens — "
-            "stage 4a budget is < 15ms (CLAUDE.md)"
+            "stage 4a budget is < 15ms (AGENTS.md)"
         )
 
 
