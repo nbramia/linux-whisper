@@ -644,9 +644,15 @@ def _patch_inodes(monkeypatch, devices):
             raise OSError(2, "No such file or directory")
         return _St(dev.node_ino)
 
-    monkeypatch.setattr(hk.os, "fstat", fake_fstat)
-    monkeypatch.setattr(hk.os, "stat", fake_stat)
-    assert _os is not None
+    # Replace `os` for the hotkey module only: pytest itself calls os.fstat during a test.
+    class _FakeOs:
+        fstat = staticmethod(fake_fstat)
+        stat = staticmethod(fake_stat)
+
+        def __getattr__(self, name):
+            return getattr(_os, name)
+
+    monkeypatch.setattr(hk, "os", _FakeOs())
 
 
 class TestRescanStaleHandles:
