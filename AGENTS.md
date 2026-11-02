@@ -96,33 +96,13 @@ The agent can autonomously plan, implement, test, review, and merge changes. It 
 
 ## Skill System
 
-Development is driven by an orchestrated skill system. The `/implement` skill coordinates the full lifecycle:
-
-```
-/implement (orchestrator — does NOT write code itself)
-  |
-  |-- /implement-plan    Phase 1: Explore codebase, write plan with risk assessment
-  |-- /implement-code    Phase 2: Branch, implement, test, lint, open PR
-  |-- review             Phase 3: Three passes — correctness, testing, architecture
-  |-- /implement-address Phase 3b: Fix findings (can push back with justification)
-  \-- /merge-pr          Phase 4: Pre-merge checks, squash merge, cleanup
-```
-
-Review is three separate passes:
-1. **Correctness** — Does it do what the issue asks? Edge cases? Error paths?
-2. **Testing** — Adequate coverage? Testing behavior not implementation? Appropriate markers?
-3. **Architecture** — Follows project patterns? Right module? Coupling? Latency impact?
-
-The address skill can **decline review findings** with justification — it has engineering judgment, not just blind compliance. Valid pushback: latency budget would be violated, project patterns differ from the suggestion, test would require real hardware.
-
-Sub-skills run in forked agent contexts (own working memory). Max 3 review/address iterations before escalating.
+`/implement` takes a change from request to merged: subagents build it, another model tries to break it, it gets verified for real, and `ship <pr>` lands it.
 
 ### Standalone skills
 
 | Skill | Purpose |
 |-------|---------|
 | `/draft-issue` | Create well-structured issues optimized for `/implement` |
-| `/pr-check` | Validate a PR against project standards before review |
 | `/mine-for-ideas` | Analyze a topic grounded in architecture constraints |
 | `/catchup` | Synthesize recent PR/commit activity |
 | `/standup` | Daily summary: shipped, in progress, blocked, next |
