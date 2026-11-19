@@ -146,6 +146,10 @@ class LLMCorrector:
         # Set when a load raised: retrying on every recording start would
         # re-run a failing multi-second GPU load each time.
         self._load_failed = False
+        # A model ``close`` dropped while an inference was still using it.
+        # The last in-flight inference closes it, never the closing thread,
+        # so llama.cpp is not freed under a running worker.
+        self._close_after_inflight: Any | None = None
         self._idle_unload_s: float = self._config.llm_idle_unload_s
         self._idle_timer: threading.Timer | None = None
         # Bumped on every arm/cancel so a timer that fired just before being
@@ -302,27 +306,35 @@ class LLMCorrector:
         done.wait(timeout)
         return self.loaded
 
-    def _ensure_loaded(self) -> bool:
-        """Make sure a load is under way and wait up to the timeout for it."""
+    def _ensure_loaded(self, timeout: float) -> bool:
+        """Make sure a load is under way and wait up to *timeout* seconds for it."""
         if self.loaded:
             return True
         if not self.preload():
             return False
-        if self.wait_until_loaded(self._timeout_s):
+        if self.wait_until_loaded(timeout):
             return True
         logger.warning(
             "LLM model still loading after %.0f ms — returning input unchanged",
-            self._timeout_s * 1000,
+            timeout * 1000,
         )
         return False
 
     def close(self) -> None:
-        """Stop the idle timer and release the model. Safe to call more than once."""
+        """Stop the idle timer and release the model. Safe to call more than once.
+
+        If an inference is still running — including one whose caller already
+        gave up on the timeout — the model is only dropped here and is closed
+        by that inference when it finishes.
+        """
         with self._lock:
             self._closed = True
             self._cancel_idle_timer()
             model, self._model = self._model, None
             self._loaded = False
+            if model is not None and self._inflight:
+                self._close_after_inflight = model
+                model = None
         if model is not None:
             self._close_model(model)
 
@@ -388,10 +400,11 @@ class LLMCorrector:
     def process(self, text: str, app_context: str | None = None) -> str:
         """Run LLM correction on *text*.
 
-        Uses the preloaded model, or waits up to the timeout for a load in
-        progress (starting one if none is).  Returns the original text
-        unchanged if the model isn't ready in time, inference times out, or
-        the output looks hallucinated.
+        Uses the preloaded model, or waits for a load in progress (starting
+        one if none is).  Waiting for the load and the inference share one
+        deadline of ``_timeout_s``.  Returns the original text unchanged if
+        the model isn't ready in time, inference runs out the remaining time,
+        or the output looks hallucinated.
 
         Parameters
         ----------
@@ -402,12 +415,22 @@ class LLMCorrector:
         if not text or not text.strip():
             return text
 
-        if not self._ensure_loaded():
+        deadline = time.monotonic() + self._timeout_s
+        if not self._ensure_loaded(self._timeout_s):
             logger.debug("LLM not available — returning text unchanged")
             return text
 
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            logger.warning(
+                "LLM load used the whole %.0f ms budget — returning input unchanged",
+                self._timeout_s * 1000,
+            )
+            return text
+
         with self._lock:
-            if self._model is None:  # unloaded between the check and here
+            model = self._model
+            if model is None:  # unloaded or closed between the check and here
                 return text
             self._inflight += 1
             self._cancel_idle_timer()
@@ -417,22 +440,27 @@ class LLMCorrector:
         def _infer() -> None:
             nonlocal result
             try:
-                result = self._run_inference(text, app_context=app_context)
+                result = self._run_inference(text, app_context=app_context, model=model)
             except Exception:
                 logger.exception("LLM inference failed")
                 result = None
             finally:
+                deferred = None
                 with self._lock:
                     self._inflight -= 1
+                    if not self._inflight:
+                        deferred, self._close_after_inflight = self._close_after_inflight, None
                     self._arm_idle_timer()
+                if deferred is not None:
+                    self._close_model(deferred)
 
         worker = Thread(target=_infer, daemon=True)
         worker.start()
-        worker.join(timeout=self._timeout_s)
+        worker.join(timeout=remaining)
 
         if worker.is_alive():
             logger.warning(
-                "LLM inference exceeded %.0f ms timeout — returning input unchanged",
+                "LLM correction exceeded %.0f ms timeout — returning input unchanged",
                 self._timeout_s * 1000,
             )
             return text
@@ -458,10 +486,11 @@ class LLMCorrector:
     # ------------------------------------------------------------------
 
     def _run_inference(
-        self, text: str, app_context: str | None = None
+        self, text: str, app_context: str | None = None, model: Any | None = None
     ) -> str | None:
-        """Build the prompt and call the model."""
-        assert self._model is not None
+        """Build the prompt and call *model* (default: the current model)."""
+        model = model if model is not None else self._model
+        assert model is not None
 
         system_content = _SYSTEM_PROMPT
         if app_context:
@@ -472,7 +501,7 @@ class LLMCorrector:
             {"role": "user", "content": text},
         ]
 
-        response = self._model.create_chat_completion(
+        response = model.create_chat_completion(
             messages=messages,
             max_tokens=_DEFAULT_MAX_TOKENS,
             temperature=_DEFAULT_TEMPERATURE,

@@ -437,6 +437,9 @@ class TestDetectSelfCorrections:
             "Run it with --no-cache and --verbose.",
             "Run git rebase --interactive on main.",
             "Pages 3–5 are done.",
+            # A dash on its own is punctuation, not a restart.
+            "Hi John — sorry for the delay",
+            "I sent the doc — the team liked it",
             "I have no idea",
         ],
     )
@@ -458,6 +461,9 @@ class TestDetectSelfCorrections:
             "deploy to staging wait deploy to production",
             "the meeting is in march actually april",
             "ship it now, scratch that, ship it tomorrow",
+            # Dash/ellipsis restarts that repeat the reparandum.
+            "I want the—the other one",
+            "go to the... go to the park",
         ],
     )
     def test_correction_markers_trigger(self, text):
@@ -2408,6 +2414,43 @@ class TestLLMPreload:
         assert corrector.wait_until_loaded(3)
         assert corrector.process("at two actually four") == "Corrected."
 
+    def test_load_and_inference_share_one_deadline(self, fake_llama, monkeypatch):
+        _FakeLlama.gate = threading.Event()
+        infer_gate = threading.Event()
+
+        def blocked_inference(self, **kwargs):
+            infer_gate.wait(5)
+            return {"choices": [{"message": {"content": "Corrected."}}]}
+
+        monkeypatch.setattr(_FakeLlama, "create_chat_completion", blocked_inference)
+        corrector = _corrector(fake_llama)
+        corrector._timeout_s = 0.4
+        corrector.preload()
+        # The load finishes ~0.25s in; inference then blocks until released.
+        threading.Timer(0.25, _FakeLlama.gate.set).start()
+        t0 = time.monotonic()
+        try:
+            assert corrector.process("at two actually four") == "at two actually four"
+            elapsed = time.monotonic() - t0
+        finally:
+            infer_gate.set()
+        # One 0.4s budget in total, not 0.4s for the load plus 0.4s more.
+        assert elapsed < 0.6
+
+    def test_no_time_left_after_the_load_returns_input(self, fake_llama, monkeypatch):
+        corrector = _corrector(fake_llama)
+        corrector._timeout_s = 0.05
+
+        def slow_ensure(timeout):
+            time.sleep(0.1)  # the load used up the whole budget
+            return True
+
+        monkeypatch.setattr(corrector, "_ensure_loaded", slow_ensure)
+        corrector._model = _FakeLlama()
+        corrector._loaded = True
+        assert corrector.process("at two actually four") == "at two actually four"
+        assert corrector._inflight == 0
+
     def test_process_starts_a_load_when_none_is_running(self, fake_llama):
         corrector = _corrector(fake_llama)
         assert corrector.process("at two actually four") == "Corrected."
@@ -2494,6 +2537,26 @@ class TestLLMIdleUnload:
         assert corrector._idle_timer is not None
         manual_timers[-1].fire()
         assert corrector.loaded is False
+
+    def test_close_during_inference_defers_the_model_close(self, fake_llama, manual_timers):
+        corrector = self._loaded(fake_llama)
+        model = _FakeLlama.instances[0]
+        model.infer_gate = threading.Event()
+        corrector._timeout_s = 0.05
+        # The caller times out; the inference keeps running on its thread.
+        assert corrector.process("at two actually four") == "at two actually four"
+        corrector.close()
+        assert corrector.loaded is False
+        assert model.closed is False  # not freed under the running inference
+        model.infer_gate.set()
+        assert _wait_until(lambda: model.closed)
+        assert corrector._inflight == 0
+        assert corrector._close_after_inflight is None
+
+    def test_close_while_idle_closes_immediately(self, fake_llama, manual_timers):
+        corrector = self._loaded(fake_llama)
+        corrector.close()
+        assert _FakeLlama.instances[0].closed
 
     def test_zero_disables_idle_unload(self, fake_llama, manual_timers):
         corrector = self._loaded(fake_llama, idle_unload_s=0)

@@ -142,9 +142,12 @@ _REPETITION_RE = re.compile(
 #    the marker repeats a content word just before it ("meet at 3 sorry meet
 #    at 5"), or the marker sits between two values of the same kind ("at two
 #    actually make it four", "on tuesday sorry wednesday").
-# 4. A mid-sentence restart on a dash or ellipsis ("go to the... go to
-#    the park").  ``--`` or an en dash glued to a word is a flag or a range
-#    ("--no-cache", "pages 3–5"), not a pause.
+# 4. A mid-sentence restart on a dash or ellipsis whose next word repeats
+#    the reparandum: the word right before the pause ("I want the -- the
+#    other one") or a content word among the three before it ("go to the...
+#    go to the park").  A dash on its own is punctuation ("Hi John — sorry
+#    for the delay"), and ``--`` or an en dash glued to a word is a flag or
+#    a range ("--no-cache", "pages 3–5"), not a pause.
 #
 # Every rule also needs real words before the marker: "you know I mean the
 # deploy" is a filler run, not a correction.
@@ -185,7 +188,11 @@ _STOCK_PHRASE_CONTINUATIONS: dict[str, frozenset[str]] = {
 
 # Rule 4.  A dash or an ellipsis between two words; ``-``, ``--`` and ``–``
 # count only when spaced.
-_RESTART_RE = re.compile(r"\w[\w'.,]*(?:\s--?\s|\s–\s|\s*—\s*|\s*(?:\.\.\.|…)\s*)\w")
+_RESTART_RE = re.compile(
+    r"\w[\w'.,]*(?:\s--?\s|\s–\s|\s*—\s*|\s*(?:\.\.\.|…)\s*)(?P<head>\w[\w'-]*)"
+)
+# How many words before a restart pause its head word may repeat.
+_RESTART_WINDOW = 3
 
 # Function words too common for a repeat to mean the speaker restarted
 # ("the result was actually the same" repeats "the" by accident).
@@ -513,7 +520,20 @@ def _detect_self_corrections(text: str) -> bool:
         ):
             return True
 
-    return any(_has_content(text[: m.start() + 1]) for m in _RESTART_RE.finditer(text))
+    return any(_is_restart(text, m) for m in _RESTART_RE.finditer(text))
+
+
+def _is_restart(text: str, match: re.Match[str]) -> bool:
+    """True if the word after a dash/ellipsis pause repeats the reparandum."""
+    head = match.group("head").lower()
+    prefix = text[: match.start("head")]
+    words = (_bare_word(t.strip("-–—")).lower() for t in prefix.split())
+    before = [w for w in words if any(ch.isalnum() for ch in w)]
+    if not before or not _has_content(" ".join(before)):
+        return False
+    if head == before[-1]:
+        return True
+    return head not in _HEAD_WORD_STOPWORDS and head in before[-_RESTART_WINDOW:]
 
 
 def _has_content(fragment: str) -> bool:
