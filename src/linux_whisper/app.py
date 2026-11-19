@@ -760,13 +760,17 @@ class App:
             return
         if self.config.inject.auto_space and text:
             text = self._leading_space(text) + text
+        # Snapshot before typing: a key or click while ydotool types must count
+        # as input after this dictation (ydotool's own device is not read).
+        daemon = self._hotkey
+        generation = daemon.input_generation if daemon is not None else 0
         success = await self._injector.inject(text)
         if not success:
             logger.error("Text injection failed")
+            # A failure may be partial, so where the caret is is unknown.
+            self._last_injection = None
             return
         if text:
-            daemon = self._hotkey
-            generation = daemon.input_generation if daemon is not None else 0
             self._last_injection = (text[-1], daemon, generation)
 
     def _leading_space(self, text: str) -> str:

@@ -75,7 +75,7 @@ Captures global hotkeys regardless of focused application.
 
 **Implementation:** `evdev` — reads directly from `/dev/input/event*` devices. This works on both X11 and Wayland without requiring root (user must be in the `input` group). No dependency on desktop environment.
 
-The daemon also opens pointer devices, for button presses only, and counts key and mouse-button presses other than the hotkey in `input_generation`; the spacing rule in Stage 5 reads it. ydotool's virtual keyboard is never opened.
+The daemon also opens pointer devices, for button presses only, and counts key and mouse-button presses other than the hotkey and bare modifiers in `input_generation`; the spacing rule in Stage 5 reads it. ydotool's virtual keyboard is never opened.
 
 **Why not alternatives:**
 - `keyboard` (Python lib): Requires root on Linux
@@ -513,12 +513,12 @@ The polish stage strips surrounding whitespace, so two dictations in a row would
 `App._inject_text` therefore prepends one space, through `leading_space(text, previous_end, user_input_since)` in `inject/injector.py`, exactly when:
 
 - the previous injection succeeded and its last character (`previous_end`) is not whitespace,
-- the hotkey daemon's `input_generation` counter is unchanged since that injection finished, on the same daemon instance (a mode change replaces the daemon, which counts as input), and
+- the hotkey daemon's `input_generation` counter is unchanged since that injection started, on the same daemon instance (a mode change replaces the daemon, which counts as input), and
 - the new text is non-empty and does not start with whitespace or one of `.,;:!?)]}`.
 
-Otherwise the text is typed unchanged. A failed injection leaves the remembered state as it was. There is no trailing-space mode: a space only ever goes in front, and only when the previous text is known to be right behind the caret. Polished text and voice snippets both reach `_inject_text`, so both follow the rule. `inject.auto_space: false` turns it off.
+Otherwise the text is typed unchanged. The counter is read before `inject()` is called, so a key or click while ydotool is typing prevents the next space. A failed injection may have typed part of its text, so it clears the remembered state and the next dictation gets no space. There is no trailing-space mode: a space only ever goes in front, and only when the previous text is known to be right behind the caret. Polished text and voice snippets both reach `_inject_text`, so both follow the rule. `inject.auto_space: false` turns it off.
 
-`HotkeyDaemon.input_generation` advances on every key-down that is neither a modifier nor the hotkey's principal key (repeats and releases do not count), and on every `BTN_LEFT`, `BTN_RIGHT` or `BTN_MIDDLE` press from a pointer device. Pointers (EV_KEY devices with `BTN_LEFT` and no `KEY_A`) are opened alongside keyboards, kept through the same rescan and stale-handle checks, and routed only to the counter, never to the hotkey state machine. Devices whose name contains "ydotool" are skipped, so the app's own typing never counts as user input. The counter is a plain int written only by the daemon thread and read from the asyncio thread.
+`HotkeyDaemon.input_generation` advances on every key-down that is not a modifier and not the hotkey itself (repeats and releases do not count; the hotkey's principal key pressed without its modifiers is ordinary typing and does count), and on every button press from a pointer device, side buttons included, since they navigate or change focus. Pointers (EV_KEY devices with `BTN_LEFT` and no `KEY_A`) are opened alongside keyboards, kept through the same rescan and stale-handle checks, and routed only to the counter, never to the hotkey state machine. Devices whose name contains "ydotool" are skipped, so the app's own typing never counts as user input. The counter is a plain int written only by the daemon thread and read from the asyncio thread.
 
 No space is added for the first dictation of a session, after Enter or any other key, after a mouse click, before dictated attaching punctuation, or after text ending in whitespace. Known gap: libinput synthesises touchpad taps in userspace, so a tap-to-click never appears as an evdev button press, and a dictation after moving the caret with a tap may get a space it should not.
 

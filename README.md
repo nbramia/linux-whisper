@@ -248,14 +248,14 @@ front** of a dictation when it knows the caret still sits right after its
 previous one:
 
 - the previous injection succeeded and ended in a non-whitespace character,
-- no key other than the hotkey (and modifiers) and no mouse button has been
-  pressed since it finished, and
+- no key other than the hotkey (and bare modifiers) and no mouse button has
+  been pressed since it started typing, and
 - the new text does not start with whitespace or attaching punctuation
   (`. , ; : ! ? ) ] }`).
 
 Otherwise the text is typed as is. In practice no space is added for the
 first dictation of a session, after you press Enter or any other key, after
-a mouse click anywhere, before punctuation you dictate on its own, or after
+a mouse click anywhere, after a failed injection, before punctuation you dictate on its own, or after
 text that already ended in whitespace. A space is never added at the end of
 a dictation. Voice snippets follow the same rule.
 

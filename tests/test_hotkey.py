@@ -645,6 +645,9 @@ class TestInputGeneration:
                 (ecodes.KEY_E, 0), (ecodes.KEY_LEFTSHIFT, 0), (ecodes.KEY_LEFTCTRL, 0),
             ], 0),
             ("fn", [(ecodes.KEY_RIGHTALT, 1), (ecodes.KEY_RIGHTALT, 0)], 0),
+            # The principal key without its modifiers is ordinary typing.
+            ("ctrl+e", [(ecodes.KEY_E, 1), (ecodes.KEY_E, 0)], 1),
+            ("ctrl+e", [(ecodes.KEY_LEFTCTRL, 1), (ecodes.KEY_E, 1), (ecodes.KEY_E, 0)], 0),
             # A shortcut counts once, for its non-modifier key.
             ("fn", [(ecodes.KEY_LEFTCTRL, 1), (ecodes.KEY_V, 1), (ecodes.KEY_V, 0)], 1),
             # A remapper's virtual keyboard re-emits mouse buttons as keys.
@@ -678,7 +681,8 @@ class TestInputGeneration:
             (ecodes.BTN_MIDDLE, 1, 1),
             (ecodes.BTN_LEFT, 0, 0),
             (ecodes.BTN_LEFT, 2, 0),
-            (0x113, 1, 0),  # BTN_SIDE: back/forward, does not move the caret
+            (0x113, 1, 1),  # BTN_SIDE: back/forward navigates, so it counts too
+            (0x113, 0, 0),
         ],
     )
     def test_pointer_buttons(self, code, value, expected):
@@ -739,7 +743,8 @@ class TestRunRoutesPointerEvents:
         daemon._run()
 
         on_start.assert_called_once()  # from the keyboard's fn, not the mouse's
-        assert daemon.input_generation == 2  # keyboard KEY_A + mouse BTN_LEFT
+        # Keyboard KEY_A, plus both mouse presses: any pointer button counts.
+        assert daemon.input_generation == 3
 
 
 class TestRescanTracksPointers:

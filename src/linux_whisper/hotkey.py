@@ -169,11 +169,6 @@ class HotkeyCombination:
 # app types through it, so its events must never count as user input.
 _IGNORED_DEVICE_MARKER: Final[str] = "ydotool"
 
-# Mouse buttons that move the caret, so a press means "the user did something".
-_POINTER_BUTTONS: Final[frozenset[int]] = frozenset(
-    (ecodes.BTN_LEFT, ecodes.BTN_RIGHT, ecodes.BTN_MIDDLE)
-)
-
 
 def _find_input_devices() -> list[tuple[InputDevice, bool]]:
     """Return ``(device, is_pointer)`` for every keyboard and pointer device.
@@ -263,8 +258,8 @@ class HotkeyDaemon:
         # Track whether we are in a recording started by this daemon.
         self._recording: bool = False
 
-        # Advances on every key press other than the hotkey and modifiers, and
-        # on every mouse-button press.  Written only by the daemon thread and
+        # Advances on every key press other than the hotkey and bare modifiers,
+        # and on every mouse-button press.  Written only by the daemon thread and
         # read from the asyncio thread (int reads are atomic in CPython).
         self.input_generation: int = 0
 
@@ -494,8 +489,12 @@ class HotkeyDaemon:
     # -- event handling -----------------------------------------------------
 
     def _handle_pointer_event(self, event: InputEvent) -> None:
-        """Count a mouse-button press from a pointer device; nothing else."""
-        if event.type == ecodes.EV_KEY and event.value == 1 and event.code in _POINTER_BUTTONS:
+        """Count any button press from a pointer device; nothing else.
+
+        Every button counts, not just left/right/middle: side buttons navigate
+        or change focus, which moves the caret just as well.
+        """
+        if event.type == ecodes.EV_KEY and event.value == 1:
             self.input_generation += 1
 
     def _handle_event(self, event: InputEvent) -> None:
@@ -535,7 +534,8 @@ class HotkeyDaemon:
 
         # Non-modifier key.  Anything but the hotkey means the user has done
         # something since the last dictation (moved the caret, typed, ...).
-        if value == 1 and code != self._combo.key:
+        # The principal key without its modifiers is ordinary typing.
+        if value == 1 and (code != self._combo.key or not self._modifiers_satisfied()):
             self.input_generation += 1
 
         if code == self._combo.key:

@@ -1433,14 +1433,31 @@ class TestInjectSpacing:
         await app._inject_text("Bring the docs.")
         assert self._sent(app)[-1] == "Bring the docs."
 
-    async def test_failure_keeps_the_earlier_memory(self):
+    async def test_failure_forgets_the_earlier_memory(self):
+        # A failed injection may have typed part of its text: caret unknown.
         app = self._app()
         await app._inject_text("Meet at four.")
         app._injector.inject.return_value = False
         await app._inject_text("Lost")
         app._injector.inject.return_value = True
         await app._inject_text("Bring the docs.")
-        assert self._sent(app)[-1] == " Bring the docs."
+        assert self._sent(app)[-1] == "Bring the docs."
+
+    async def test_input_during_typing_counts_as_after_the_dictation(self):
+        # The counter is snapshotted before inject(); a click while ydotool
+        # types must prevent the next space.
+        app = self._app()
+
+        async def typing_with_click(text):
+            app._hotkey.input_generation += 1
+            return True
+
+        app._injector.inject.side_effect = typing_with_click
+        await app._inject_text("Meet at four.")
+        app._injector.inject.side_effect = None
+        app._injector.inject.return_value = True
+        await app._inject_text("Bring the docs.")
+        assert self._sent(app) == ["Meet at four.", "Bring the docs."]
 
     async def test_previous_text_ending_in_whitespace(self):
         app = self._app()
