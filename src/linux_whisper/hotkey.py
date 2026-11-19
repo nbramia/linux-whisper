@@ -528,9 +528,8 @@ class HotkeyDaemon:
             else:
                 self._fire_start()
 
-        elif self._mode == "vad-auto":
-            if not self._recording:
-                self._fire_start()
+        elif self._mode == "vad-auto" and not self._recording:
+            self._fire_start()
 
     def _on_key_up(self) -> None:
         """Handle hotkey release."""
