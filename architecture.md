@@ -467,6 +467,8 @@ Wayland's security model intentionally prevents applications from synthesizing i
 - Works across all Wayland compositors
 - Requires user to be in the `input` group or `ydotoold` running as a service
 
+Typing delays: Ubuntu's ydotool 0.1.8 without `ydotoold` creates a fresh virtual keyboard per call, so the injector always passes `--delay 60` (start delay; the compositor needs about 50 ms to register the device, and lower values drop the first characters) and `--key-delay <typing_delay>` (ms per character). `typing_delay: 0` measured clean (no lost or reordered characters) for 350 characters in GTK, VTE and Chromium, in about 0.17 s. Raise `typing_delay` to 1 if an application drops characters.
+
 **Option B: `wtype`** (wlroots compositors only: Sway, Hyprland, etc.)
 - Uses `wlr-virtual-keyboard-unstable-v1` protocol
 - No root/uinput needed
@@ -686,7 +688,7 @@ audio:
 # Text Injection
 inject:
   method: "auto"  # auto | xdotool | ydotool | wtype | clipboard
-  typing_delay: 0  # ms between keystrokes, 0 = instant
+  typing_delay: 0  # ms per character on every typing backend; 0 is honoured (no added delay)
 
 # UI
 tray:

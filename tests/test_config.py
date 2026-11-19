@@ -206,6 +206,10 @@ class TestValidation:
         errors = cfg.validate()
         assert not any("vad_threshold" in e for e in errors)
 
+    def test_negative_typing_delay_rejected(self):
+        cfg = Config.from_dict({"inject": {"typing_delay": -1}})
+        assert any("typing_delay" in e for e in cfg.validate())
+
     def test_invalid_overlay_position(self):
         cfg = Config.from_dict({"overlay": {"position": "middle"}})
         errors = cfg.validate()
