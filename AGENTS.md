@@ -134,7 +134,7 @@ Referenced during planning to assess whether a change is safe.
 |-------|--------------|-------------|
 | 1. Hotkey detection | < 5ms | < 5ms |
 | 2. Audio + VAD + AGC | < 10ms | < 10ms |
-| 3. STT (whisper.cpp large-v3-turbo) | ~285ms | ~2.5s |
+| 3. STT (whisper.cpp large-v3-turbo), after release | ~285ms; ≤ one 30 s window for long dictations | ~2.5s |
 | 4a. Disfluency removal | < 15ms | < 15ms |
 | 4b. Punctuation | < 15ms | < 15ms |
 | 4d. Number/date formatting | < 1ms | < 1ms |
@@ -143,7 +143,7 @@ Referenced during planning to assess whether a change is safe.
 | **Total (simple)** | **~340ms** | **~2.6s** |
 | **Total (with LLM)** | **~490ms** | **~2.9s** |
 
-The default STT backend is whisper.cpp large-v3-turbo on the ROCm GPU, in a subprocess worker (the pywhispercpp/onnxruntime `libamdhip64` conflict is why). The worker is stopped after `stt.gpu_idle_unload_s` idle seconds (default 1200, `0` = never) to free its VRAM and SDMA queue, so the first dictation after a long idle pays a ~4s model reload. The stage 4c LLM is preloaded in the background when the app is ready and released after `polish.llm_idle_unload_s` idle seconds (default 1200, `0` = never); each recording start reloads it in the background, so the 4c budget below assumes a warm model. The self-correction detector in `polish/disfluency.py` gates that stage: keep the benchmark's `llm_invocations` equal to its `self-correction` fixture count.
+The default STT backend is whisper.cpp large-v3-turbo on the ROCm GPU, in a subprocess worker (the pywhispercpp/onnxruntime `libamdhip64` conflict is why). The worker is stopped after `stt.gpu_idle_unload_s` idle seconds (default 1200, `0` = never) to free its VRAM and SDMA queue, so the first dictation after a long idle pays a ~4s model reload. The app feeds audio to the engine during recording, and the GPU engine transcribes each completed 30 s window (cut at the quietest 200 ms of its last 5 s) on a background thread while the user is still speaking, applying gain control per window. Only the tail is left at release, so dictations over 30 s finish in about the time of one window (~0.25 s in `finalize` for 65-83 s, against ~1.2 s for one whole-recording request). A tail with nothing above the noise floor is skipped, because whisper hallucinates on silence. The stage 4c LLM is preloaded in the background when the app is ready and released after `polish.llm_idle_unload_s` idle seconds (default 1200, `0` = never); each recording start reloads it in the background, so the 4c budget below assumes a warm model. The self-correction detector in `polish/disfluency.py` gates that stage: keep the benchmark's `llm_invocations` equal to its `self-correction` fixture count.
 
 **Benchmark corpora do not decide the default; recorded dictation does.** Parakeet TDT v3 beat whisper on LibriSpeech (0.54% vs 1.48% WER, 191ms vs 285ms p50) and was made default on that basis — then lost 49.3% to 21.5% on 28 real dictation clips. LibriSpeech contains no digits, symbols, or filenames, so it never tested inverse text normalisation, which is most of what dictation is. Always confirm an STT change against `--fixtures-dir` recordings before touching the default.
 

@@ -606,6 +606,163 @@ class TestProcessPipeline:
 # ---------------------------------------------------------------------------
 
 
+class _WindowedEngine:
+    """STT engine stand-in that applies its own gain control, like the GPU engine."""
+
+    handles_gain_control = True
+
+    def __init__(self) -> None:
+        self.fed: list[bytes] = []
+        self.finalize_calls = 0
+        self.reset_calls = 0
+
+    def start_stream(self) -> None:
+        pass
+
+    def feed_audio(self, chunk: bytes) -> list:
+        self.fed.append(chunk)
+        return []
+
+    def finalize(self) -> FakeTranscriptResult:
+        self.finalize_calls += 1
+        return FakeTranscriptResult(full_text="long dictation")
+
+    def reset(self) -> None:
+        self.reset_calls += 1
+
+
+class _LiveAudio:
+    """Audio pipeline stand-in whose chunks arrive while the test decides."""
+
+    def __init__(self) -> None:
+        self.queue: asyncio.Queue[FakeAudioChunk] = asyncio.Queue()
+
+    def push(self, samples: np.ndarray) -> None:
+        self.queue.put_nowait(FakeAudioChunk(samples=samples))
+
+    async def audio_chunks(self):
+        while True:
+            chunk = await self.queue.get()
+            yield chunk
+            if chunk.is_final:
+                return
+
+    def stop_recording(self) -> None:
+        self.queue.put_nowait(
+            FakeAudioChunk(samples=np.empty(0, dtype=np.float32), is_final=True)
+        )
+
+    def get_pre_roll(self, _seconds: float) -> np.ndarray:
+        return np.empty(0, dtype=np.float32)
+
+
+def _pcm(samples: np.ndarray) -> bytes:
+    return (samples * 32767).astype(np.int16).tobytes()
+
+
+async def _settle(predicate, attempts: int = 100) -> bool:
+    for _ in range(attempts):
+        if predicate():
+            return True
+        await asyncio.sleep(0)
+    return predicate()
+
+
+class TestFeedDuringRecording:
+    async def test_chunks_reach_the_engine_while_recording(self):
+        app = _make_app(_make_config(polish=PolishConfig(enabled=False)))
+        engine, audio = _WindowedEngine(), _LiveAudio()
+        app._stt, app._audio = engine, audio
+        first = np.full(576, 0.1, dtype=np.float32)
+        second = np.full(576, -0.2, dtype=np.float32)
+
+        await app._handle_recording_start()
+        audio.push(first)
+        assert await _settle(lambda: len(engine.fed) == 1)
+        assert app.state.is_recording
+        assert engine.fed == [_pcm(first)]
+        assert engine.finalize_calls == 0
+
+        audio.push(second)
+        await app.state.transition(AppState.PROCESSING)
+        import linux_whisper.audio as audio_mod
+
+        with patch.object(audio_mod, "apply_agc") as app_agc:
+            text = await app._process_pipeline()
+
+        # Everything was fed exactly once, in order, without the app's
+        # whole-recording gain; the engine applies its own per window.
+        assert engine.fed == [_pcm(first), _pcm(second)]
+        app_agc.assert_not_called()
+        assert engine.finalize_calls == 1
+        assert engine.reset_calls == 1
+        assert text == "long dictation"
+        assert app._stt_feed is None
+
+    async def test_model_change_mid_recording_finishes_on_the_recording_engine(self):
+        app = _make_app(_make_config(polish=PolishConfig(enabled=False)))
+        recording, replacement = _WindowedEngine(), _WindowedEngine()
+        audio = _LiveAudio()
+        audio.start_recording = lambda: None
+        app._stt, app._audio = recording, audio
+        chunk = np.full(576, 0.1, dtype=np.float32)
+
+        app._on_recording_start()  # no loop: starts the stream only
+        await app._handle_recording_start()
+        audio.push(chunk)
+        assert await _settle(lambda: len(recording.fed) == 1)
+
+        app._stt = replacement  # tray model switch lands mid-recording
+        audio.push(chunk)
+        await app.state.transition(AppState.PROCESSING)
+        assert await app._process_pipeline() == "long dictation"
+
+        assert recording.fed == [_pcm(chunk), _pcm(chunk)]
+        assert (recording.finalize_calls, recording.reset_calls) == (1, 1)
+        assert replacement.fed == []
+        assert (replacement.finalize_calls, replacement.reset_calls) == (0, 0)
+
+    async def test_engine_without_own_gain_gets_whole_recording_at_stop(self):
+        app = _make_app(
+            _make_config(audio=AudioConfig(auto_gain=True), polish=PolishConfig(enabled=False))
+        )
+        engine, audio = _WindowedEngine(), _LiveAudio()
+        engine.handles_gain_control = False
+        app._stt, app._audio = engine, audio
+        speech = np.full(576, 0.1, dtype=np.float32)
+
+        await app._handle_recording_start()
+        audio.push(speech)
+        audio.push(speech)
+        assert await _settle(lambda: audio.queue.empty())
+        assert engine.fed == []  # held back for whole-recording AGC
+
+        await app.state.transition(AppState.PROCESSING)
+        assert await app._process_pipeline() == "long dictation"
+        assert len(engine.fed) == 1
+        assert engine.fed[0] == _pcm(np.full(1152, 0.7, dtype=np.float32))
+
+    async def test_failed_stop_cancels_the_feed(self):
+        app = _make_app(_make_config(polish=PolishConfig(enabled=False)))
+        engine, audio = _WindowedEngine(), _LiveAudio()
+        app._stt, app._audio = engine, audio
+
+        await app._handle_recording_start()
+        feed = app._stt_feed
+        assert feed is not None
+
+        def _broken_stop() -> None:
+            raise RuntimeError("audio device lost")
+
+        audio.stop_recording = _broken_stop
+        await app.state.transition(AppState.PROCESSING)
+        with pytest.raises(RuntimeError, match="device lost"):
+            await app._process_pipeline()
+        await asyncio.sleep(0)
+        assert feed.cancelled()
+        assert engine.reset_calls == 1
+
+
 class TestHandleRecordingStop:
     async def test_noop_when_not_recording(self):
         app = _make_app()

@@ -258,7 +258,7 @@ if mode == "blocked_write":
 
 message = recv()
 audio_length = message["audio_length"]
-stdin.read(audio_length)
+audio = stdin.read(audio_length)
 
 if mode == "inference_hang_kill":
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
@@ -282,21 +282,48 @@ elif mode in ("serve", "slow_serve"):
         if message is None or message.get("cmd") != "transcribe":
             break
         stdin.read(message["audio_length"])
+elif mode.startswith("echo"):
+    # ``echo[:delay[:fail_at]]``: answer request N with one segment
+    # "rN-<samples>-<peak>" after ``delay`` seconds, or with an inference
+    # failure when N == fail_at.
+    from array import array
+
+    options = mode.split(":")[1:]
+    delay = float(options[0]) if options else 0.0
+    fail_at = int(options[1]) if len(options) > 1 else 0
+    number = 0
+    while True:
+        number += 1
+        if delay:
+            time.sleep(delay)
+        if number == fail_at:
+            send({"status": "error", "error": "synthetic"})
+        else:
+            samples = array("h", audio)
+            peak = max((abs(v) for v in samples), default=0)
+            text = f"r{number}-{len(samples)}-{peak}"
+            send({
+                "status": "ok",
+                "segments": [{"text": text, "t0": 0.0, "t1": 0.5}],
+                "full_text": text,
+            })
+        message = recv()
+        if message is None or message.get("cmd") != "transcribe":
+            break
+        audio = stdin.read(message["audio_length"])
 """
 
 
-def _synthetic_gpu_engine(idle_unload_s: float = 0):
+def _synthetic_gpu_engine(idle_unload_s: float = 0, *, auto_gain: bool = False):
     from linux_whisper.stt.whisper_gpu import WhisperGPUEngine
 
     engine = object.__new__(WhisperGPUEngine)
+    engine._init_stream_state(auto_gain=auto_gain)
     engine._init_idle_unload(idle_unload_s)
     engine._model_path = Path("/synthetic/model")
     engine._threads = 1
     engine._process = None
     engine._operation_timeout_s = 0.02
-    engine._stream_started = False
-    engine._audio_buffer = bytearray()
-    engine._stream_start_time = 0.0
     return engine
 
 
@@ -567,6 +594,7 @@ class TestGPUWorkerIPC:
                 os.close(self._input_read)
 
         engine = object.__new__(WhisperGPUEngine)
+        engine._init_stream_state(auto_gain=False)
         engine._init_idle_unload(0)
         engine._operation_timeout_s = 1
         engine._stream_started = True
@@ -1260,3 +1288,270 @@ class TestWhisperCppGPUDetection:
 
         monkeypatch.setattr(wcpp, "_check_whispercpp", lambda: False)
         assert wcpp._detect_gpu_available() is False
+
+
+# ── WhisperGPUEngine windowed transcription (#69) ────────────────────────────
+
+_SR = 16_000
+_CHUNK = 576  # the audio pipeline's 36 ms streaming chunk
+
+
+def _noise(seconds: float, *, amplitude: int = 1000, seed: int = 0):
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    return rng.integers(-amplitude, amplitude, int(seconds * _SR)).astype(np.int16)
+
+
+def _silence_at(audio, start_s: float, length_s: float = 0.3):
+    audio[int(start_s * _SR) : int((start_s + length_s) * _SR)] = 0
+    return audio
+
+
+def _feed_in_chunks(engine, audio) -> list[TranscriptSegment]:
+    partials: list[TranscriptSegment] = []
+    data = audio.tobytes()
+    step = _CHUNK * 2
+    for offset in range(0, len(data), step):
+        partials.extend(engine.feed_audio(data[offset : offset + step]))
+    return partials
+
+
+def _parse_echo(text: str) -> list[tuple[int, int, int]]:
+    """``"r1-433600-1000 r2-..."`` -> [(1, 433600, 1000), ...]."""
+    return [tuple(int(v) for v in part[1:].split("-")) for part in text.split()]
+
+
+class TestGPUWindowCut:
+    def test_cut_is_centre_of_known_quiet_frame(self):
+        from linux_whisper.stt.whisper_gpu import _choose_cut
+
+        window = _silence_at(_noise(30), 27.0)
+        assert _choose_cut(window) == int(27.1 * _SR)
+
+    def test_quiet_frame_before_the_last_five_seconds_is_ignored(self):
+        from linux_whisper.stt.whisper_gpu import _choose_cut
+
+        window = _silence_at(_noise(30), 20.0)
+        window[int(28.0 * _SR) : int(28.2 * _SR)] //= 10  # quietest in range
+        cut = _choose_cut(window)
+        assert 25 * _SR <= cut <= 30 * _SR
+        assert cut == int(28.1 * _SR)
+
+    def test_cut_handles_digital_silence(self):
+        import numpy as np
+
+        from linux_whisper.stt.whisper_gpu import _choose_cut
+
+        cut = _choose_cut(np.zeros(30 * _SR, dtype=np.int16))
+        assert 25 * _SR <= cut <= 30 * _SR
+
+
+def test_frame_rms_measures_a_partial_final_frame():
+    import numpy as np
+
+    from linux_whisper.stt.whisper_gpu import _frame_rms
+
+    samples = np.concatenate([np.zeros(1600), np.full(1280, 1000)]).astype(np.int16)
+    assert _frame_rms(samples, 1600).tolist() == pytest.approx([0.0, 1000.0])
+    assert _frame_rms(np.full(800, 500, dtype=np.int16), 1600).tolist() == [500.0]
+    assert _frame_rms(np.empty(0, dtype=np.int16), 1600).tolist() == [0.0]
+
+
+class TestGPUWindowedTranscription:
+    """Background windows against the synthetic echo worker."""
+
+    @staticmethod
+    def _engine(idle_unload_s: float = 0, *, auto_gain: bool = False):
+        engine = _synthetic_gpu_engine(idle_unload_s, auto_gain=auto_gain)
+        engine._operation_timeout_s = 5.0
+        return engine
+
+    def test_short_recording_sends_one_request_at_finalize(self, monkeypatch):
+        engine = self._engine()
+        with _synthetic_gpu_workers(monkeypatch, "echo") as processes:
+            engine.start_stream()
+            audio = _noise(29.9)
+            assert _feed_in_chunks(engine, audio) == []
+            assert engine._windows == []
+            assert engine._inflight == 0
+
+            result = engine.finalize()
+            assert _parse_echo(result.full_text) == [(1, len(audio), 1000)]
+            assert result.duration == pytest.approx(len(audio) / _SR)
+            assert engine._process is processes[0]
+            engine.close()
+
+    def test_long_recording_is_windowed_and_ordered(self, monkeypatch):
+        engine = self._engine()
+        audio = _silence_at(_silence_at(_noise(75), 27.0), 55.0)
+        with _synthetic_gpu_workers(monkeypatch, "echo"):
+            engine.start_stream()
+            partials = _feed_in_chunks(engine, audio)
+            assert len(engine._windows) == 2
+            assert _wait_until(lambda: all(w.done for w in engine._windows))
+            partials += engine.feed_audio(b"")
+
+            result = engine.finalize()
+            first, second = int(27.1 * _SR), int(55.1 * _SR)
+            assert _parse_echo(result.full_text) == [
+                (1, first, 1000),
+                (2, second - first, 1000),
+                (3, len(audio) - second, 1000),
+            ]
+            starts = [segment.start_time for segment in result.segments]
+            assert starts == pytest.approx([0.0, first / _SR, second / _SR])
+            assert not any(segment.is_partial for segment in result.segments)
+            assert result.duration == pytest.approx(75.0)
+
+            # Finished windows were also handed back by feed_audio, once each.
+            assert [p.text for p in partials] == [s.text for s in result.segments[:2]]
+            assert all(p.is_partial for p in partials)
+            assert engine._inflight == 0
+            engine.close()
+
+    def test_gain_is_applied_per_window(self, monkeypatch):
+        engine = self._engine(auto_gain=True)
+        quiet = _silence_at(_noise(30, amplitude=100), 27.0)
+        loud = _noise(10, amplitude=30000, seed=1)
+        import numpy as np
+
+        with _synthetic_gpu_workers(monkeypatch, "echo"):
+            engine.start_stream()
+            _feed_in_chunks(engine, np.concatenate([quiet, loud]))
+            result = engine.finalize()
+
+        (_, _, window_peak), (_, _, tail_peak) = [
+            (n, s, p) for n, s, p in _parse_echo(result.full_text)
+        ]
+        assert window_peak == pytest.approx(0.7 * 32767, abs=2)
+        assert tail_peak == 30000  # already loud: left unchanged
+        engine.close()
+
+    def test_feed_and_start_stream_do_not_wait_behind_a_window(
+        self, monkeypatch, manual_timers
+    ):
+        import threading
+
+        engine = self._engine(idle_unload_s=1200)
+        with _synthetic_gpu_workers(monkeypatch, "echo:0.5") as processes:
+            engine.start_stream()
+            data = _noise(30.1).tobytes()
+            started = time.monotonic()
+            engine.feed_audio(data)
+            assert time.monotonic() - started < 0.2
+            assert engine._inflight == 1
+
+            started = time.monotonic()
+            engine.feed_audio(b"\x00\x00" * _CHUNK)
+            assert time.monotonic() - started < 0.05
+
+            # The hotkey thread's start_stream takes only the state lock.
+            assert engine._lock.acquire(timeout=0.05)
+            engine._lock.release()
+            starting = threading.Thread(target=engine.start_stream)
+            engine.reset()  # abandon the stream with its window in flight
+            starting.start()
+            starting.join(timeout=0.2)
+            assert not starting.is_alive()
+            assert engine._inflight == 1
+            engine.reset()
+            engine.close()
+            assert processes[0].wait(timeout=2) is not None
+
+    def test_idle_timer_waits_for_window_in_flight(self, monkeypatch, manual_timers):
+        engine = self._engine(idle_unload_s=1200)
+        with _synthetic_gpu_workers(monkeypatch, "echo:0.3") as processes:
+            engine.start_stream()
+            engine.feed_audio(_noise(30.1).tobytes())
+            assert engine._inflight == 1
+
+            # The stream is abandoned mid-window: nothing may arm or unload.
+            engine.reset()
+            assert engine._idle_timer is None
+            engine._unload_if_idle(engine._idle_generation)
+            assert engine._process is processes[0]
+
+            # Once the window settles, the countdown starts.
+            assert _wait_until(lambda: engine._inflight == 0)
+            assert engine._idle_timer is not None
+            manual_timers[-1].fire()
+            assert engine._process is None
+            assert processes[0].wait(timeout=2) is not None
+
+    @pytest.mark.parametrize("final_word", [False, True])
+    def test_tail_with_nothing_above_the_noise_floor_is_skipped(
+        self, monkeypatch, final_word
+    ):
+        import numpy as np
+
+        engine = self._engine()
+        # Speech, then the pause before release: the cut lands in the pause,
+        # so everything left after it is at the noise floor.
+        window = _noise(30)
+        window[int(29.0 * _SR) :] = _noise(1.0, amplitude=50, seed=2)
+        tail = _noise(0.5, amplitude=50, seed=3)
+        if final_word:
+            tail = np.concatenate([tail, _noise(0.2, amplitude=1000, seed=4)])
+        with _synthetic_gpu_workers(monkeypatch, "echo"):
+            engine.start_stream()
+            _feed_in_chunks(engine, np.concatenate([window, tail]))
+            result = engine.finalize()
+
+        numbers = [number for number, _, _ in _parse_echo(result.full_text)]
+        assert numbers == ([1, 2] if final_word else [1])
+        assert result.duration == pytest.approx((len(window) + len(tail)) / _SR)
+        engine.close()
+
+    def test_tail_above_absolute_ceiling_is_kept_even_near_the_floor(self, monkeypatch):
+        # Quiet continuous speech with no real pause: the "floor" is speech,
+        # so a final phrase at the same level passes the ratio test but sits
+        # above the absolute silence ceiling, and must still be transcribed.
+        engine = self._engine()
+        audio = _noise(31, amplitude=800)
+        with _synthetic_gpu_workers(monkeypatch, "echo"):
+            engine.start_stream()
+            _feed_in_chunks(engine, audio)
+            result = engine.finalize()
+        assert [n for n, _, _ in _parse_echo(result.full_text)] == [1, 2]
+        engine.close()
+
+    def test_short_burst_after_silence_in_partial_frame_keeps_tail(self, monkeypatch):
+        import numpy as np
+
+        engine = self._engine()
+        window = _noise(30)
+        window[int(29.0 * _SR) :] = _noise(1.0, amplitude=50, seed=2)
+        # 100 ms at the floor, then an 80 ms word that ends mid-frame.
+        tail = np.concatenate(
+            [_noise(0.1, amplitude=50, seed=3), _noise(0.08, amplitude=3000, seed=4)]
+        )
+        with _synthetic_gpu_workers(monkeypatch, "echo"):
+            engine.start_stream()
+            _feed_in_chunks(engine, np.concatenate([window, tail]))
+            result = engine.finalize()
+        assert [n for n, _, _ in _parse_echo(result.full_text)] == [1, 2]
+        engine.close()
+
+    def test_failed_window_raises_once_and_reaps_worker(self, monkeypatch):
+        from linux_whisper.stt.whisper_gpu import GPUWorkerError
+
+        engine = self._engine()
+        audio = _silence_at(_silence_at(_noise(65), 27.0), 55.0)
+        with _synthetic_gpu_workers(monkeypatch, "echo:0:1", "silence") as processes:
+            engine.start_stream()
+            _feed_in_chunks(engine, audio)
+            assert len(engine._windows) == 2
+            windows = list(engine._windows)
+
+            with pytest.raises(GPUWorkerError, match="reported an inference failure"):
+                engine.finalize()
+            # The window after the failure was never sent.
+            assert windows[1].skipped
+            assert engine._process is None
+            assert processes[0].wait(timeout=2) is not None
+            assert engine._inflight == 0
+
+            assert engine.finalize() == TranscriptResult()
+            engine.reset()
+            _assert_silence_recovery(engine)
