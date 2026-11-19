@@ -408,16 +408,32 @@ class TestGPUWorkerIPC:
                 duration=1.0,
             )
 
-        for bad in (-0.1, float("nan"), float("inf")):
-            with pytest.raises(GPUWorkerProtocolError, match="invalid segment timing"):
-                _parse_result(
-                    {
-                        "status": "ok",
-                        "full_text": "synthetic",
-                        "segments": [{"text": "synthetic", "t0": bad, "t1": 1.0}],
-                    },
-                    duration=1.0,
-                )
+    @pytest.mark.parametrize(
+        ("t0", "t1"),
+        [
+            (-0.1, 1.0),
+            (float("nan"), 1.0),
+            (float("inf"), 1.0),
+            (True, 1.0),
+            (0.0, -0.1),
+            (0.0, float("nan")),
+            (0.0, float("inf")),
+            (0.0, True),
+            (7.0, 4.0),  # reversed, both past the clip: order is checked before clamping
+        ],
+    )
+    def test_invalid_segment_timing_is_rejected(self, t0, t1):
+        from linux_whisper.stt.whisper_gpu import GPUWorkerProtocolError, _parse_result
+
+        with pytest.raises(GPUWorkerProtocolError, match="invalid segment timing"):
+            _parse_result(
+                {
+                    "status": "ok",
+                    "full_text": "synthetic",
+                    "segments": [{"text": "synthetic", "t0": t0, "t1": t1}],
+                },
+                duration=2.0,
+            )
 
     @pytest.mark.parametrize(
         ("t0", "t1", "start", "end"),
