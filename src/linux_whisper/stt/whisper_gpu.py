@@ -65,6 +65,14 @@ _CUT_HOP_SAMPLES = _SAMPLE_RATE // 100
 # multiple of the stream's quietest 200 ms (its noise floor). On the recorded
 # dictation fixtures, trailing silence peaks at 1.6x and speech at 2.3x+.
 _SILENT_TAIL_RATIO = 2.0
+# ...and only when it is also below this absolute level (int16 RMS; 0.01 of
+# full scale, -40 dBFS), so a quiet final phrase is never dropped just because
+# the "floor" came from quiet continuous speech. On the 28 recorded dictation
+# fixtures (Silero VAD labelling speech), the room floor is 0.0032-0.0042,
+# trailing silence peaks at 0.0049-0.0077 and the final word at 0.016 or more.
+# Deliberately above app.py's _ABSOLUTE_SILENCE_RMS (0.004), which sits inside
+# this microphone's trailing-silence range and would never skip a real pause.
+_SILENT_TAIL_CEILING_RMS = 0.01 * 32768
 _FLOOR_FRAME_SAMPLES = _SAMPLE_RATE // 5
 _TAIL_FRAME_SAMPLES = _SAMPLE_RATE // 10
 
@@ -151,22 +159,29 @@ def _choose_cut(window: np.ndarray) -> int:
 
 
 def _frame_rms(samples: np.ndarray, frame: int) -> np.ndarray:
-    """RMS of each whole *frame*-sample frame of int16 *samples*.
+    """RMS of each *frame*-sample frame of int16 *samples*.
 
-    Audio shorter than one frame is measured as a single frame.
+    A partial final frame is measured as a frame of its own, so a short burst
+    at the very end is never averaged away or dropped.
     """
     values = samples.astype(np.float64)
-    count = len(values) // frame
-    if count == 0:
-        return np.array([np.sqrt(np.mean(values * values)) if len(values) else 0.0])
-    frames = values[: count * frame].reshape(count, frame)
-    return np.sqrt(np.mean(frames * frames, axis=1))
+    if len(values) == 0:
+        return np.zeros(1)
+    whole = len(values) // frame * frame
+    rms = np.sqrt(np.mean(values[:whole].reshape(-1, frame) ** 2, axis=1))
+    if whole < len(values):
+        rms = np.append(rms, np.sqrt(np.mean(values[whole:] ** 2)))
+    return np.asarray(rms, dtype=np.float64)
 
 
 def _is_silent_tail(tail: bytes, floor_rms: float) -> bool:
-    """Whether *tail* holds nothing louder than the stream's noise floor."""
+    """Whether *tail* holds nothing louder than the stream's noise floor.
+
+    Both tests must hold: no 100 ms of it above ``_SILENT_TAIL_RATIO`` times
+    the floor, and none above the absolute ``_SILENT_TAIL_CEILING_RMS``.
+    """
     loudest = float(_frame_rms(np.frombuffer(tail, dtype=np.int16), _TAIL_FRAME_SAMPLES).max())
-    return loudest <= _SILENT_TAIL_RATIO * floor_rms
+    return loudest <= _SILENT_TAIL_RATIO * floor_rms and loudest < _SILENT_TAIL_CEILING_RMS
 
 
 def _apply_gain(audio_bytes: bytes) -> bytes:

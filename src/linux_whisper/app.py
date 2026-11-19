@@ -90,6 +90,10 @@ class App:
         self._tray: SystemTray | None = None
         self._overlay: Overlay | None = None
         # Consumes the open recording's audio chunks (see _pump_audio_to_stt).
+        # The engine the open recording's stream was started on. A model change
+        # during a recording replaces ``_stt``; the recording still finishes
+        # on the engine that holds its audio.
+        self._recording_stt: STTEngine | None = None
         self._stt_feed: asyncio.Future[tuple[int, list[np.ndarray]]] | None = None
 
     async def setup(self) -> None:
@@ -406,13 +410,15 @@ class App:
         if self._overlay:
             self._overlay.show()
 
+        stt = self._stt
+        self._recording_stt = stt
         try:
-            if self._stt:
-                self._stt.start_stream()
+            if stt:
+                stt.start_stream()
                 # Feed pre-roll into the STT engine immediately
                 if pre_roll is not None and len(pre_roll) > 0:
                     pre_roll_int16 = (pre_roll * 32767).astype(np.int16)
-                    self._stt.feed_audio(pre_roll_int16.tobytes())
+                    stt.feed_audio(pre_roll_int16.tobytes())
         except Exception:
             # The pill is already on screen and audio is already capturing.
             # If STT cannot start (e.g. the GPU worker fails to spawn), tear
@@ -552,7 +558,9 @@ class App:
 
     async def _process_pipeline(self) -> str | None:
         """Run the full pipeline: collect audio → STT → polish → text."""
-        if not self._audio or not self._stt:
+        stt = self._recording_stt or self._stt
+        self._recording_stt = None
+        if not self._audio or not stt:
             return None
 
         # The stream opened by start_stream() must always be closed: the
@@ -582,12 +590,12 @@ class App:
                 from linux_whisper.audio import apply_agc
 
                 audio_float = apply_agc(np.concatenate(collected))
-                self._stt.feed_audio(self._to_pcm(audio_float))
-            result = self._stt.finalize()
+                stt.feed_audio(self._to_pcm(audio_float))
+            result = stt.finalize()
         finally:
             if feed is not None and not feed.done():
                 feed.cancel()
-            self._stt.reset()
+            stt.reset()
 
         if not result or not result.full_text.strip():
             return None
@@ -629,13 +637,14 @@ class App:
         if feed is not None and not feed.done():
             feed.cancel()
 
-    def _engine_handles_gain(self) -> bool:
+    @staticmethod
+    def _engine_handles_gain(stt: STTEngine | None) -> bool:
         """Whether the STT engine applies the configured gain control itself.
 
         The GPU engine does, per window; for other engines the app applies
         it to the whole recording, which needs the recording to be complete.
         """
-        return getattr(self._stt, "handles_gain_control", False) is True
+        return getattr(stt, "handles_gain_control", False) is True
 
     @staticmethod
     def _to_pcm(samples: np.ndarray) -> bytes:
@@ -651,11 +660,11 @@ class App:
         number of samples received and the collected chunks (empty when fed
         live). The pre-roll is fed separately, in ``_on_recording_start``.
         """
-        stt = self._stt
+        stt = self._recording_stt or self._stt
         audio = self._audio
         if stt is None or audio is None:
             return 0, []
-        live = not self.config.audio.auto_gain or self._engine_handles_gain()
+        live = not self.config.audio.auto_gain or self._engine_handles_gain(stt)
         n_samples = 0
         collected: list[np.ndarray] = []
         async for chunk in audio.audio_chunks():

@@ -1347,6 +1347,17 @@ class TestGPUWindowCut:
         assert 25 * _SR <= cut <= 30 * _SR
 
 
+def test_frame_rms_measures_a_partial_final_frame():
+    import numpy as np
+
+    from linux_whisper.stt.whisper_gpu import _frame_rms
+
+    samples = np.concatenate([np.zeros(1600), np.full(1280, 1000)]).astype(np.int16)
+    assert _frame_rms(samples, 1600).tolist() == pytest.approx([0.0, 1000.0])
+    assert _frame_rms(np.full(800, 500, dtype=np.int16), 1600).tolist() == [500.0]
+    assert _frame_rms(np.empty(0, dtype=np.int16), 1600).tolist() == [0.0]
+
+
 class TestGPUWindowedTranscription:
     """Background windows against the synthetic echo worker."""
 
@@ -1490,6 +1501,36 @@ class TestGPUWindowedTranscription:
         numbers = [number for number, _, _ in _parse_echo(result.full_text)]
         assert numbers == ([1, 2] if final_word else [1])
         assert result.duration == pytest.approx((len(window) + len(tail)) / _SR)
+        engine.close()
+
+    def test_tail_above_absolute_ceiling_is_kept_even_near_the_floor(self, monkeypatch):
+        # Quiet continuous speech with no real pause: the "floor" is speech,
+        # so a final phrase at the same level passes the ratio test but sits
+        # above the absolute silence ceiling, and must still be transcribed.
+        engine = self._engine()
+        audio = _noise(31, amplitude=800)
+        with _synthetic_gpu_workers(monkeypatch, "echo"):
+            engine.start_stream()
+            _feed_in_chunks(engine, audio)
+            result = engine.finalize()
+        assert [n for n, _, _ in _parse_echo(result.full_text)] == [1, 2]
+        engine.close()
+
+    def test_short_burst_after_silence_in_partial_frame_keeps_tail(self, monkeypatch):
+        import numpy as np
+
+        engine = self._engine()
+        window = _noise(30)
+        window[int(29.0 * _SR) :] = _noise(1.0, amplitude=50, seed=2)
+        # 100 ms at the floor, then an 80 ms word that ends mid-frame.
+        tail = np.concatenate(
+            [_noise(0.1, amplitude=50, seed=3), _noise(0.08, amplitude=3000, seed=4)]
+        )
+        with _synthetic_gpu_workers(monkeypatch, "echo"):
+            engine.start_stream()
+            _feed_in_chunks(engine, np.concatenate([window, tail]))
+            result = engine.finalize()
+        assert [n for n, _, _ in _parse_echo(result.full_text)] == [1, 2]
         engine.close()
 
     def test_failed_window_raises_once_and_reaps_worker(self, monkeypatch):

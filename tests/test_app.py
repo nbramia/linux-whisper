@@ -699,6 +699,29 @@ class TestFeedDuringRecording:
         assert text == "long dictation"
         assert app._stt_feed is None
 
+    async def test_model_change_mid_recording_finishes_on_the_recording_engine(self):
+        app = _make_app(_make_config(polish=PolishConfig(enabled=False)))
+        recording, replacement = _WindowedEngine(), _WindowedEngine()
+        audio = _LiveAudio()
+        audio.start_recording = lambda: None
+        app._stt, app._audio = recording, audio
+        chunk = np.full(576, 0.1, dtype=np.float32)
+
+        app._on_recording_start()  # no loop: starts the stream only
+        await app._handle_recording_start()
+        audio.push(chunk)
+        assert await _settle(lambda: len(recording.fed) == 1)
+
+        app._stt = replacement  # tray model switch lands mid-recording
+        audio.push(chunk)
+        await app.state.transition(AppState.PROCESSING)
+        assert await app._process_pipeline() == "long dictation"
+
+        assert recording.fed == [_pcm(chunk), _pcm(chunk)]
+        assert (recording.finalize_calls, recording.reset_calls) == (1, 1)
+        assert replacement.fed == []
+        assert (replacement.finalize_calls, replacement.reset_calls) == (0, 0)
+
     async def test_engine_without_own_gain_gets_whole_recording_at_stop(self):
         app = _make_app(
             _make_config(audio=AudioConfig(auto_gain=True), polish=PolishConfig(enabled=False))
