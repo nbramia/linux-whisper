@@ -408,25 +408,40 @@ class TestGPUWorkerIPC:
                 duration=1.0,
             )
 
-        with pytest.raises(GPUWorkerProtocolError, match="invalid segment timing"):
-            _parse_result(
-                {
-                    "status": "ok",
-                    "full_text": "synthetic",
-                    "segments": [{"text": "synthetic", "t0": 0.0, "t1": 2.01}],
-                },
-                duration=1.0,
-            )
+        for bad in (-0.1, float("nan"), float("inf")):
+            with pytest.raises(GPUWorkerProtocolError, match="invalid segment timing"):
+                _parse_result(
+                    {
+                        "status": "ok",
+                        "full_text": "synthetic",
+                        "segments": [{"text": "synthetic", "t0": bad, "t1": 1.0}],
+                    },
+                    duration=1.0,
+                )
+
+    @pytest.mark.parametrize(
+        ("t0", "t1", "start", "end"),
+        [
+            (0.0, 2.19, 0.0, 1.0),  # 1.19 s overrun
+            (0.5, 28.0, 0.5, 1.0),  # 30 s window end
+            (1.5, 2.0, 1.0, 1.0),  # start past the clip clamps too
+            (0.0, 1.0, 0.0, 1.0),  # well-formed is unchanged
+        ],
+    )
+    def test_segment_end_past_clip_is_clamped(self, t0, t1, start, end):
+        from linux_whisper.stt.whisper_gpu import _parse_result
 
         result = _parse_result(
             {
                 "status": "ok",
                 "full_text": "synthetic",
-                "segments": [{"text": "synthetic", "t0": 0.0, "t1": 2.0}],
+                "segments": [{"text": "synthetic", "t0": t0, "t1": t1}],
             },
             duration=1.0,
         )
-        assert result.segments[0].end_time == 2.0
+        assert result.full_text == "synthetic"
+        assert result.segments[0].start_time == start
+        assert result.segments[0].end_time == end
 
     def test_startup_hang_reaps_worker_and_replacement_recovers(self, monkeypatch):
         import linux_whisper.stt.whisper_gpu as whisper_gpu
