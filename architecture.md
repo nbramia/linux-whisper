@@ -75,6 +75,8 @@ Captures global hotkeys regardless of focused application.
 
 **Implementation:** `evdev` — reads directly from `/dev/input/event*` devices. This works on both X11 and Wayland without requiring root (user must be in the `input` group). No dependency on desktop environment.
 
+The daemon also opens pointer devices, for button presses only, and counts key and mouse-button presses other than the hotkey and bare modifiers in `input_generation`; the spacing rule in Stage 5 reads it. ydotool's virtual keyboard is never opened.
+
 **Why not alternatives:**
 - `keyboard` (Python lib): Requires root on Linux
 - `pynput`: X11-only, broken on Wayland
@@ -504,6 +506,24 @@ Typing delays: Ubuntu's ydotool 0.1.8 without `ydotoold` creates a fresh virtual
 
 **Strategy:** Detect the display server and compositor at startup. Use `wtype` if available (wlroots), fall back to `ydotool`, with clipboard injection as a last resort.
 
+### Spacing Between Successive Dictations
+
+The polish stage strips surrounding whitespace, so two dictations in a row would otherwise land as "Meet at four.Bring the docs.". The character before the caret cannot be read here: GNOME Wayland exposes no focused-window API, and the accessibility tree of the Electron and Chromium windows people dictate into reports no focused text object. The only reliable knowledge at injection time is what the app typed last and whether the user has touched the keyboard or mouse since.
+
+`App._inject_text` therefore prepends one space, through `leading_space(text, previous_end, user_input_since)` in `inject/injector.py`, exactly when:
+
+- the previous injection succeeded and its last character (`previous_end`) is not whitespace,
+- the hotkey daemon's `input_generation` counter is unchanged since that injection started, on the same daemon instance (a mode change replaces the daemon, which counts as input), and
+- the new text is non-empty and does not start with whitespace or one of `.,;:!?)]}`.
+
+Otherwise the text is typed unchanged. The counter is read before `inject()` is called, so a key or click while ydotool is typing prevents the next space. A failed injection may have typed part of its text, so it clears the remembered state and the next dictation gets no space. There is no trailing-space mode: a space only ever goes in front, and only when the previous text is known to be right behind the caret. Polished text and voice snippets both reach `_inject_text`, so both follow the rule. `inject.auto_space: false` turns it off.
+
+`HotkeyDaemon.input_generation` advances on every key-down that is not a modifier and not the hotkey itself (repeats and releases do not count; the hotkey's principal key pressed without its modifiers is ordinary typing and does count), and on every button press from a pointer device, side buttons included, since they navigate or change focus. Pointers (EV_KEY devices with `BTN_LEFT` and no `KEY_A`) are opened alongside keyboards, kept through the same rescan and stale-handle checks, and routed only to the counter, never to the hotkey state machine. Devices whose name contains "ydotool" are skipped, so the app's own typing never counts as user input. The counter is a plain int written only by the daemon thread and read from the asyncio thread.
+
+No space is added for the first dictation of a session, after Enter or any other key, after a mouse click, before dictated attaching punctuation, or after text ending in whitespace. Known gap: libinput synthesises touchpad taps in userspace, so a tap-to-click never appears as an evdev button press, and a dictation after moving the caret with a tap may get a space it should not.
+
+`python -m tests.benchmarks.typing_harness gtk --successive 3` types three fixture sentences as separate injections with the rule applied and checks the window holds them joined by single spaces with none in front.
+
 ### Input Method Framework (Future)
 
 The most robust long-term solution is implementing an IBus or Fcitx5 input method. This integrates natively with the Linux input stack and works on both X11 and Wayland without hacks. However, it's significantly more complex to implement and is deferred to a later version.
@@ -713,6 +733,7 @@ audio:
 inject:
   method: "auto"  # auto | xdotool | ydotool | wtype | clipboard
   typing_delay: 0  # ms per character on every typing backend; 0 is honoured (no added delay)
+  auto_space: true  # one space before a dictation that directly follows the previous one
 
 # UI
 tray:

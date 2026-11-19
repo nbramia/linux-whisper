@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from linux_whisper.config import InjectConfig
 from linux_whisper.inject.injector import (
     ClipboardInjector,
@@ -17,7 +19,35 @@ from linux_whisper.inject.injector import (
     _detect_display_server,
     _is_wlroots_compositor,
     detect_injector,
+    leading_space,
 )
+
+# ── Spacing between successive dictations ───────────────────────────────────
+
+
+class TestLeadingSpace:
+
+    @pytest.mark.parametrize(
+        ("text", "previous_end", "user_input_since", "expected"),
+        [
+            ("Bring the docs.", ".", False, " "),
+            ("bring", "r", False, " "),
+            ("Bring", "e", True, ""),  # key or click since: caret may have moved
+            ("Bring", None, False, ""),  # first dictation of the session
+            ("Bring", " ", False, ""),  # previous text ended in whitespace
+            ("Bring", "\n", False, ""),
+            ("Bring", "\t", False, ""),
+            ("", ".", False, ""),
+            (" Bring", ".", False, ""),  # already starts with whitespace
+            ("\nBring", ".", False, ""),
+            *[(f"{p} then", "r", False, "") for p in ".,;:!?)]}"],  # attaching punctuation
+            ("(aside)", "r", False, " "),  # opening brackets do not attach
+            ("\"quoted\"", "r", False, " "),
+        ],
+    )
+    def test_rule(self, text, previous_end, user_input_since, expected):
+        assert leading_space(text, previous_end, user_input_since) == expected
+
 
 # ── Display server detection ────────────────────────────────────────────────
 

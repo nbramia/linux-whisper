@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from linux_whisper.config import Config
+from linux_whisper.inject.injector import leading_space
 from linux_whisper.state import AppState, StateMachine
 
 if TYPE_CHECKING:
@@ -95,6 +96,10 @@ class App:
         # on the engine that holds its audio.
         self._recording_stt: STTEngine | None = None
         self._stt_feed: asyncio.Future[tuple[int, list[np.ndarray]]] | None = None
+        # The last successful injection: its final character, the daemon that
+        # was running and its input counter at that moment.  Decides whether
+        # the next dictation needs a leading space (see ``leading_space``).
+        self._last_injection: tuple[str, HotkeyDaemon | None, int] | None = None
 
     async def setup(self) -> None:
         """Initialize all components. Call before run()."""
@@ -743,13 +748,43 @@ class App:
         return np.concatenate(regions)
 
     async def _inject_text(self, text: str) -> None:
-        """Inject text at the cursor position."""
+        """Inject text at the cursor position.
+
+        With ``inject.auto_space`` on, a space goes in front when the caret is
+        known to sit right after the previous dictation: that injection
+        succeeded and the hotkey daemon has seen no key or mouse-button press
+        since.  Both polished text and voice snippets come through here.
+        """
         if not self._injector:
             logger.warning("No text injector available")
             return
+        if self.config.inject.auto_space and text:
+            text = self._leading_space(text) + text
+        # Snapshot before typing: a key or click while ydotool types must count
+        # as input after this dictation (ydotool's own device is not read).
+        daemon = self._hotkey
+        generation = daemon.input_generation if daemon is not None else 0
         success = await self._injector.inject(text)
         if not success:
             logger.error("Text injection failed")
+            # A failure may be partial, so where the caret is is unknown.
+            self._last_injection = None
+            return
+        if text:
+            self._last_injection = (text[-1], daemon, generation)
+
+    def _leading_space(self, text: str) -> str:
+        """The prefix ``leading_space`` gives *text* after the last injection."""
+        if self._last_injection is None:
+            return ""
+        previous_end, daemon, generation = self._last_injection
+        # No daemon means no way to know the user stayed put; a replaced
+        # daemon (mode change) has its own counter, so treat it the same.
+        current = self._hotkey
+        user_input_since = (
+            current is None or current is not daemon or current.input_generation != generation
+        )
+        return leading_space(text, previous_end, user_input_since)
 
     def _record_latency(self, latency: float) -> None:
         """Track latency for stats."""

@@ -1393,6 +1393,131 @@ class TestInjectText:
         await app._inject_text("hello")
 
 
+class TestInjectSpacing:
+    """A space goes between successive dictations only when the caret stayed put."""
+
+    @staticmethod
+    def _app(auto_space: bool = True, inject_ok: bool = True):
+        app = _make_app(_make_config(inject=InjectConfig(method="auto", auto_space=auto_space)))
+        app._injector = AsyncMock()
+        app._injector.inject = AsyncMock(return_value=inject_ok)
+        app._hotkey = MagicMock(input_generation=0)
+        return app
+
+    @staticmethod
+    def _sent(app) -> list[str]:
+        return [c.args[0] for c in app._injector.inject.await_args_list]
+
+    async def test_successive_dictations_get_one_space(self):
+        app = self._app()
+        await app._inject_text("Meet at four.")
+        await app._inject_text("Bring the docs.")
+        assert self._sent(app) == ["Meet at four.", " Bring the docs."]
+
+    async def test_key_or_click_between_dictations_means_no_space(self):
+        app = self._app()
+        await app._inject_text("Meet at four.")
+        app._hotkey.input_generation += 1  # the daemon saw a key or mouse-button press
+        await app._inject_text("Bring the docs.")
+        assert self._sent(app) == ["Meet at four.", "Bring the docs."]
+
+    async def test_first_dictation_is_unchanged(self):
+        app = self._app()
+        await app._inject_text("Meet at four.")
+        assert self._sent(app) == ["Meet at four."]
+
+    async def test_failed_injection_is_not_remembered(self):
+        app = self._app(inject_ok=False)
+        await app._inject_text("Meet at four.")
+        app._injector.inject.return_value = True
+        await app._inject_text("Bring the docs.")
+        assert self._sent(app)[-1] == "Bring the docs."
+
+    async def test_failure_forgets_the_earlier_memory(self):
+        # A failed injection may have typed part of its text: caret unknown.
+        app = self._app()
+        await app._inject_text("Meet at four.")
+        app._injector.inject.return_value = False
+        await app._inject_text("Lost")
+        app._injector.inject.return_value = True
+        await app._inject_text("Bring the docs.")
+        assert self._sent(app)[-1] == "Bring the docs."
+
+    async def test_input_during_typing_counts_as_after_the_dictation(self):
+        # The counter is snapshotted before inject(); a click while ydotool
+        # types must prevent the next space.
+        app = self._app()
+
+        async def typing_with_click(text):
+            app._hotkey.input_generation += 1
+            return True
+
+        app._injector.inject.side_effect = typing_with_click
+        await app._inject_text("Meet at four.")
+        app._injector.inject.side_effect = None
+        app._injector.inject.return_value = True
+        await app._inject_text("Bring the docs.")
+        assert self._sent(app) == ["Meet at four.", "Bring the docs."]
+
+    async def test_previous_text_ending_in_whitespace(self):
+        app = self._app()
+        await app._inject_text("Meet at four. ")
+        await app._inject_text("Bring the docs.")
+        assert self._sent(app)[-1] == "Bring the docs."
+
+    async def test_attaching_punctuation_gets_no_space(self):
+        app = self._app()
+        await app._inject_text("Meet at four")
+        await app._inject_text(", then lunch.")
+        assert self._sent(app)[-1] == ", then lunch."
+
+    async def test_auto_space_off_never_modifies(self):
+        app = self._app(auto_space=False)
+        await app._inject_text("Meet at four.")
+        await app._inject_text("Bring the docs.")
+        assert self._sent(app) == ["Meet at four.", "Bring the docs."]
+
+    async def test_no_daemon_means_no_space(self):
+        app = self._app()
+        app._hotkey = None
+        await app._inject_text("Meet at four.")
+        await app._inject_text("Bring the docs.")
+        assert self._sent(app)[-1] == "Bring the docs."
+
+    async def test_replaced_daemon_means_no_space(self):
+        # A mode change builds a new daemon whose counter restarts; a matching
+        # number from a different daemon must not count as "nothing happened".
+        app = self._app()
+        await app._inject_text("Meet at four.")
+        app._hotkey = MagicMock(input_generation=0)
+        await app._inject_text("Bring the docs.")
+        assert self._sent(app)[-1] == "Bring the docs."
+
+    async def test_snippet_text_goes_through_the_same_rule(self):
+        app = self._app()
+        app._overlay = MagicMock()
+        app._snippets = MagicMock()
+        app._snippets.match.return_value = "user@example.com"
+        app._audio = MagicMock()
+        app._stt = MagicMock()
+        app._stt.finalize.return_value = FakeTranscriptResult(full_text="my email")
+        app._polish = MagicMock()
+
+        async def _fake_chunks():
+            yield FakeAudioChunk(samples=np.ones(16000, dtype=np.float32) * 0.3)
+            yield FakeAudioChunk(samples=np.empty(0, dtype=np.float32), is_final=True)
+
+        app._audio.audio_chunks = _fake_chunks
+
+        await app._inject_text("Write to")
+        await app.state.transition(AppState.RECORDING)
+        with patch("linux_whisper.audio.apply_agc", side_effect=lambda x: x):
+            await app._handle_recording_stop()
+
+        assert self._sent(app) == ["Write to", " user@example.com"]
+        app._polish.process.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # 12. create_app helper
 # ---------------------------------------------------------------------------

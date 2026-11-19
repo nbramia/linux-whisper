@@ -67,6 +67,35 @@ def _is_wlroots_compositor() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Spacing between successive dictations
+# ---------------------------------------------------------------------------
+
+# Text starting with one of these attaches to whatever precedes it, so it never
+# gets a leading space ("four" + "." must stay "four.").
+_ATTACHING_PUNCTUATION = ".,;:!?)]}"
+
+
+def leading_space(text: str, previous_end: str | None, user_input_since: bool) -> str:
+    """Return the prefix to type before *text*: ``" "`` or ``""``.
+
+    The caret position cannot be read on GNOME Wayland, so the only thing known
+    for sure is what this app typed last.  A space goes in front only when the
+    caret is known to sit right after that text: *previous_end* (the last
+    character of the previous successful injection, ``None`` if there was
+    none) is not whitespace, the user has pressed no key or mouse button since
+    (*user_input_since*), and *text* does not itself start with whitespace or
+    attaching punctuation.
+    """
+    if not previous_end or previous_end.isspace():
+        return ""
+    if user_input_since or not text:
+        return ""
+    if text[0].isspace() or text[0] in _ATTACHING_PUNCTUATION:
+        return ""
+    return " "
+
+
+# ---------------------------------------------------------------------------
 # Async subprocess helpers
 # ---------------------------------------------------------------------------
 

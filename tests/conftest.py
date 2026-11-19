@@ -75,6 +75,9 @@ if isinstance(_evdev_stub, MagicMock):
         KEY_F1=59,
         KEY_ENTER=28,
         KEY_SPACE=57,
+        BTN_LEFT=0x110,
+        BTN_RIGHT=0x111,
+        BTN_MIDDLE=0x112,
     )
     _evdev_stub.ecodes = ecodes
     _evdev_stub.InputDevice = MagicMock

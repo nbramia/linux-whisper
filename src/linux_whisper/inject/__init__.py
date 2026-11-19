@@ -8,6 +8,7 @@ from linux_whisper.inject.injector import (
     XdotoolInjector,
     YdotoolInjector,
     detect_injector,
+    leading_space,
 )
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     "XdotoolInjector",
     "YdotoolInjector",
     "detect_injector",
+    "leading_space",
 ]

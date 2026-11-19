@@ -22,7 +22,7 @@ Local voice dictation for Linux. Press a hotkey, speak naturally with filler wor
 - **Hot-swappable models** from the system tray menu with automatic config persistence
 - **Four-stage polish pipeline**: BERT disfluency removal, ELECTRA/rule-based punctuation, spoken-form formatting, conditional LLM correction
 - **Pre-roll buffer** (750ms) captures audio before the hotkey press
-- **Text injection** auto-detects display server and compositor
+- **Text injection** auto-detects display server and compositor, and puts one space between successive dictations typed into the same spot
 - **System tray** with state icons, model/mode switcher, snippets menu, latency stats
 - **Floating GTK3 pill overlay** (via XWayland) with animated audio level bars driven by live mic input — the primary recording indicator; positioned at `bottom-center` (default), `center`, or `top-center` via config, never steals input focus
 - **Full YAML configuration** with validation
@@ -219,6 +219,7 @@ audio:
 inject:
   method: "auto"               # auto | xdotool | ydotool | wtype | clipboard
   typing_delay: 0              # ms per character on every typing backend; 0 is honoured
+  auto_space: true             # space before a dictation that follows the previous one
 
 # System tray
 tray:
@@ -237,6 +238,34 @@ snippets:
   #   Hi team,
   #   Following up on our meeting...
 ```
+
+## Spacing between dictations
+
+The polish stage strips surrounding whitespace, so without help two
+dictations in a row would run together ("Meet at four.Bring the docs.").
+With `inject.auto_space: true` (the default) the app puts **one space in
+front** of a dictation when it knows the caret still sits right after its
+previous one:
+
+- the previous injection succeeded and ended in a non-whitespace character,
+- no key other than the hotkey (and bare modifiers) and no mouse button has
+  been pressed since it started typing, and
+- the new text does not start with whitespace or attaching punctuation
+  (`. , ; : ! ? ) ] }`).
+
+Otherwise the text is typed as is. In practice no space is added for the
+first dictation of a session, after you press Enter or any other key, after
+a mouse click anywhere, after a failed injection, before punctuation you dictate on its own, or after
+text that already ended in whitespace. A space is never added at the end of
+a dictation. Voice snippets follow the same rule.
+
+The caret cannot be read on GNOME Wayland, so the "has anything happened
+since" signal comes from the hotkey daemon, which reads keyboards and mice
+through evdev and ignores ydotool's own virtual keyboard. One gap: libinput
+synthesises **touchpad taps** in userspace, so a tap-to-click never reaches
+evdev as a button press. After moving the caret with a tap, a following
+dictation may get a space it should not; a physical click, or any key,
+avoids it. Set `auto_space: false` to turn the behaviour off.
 
 ## Hotkeys and keyboard remappers
 
