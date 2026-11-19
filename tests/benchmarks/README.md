@@ -37,6 +37,12 @@ merge gate.
 Splitting them this way is deliberate: the polish stages are text-in/text-out, so
 scoring them through an STT backend would just add noise to the measurement.
 
+Polish capitalisation is scored **per fixture and micro-averaged**: each
+expected/actual pair is aligned word by word on its own, and matching positions
+and compared positions are summed across fixtures before dividing. Joining the
+whole corpus into one string first would let a single inserted or deleted word
+shift every later fixture out of alignment.
+
 ## Fixtures
 
 **Audio** defaults to the first N LibriSpeech `test-clean` utterances in sorted

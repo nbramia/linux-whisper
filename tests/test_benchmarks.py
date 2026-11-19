@@ -192,6 +192,36 @@ class TestCapitalizationAccuracy:
         assert metrics.capitalization_accuracy("", "") == 1.0
 
 
+class TestCorpusCapitalizationAccuracy:
+    def test_sums_matches_and_positions_across_fixtures(self) -> None:
+        pairs = [("The Cat", "The cat"), ("Go Now Please", "Go Now Please")]
+        assert metrics.corpus_capitalization_accuracy(pairs) == pytest.approx(4 / 5)
+
+    def test_extra_word_in_one_fixture_does_not_affect_the_others(self) -> None:
+        clean = [
+            ("The deploy just needs another review.", "The deploy just needs another review."),
+            ("Send it to Rachel.", "Send it to Rachel."),
+            ("I talked to Nathan on Friday.", "I talked to Nathan on Friday."),
+        ]
+        with_extra_word = [
+            (
+                "The deploy just needs another review.",
+                "The deploy basically just needs another review.",
+            ),
+            *clean[1:],
+        ]
+        assert metrics.corpus_capitalization_accuracy(clean) == 1.0
+        assert metrics.corpus_capitalization_accuracy(with_extra_word) == 1.0
+        # The joined-corpus score this replaces was thrown off by that one word.
+        joined = metrics.capitalization_accuracy(
+            " ".join(r for r, _ in with_extra_word), " ".join(h for _, h in with_extra_word)
+        )
+        assert joined < 1.0
+
+    def test_empty_corpus(self) -> None:
+        assert metrics.corpus_capitalization_accuracy([]) == 1.0
+
+
 # ---------------------------------------------------------------------------
 # Latency
 # ---------------------------------------------------------------------------
