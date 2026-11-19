@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import pytest
 
+from linux_whisper import __version__
 from linux_whisper.cli import main
 
 # ── Argument parsing ────────────────────────────────────────────────────────
@@ -24,7 +25,7 @@ class TestCliParsing:
             main(["--version"])
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        assert "0.1.0" in captured.out
+        assert __version__ in captured.out
 
     def test_help_flag(self, capsys):
         with pytest.raises(SystemExit) as exc_info:

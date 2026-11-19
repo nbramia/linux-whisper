@@ -55,9 +55,9 @@ The end-to-end pipeline has 6 stages. Each stage has a latency budget:
 | 4d | Number/date formatting | < 1ms | < 1ms | Rule-based spoken-form conversion |
 | 4c | Self-correction + grammar | **~150ms** | ~370ms | Qwen3-4B-Instruct-2507 Q4_K_M (GPU), only when needed |
 | -- | Focused app detection | < 10ms | < 10ms | xdotool/swaymsg/hyprctl subprocess |
-| 5 | Text injection | < 20ms | < 20ms | ydotool/xdotool/wtype/clipboard |
-| **Total (simple)** | | **~340ms** | ~2.6s | **No self-corrections detected** |
-| **Total (complex)** | | **~490ms** | ~2.9s | **Self-corrections present → LLM invoked** |
+| 5 | Text injection | **~110ms** | ~110ms | ydotool: 60ms virtual-keyboard start + ~0.4ms per character (110-char sentence); xdotool/wtype/clipboard |
+| **Total (simple)** | | **~450ms** | ~2.7s | **No self-corrections detected**, 110-character sentence |
+| **Total (complex)** | | **~600ms** | ~3.0s | **Self-corrections present → LLM invoked** |
 
 Stage 3 (STT) receives audio while recording: the app feeds each 36 ms chunk to the engine as it arrives, after the pre-roll fed at recording start. The default backend is **whisper.cpp large-v3-turbo** with ROCm GPU acceleration via ggml's HIP backend, running in a **separate subprocess** to avoid a shared-library conflict with onnxruntime (both link `libamdhip64`). The `WhisperGPUEngine` spawns a worker process that loads pywhispercpp, communicates via deadline-bounded stdin/stdout frames, and stays warm between transcriptions — until it has been idle (no stream in progress, no transcription) for `stt.gpu_idle_unload_s` seconds, 20 minutes by default. It is then stopped through the normal shutdown path, so its ~4GB of VRAM and one of the GPU's eight hardware SDMA queues go back to other GPU jobs (each of the three resident engines — the dictation app and two voice relays — otherwise pins a queue forever, starving nightly embedding jobs). `start_stream` cancels the countdown and `finalize`/`reset` restart it, so a stream is never unloaded mid-recording; the next stream after an unload starts a fresh worker through the normal replacement path, adding the ~4s model load to that one dictation. One lock guards the worker handle against the timer thread but is released during inference, so a hotkey-thread `start_stream` never waits behind a transcription, and an in-flight transcription blocks unloading just as an open stream does. The timer holds only a weak reference so a discarded engine is still collected. `0` disables unloading. A startup, IPC, protocol, malformed-success payload, or inference failure kills and reaps the process before a later stream starts a replacement, while a completed recognition with no segments remains a normal silence result. Successful frames must reproduce the worker's joined segment text and must have finite, non-negative, ordered timings; an end time (or start time) beyond the measured clip is clamped to the clip duration, because whisper.cpp predicts it on silence-padded audio, and the transcription is kept. On systems without ROCm, it falls back to CPU automatically.
 
@@ -487,10 +487,10 @@ xdotool type --clearmodifiers -- "$text"
 
 Wayland's security model intentionally prevents applications from synthesizing input events in other windows. Two approaches:
 
-**Option A: `ydotool`** (requires `ydotoold` daemon running as root or with uinput access)
-- Creates a virtual input device via `/dev/uinput`
+**Option A: `ydotool`** (the default on GNOME and KDE Wayland)
+- Creates a virtual input device via `/dev/uinput`; the user must be in the `input` group
 - Works across all Wayland compositors
-- Requires user to be in the `input` group or `ydotoold` running as a service
+- Runs without the `ydotoold` daemon. The daemon in ydotool 1.0 is not used: it delivers each key event as a datagram and drops most of them at any delay short enough to be useful
 
 Typing delays: Ubuntu's ydotool 0.1.8 without `ydotoold` creates a fresh virtual keyboard per call, so the injector always passes `--delay 60` (start delay; the compositor needs about 50 ms to register the device, and lower values drop the first characters) and `--key-delay <typing_delay>` (ms per character). `typing_delay: 0` measured clean (no lost or reordered characters) for 350 characters in GTK, VTE and Chromium, in about 0.17 s. Raise `typing_delay` to 1 if an application drops characters.
 
