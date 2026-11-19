@@ -89,6 +89,8 @@ class App:
         self._injector: TextInjector | None = None
         self._tray: SystemTray | None = None
         self._overlay: Overlay | None = None
+        # Consumes the open recording's audio chunks (see _pump_audio_to_stt).
+        self._stt_feed: asyncio.Future[tuple[int, list[np.ndarray]]] | None = None
 
     async def setup(self) -> None:
         """Initialize all components. Call before run()."""
@@ -444,7 +446,11 @@ class App:
         """Async follow-up after recording already started in _on_recording_start."""
         # Audio capture and STT stream already started synchronously in the
         # hotkey thread for minimum latency. Just update async state here.
-        await self.state.transition(AppState.RECORDING)
+        if await self.state.transition(AppState.RECORDING):
+            # Feed STT while the user is still speaking, so the GPU engine can
+            # transcribe completed windows before the key is released.
+            self._cancel_stt_feed()
+            self._stt_feed = asyncio.ensure_future(self._pump_audio_to_stt())
 
         # The pill was already shown synchronously in _on_recording_start.
         asyncio.ensure_future(self._feed_audio_levels())
@@ -554,43 +560,33 @@ class App:
         # would otherwise leave it open, and an open stream pins the GPU
         # worker past its idle-unload countdown. reset() after finalize()
         # is a no-op for the engine's stream state.
+        feed = self._stt_feed
+        self._stt_feed = None
         try:
-            # Stop recording — this emits final audio chunks into the queue
+            # Stop recording — this emits the final chunk into the queue,
+            # which ends the feed once everything before it has been fed.
             self._audio.stop_recording()
+            if feed is None:
+                feed = asyncio.ensure_future(self._pump_audio_to_stt())
+            n_samples, collected = await feed
 
-            # Collect all audio chunks from this recording session
-            audio_segments: list[np.ndarray] = []
-            async for chunk in self._audio.audio_chunks():
-                if chunk.samples is not None and len(chunk.samples) > 0:
-                    audio_segments.append(chunk.samples)
-                if chunk.is_final:
-                    break
-
-            if not audio_segments:
+            if n_samples == 0:
                 return None
+            logger.info(
+                "Recording: %.1fs audio (%d samples)", n_samples / 16000, n_samples
+            )
 
-            # Concatenate all audio
-            audio_float = np.concatenate(audio_segments)
-            if len(audio_float) == 0:
-                return None
-
-            duration = len(audio_float) / 16000
-            logger.info("Recording: %.1fs audio (%d samples)", duration, len(audio_float))
-
-            # Apply automatic gain control for quiet/whispered speech
-            if self.config.audio.auto_gain:
+            if collected:
+                # An engine without its own gain control gets the whole
+                # recording at once, with AGC applied across all of it.
                 from linux_whisper.audio import apply_agc
 
-                audio_float = apply_agc(audio_float)
-
-            # Convert float32 [-1.0, 1.0] to int16 PCM bytes
-            audio_int16 = (audio_float * 32767).astype(np.int16)
-            audio_bytes = audio_int16.tobytes()
-
-            # Feed audio to STT
-            self._stt.feed_audio(audio_bytes)
+                audio_float = apply_agc(np.concatenate(collected))
+                self._stt.feed_audio(self._to_pcm(audio_float))
             result = self._stt.finalize()
         finally:
+            if feed is not None and not feed.done():
+                feed.cancel()
             self._stt.reset()
 
         if not result or not result.full_text.strip():
@@ -627,6 +623,51 @@ class App:
             logger.debug("Polished: %s", text[:100])
 
         return text
+
+    def _cancel_stt_feed(self) -> None:
+        feed, self._stt_feed = self._stt_feed, None
+        if feed is not None and not feed.done():
+            feed.cancel()
+
+    def _engine_handles_gain(self) -> bool:
+        """Whether the STT engine applies the configured gain control itself.
+
+        The GPU engine does, per window; for other engines the app applies
+        it to the whole recording, which needs the recording to be complete.
+        """
+        return getattr(self._stt, "handles_gain_control", False) is True
+
+    @staticmethod
+    def _to_pcm(samples: np.ndarray) -> bytes:
+        """Convert float32 [-1.0, 1.0] samples to int16 PCM bytes."""
+        return (samples * 32767).astype(np.int16).tobytes()
+
+    async def _pump_audio_to_stt(self) -> tuple[int, list[np.ndarray]]:
+        """Consume this recording's audio chunks up to the final one.
+
+        Each chunk goes to the STT engine as it arrives, unless the app must
+        apply gain control to the whole recording first; those chunks are
+        returned for ``_process_pipeline`` to feed at stop. Returns the
+        number of samples received and the collected chunks (empty when fed
+        live). The pre-roll is fed separately, in ``_on_recording_start``.
+        """
+        stt = self._stt
+        audio = self._audio
+        if stt is None or audio is None:
+            return 0, []
+        live = not self.config.audio.auto_gain or self._engine_handles_gain()
+        n_samples = 0
+        collected: list[np.ndarray] = []
+        async for chunk in audio.audio_chunks():
+            if chunk.samples is not None and len(chunk.samples) > 0:
+                n_samples += len(chunk.samples)
+                if live:
+                    stt.feed_audio(self._to_pcm(chunk.samples))
+                else:
+                    collected.append(chunk.samples)
+            if chunk.is_final:
+                break
+        return n_samples, collected
 
     @staticmethod
     def _trim_silence(

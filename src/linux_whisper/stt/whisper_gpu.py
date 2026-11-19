@@ -7,6 +7,14 @@ been idle for ``stt.gpu_idle_unload_s`` seconds; it is then stopped to release
 its GPU memory and SDMA queue, and the next stream starts a fresh worker.
 
 Communication uses length-prefixed JSON over stdin/stdout pipes.
+
+Long dictations are transcribed while they are being recorded. Whenever the
+pending audio of an open stream reaches one whisper window (30 s), the engine
+cuts it at the quietest 200 ms in the window's last 5 s and sends the part
+before the cut to the worker on a background thread, carrying the rest into
+the next window. ``finalize`` then only has the tail (at most one window) left
+to transcribe. Recordings shorter than one window are sent as a single request
+at ``finalize``.
 """
 
 from __future__ import annotations
@@ -21,8 +29,11 @@ import sys
 import threading
 import time
 import weakref
+from dataclasses import dataclass
 from math import isfinite
 from pathlib import Path
+
+import numpy as np
 
 from linux_whisper.config import MODELS_DIR, Config
 from linux_whisper.stt.engine import TranscriptResult, TranscriptSegment
@@ -40,6 +51,22 @@ _SAMPLE_WIDTH = 2
 _WORKER_STARTUP_TIMEOUT = 60.0  # model load can take ~10-15s on first run
 _WORKER_INFERENCE_TIMEOUT = 120.0
 _MAX_RESPONSE_BYTES = 1_048_576
+
+# Windowed transcription. A window never exceeds whisper's own 30 s input, so
+# each one is a single encoder pass; it is cut at the quietest 200 ms frame in
+# its last 5 s so a word is unlikely to straddle the boundary.
+_WINDOW_SAMPLES = 30 * _SAMPLE_RATE
+_CUT_SEARCH_SAMPLES = 5 * _SAMPLE_RATE
+_CUT_FRAME_SAMPLES = _SAMPLE_RATE // 5
+_CUT_HOP_SAMPLES = _SAMPLE_RATE // 100
+# Whisper invents text ("Thank you.", "you") for audio with no speech in it.
+# A tail left after the last window can be nothing but the pause before the
+# key was released, so it is skipped when no 100 ms of it is louder than this
+# multiple of the stream's quietest 200 ms (its noise floor). On the recorded
+# dictation fixtures, trailing silence peaks at 1.6x and speech at 2.3x+.
+_SILENT_TAIL_RATIO = 2.0
+_FLOOR_FRAME_SAMPLES = _SAMPLE_RATE // 5
+_TAIL_FRAME_SAMPLES = _SAMPLE_RATE // 10
 
 
 class GPUWorkerError(RuntimeError):
@@ -103,6 +130,93 @@ def _parse_result(msg: dict, *, duration: float) -> TranscriptResult:
     if msg["full_text"] != " ".join(segment.text for segment in segments):
         raise GPUWorkerProtocolError("GPU worker response has inconsistent text")
     return TranscriptResult(segments=segments, full_text=msg["full_text"], duration=duration)
+
+
+def _choose_cut(window: np.ndarray) -> int:
+    """Return where to end a full window of int16 *window* samples.
+
+    The cut is the centre of the lowest-energy 200 ms frame (on a 10 ms hop)
+    within the last 5 s of the window; ties go to the earliest frame.
+    """
+    total = len(window)
+    search_start = max(0, total - _CUT_SEARCH_SAMPLES)
+    region = window[search_start:].astype(np.float64)
+    if len(region) <= _CUT_FRAME_SAMPLES:
+        return total
+    energy = np.concatenate(([0.0], np.cumsum(region * region)))
+    starts = np.arange(0, len(region) - _CUT_FRAME_SAMPLES + 1, _CUT_HOP_SAMPLES)
+    frame_energy = energy[starts + _CUT_FRAME_SAMPLES] - energy[starts]
+    best = int(starts[int(np.argmin(frame_energy))])
+    return search_start + best + _CUT_FRAME_SAMPLES // 2
+
+
+def _frame_rms(samples: np.ndarray, frame: int) -> np.ndarray:
+    """RMS of each whole *frame*-sample frame of int16 *samples*.
+
+    Audio shorter than one frame is measured as a single frame.
+    """
+    values = samples.astype(np.float64)
+    count = len(values) // frame
+    if count == 0:
+        return np.array([np.sqrt(np.mean(values * values)) if len(values) else 0.0])
+    frames = values[: count * frame].reshape(count, frame)
+    return np.sqrt(np.mean(frames * frames, axis=1))
+
+
+def _is_silent_tail(tail: bytes, floor_rms: float) -> bool:
+    """Whether *tail* holds nothing louder than the stream's noise floor."""
+    loudest = float(_frame_rms(np.frombuffer(tail, dtype=np.int16), _TAIL_FRAME_SAMPLES).max())
+    return loudest <= _SILENT_TAIL_RATIO * floor_rms
+
+
+def _apply_gain(audio_bytes: bytes) -> bytes:
+    """Apply automatic gain control to one window of int16 PCM."""
+    from linux_whisper.audio import apply_agc
+
+    samples = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32767.0
+    gained = apply_agc(samples)
+    if gained is samples:  # already loud enough (or silent): unchanged
+        return audio_bytes
+    return (gained * 32767).astype(np.int16).tobytes()
+
+
+@dataclass(slots=True, eq=False)
+class _Window:
+    """One background window transcription of an open stream.
+
+    The thread fills in ``result`` or ``error`` and then sets ``done`` under
+    the engine's ``_lock``; ``finalize`` joins the thread before reading them.
+    """
+
+    start_sample: int
+    audio: bytes
+    previous: _Window | None
+    thread: threading.Thread | None = None
+    result: TranscriptResult | None = None
+    error: BaseException | None = None
+    done: bool = False
+    # RMS of the window's quietest 200 ms (or of the frame it was cut
+    # through, if quieter), before gain control.
+    floor_rms: float = 0.0
+    # Not sent because an earlier window of the same stream failed.
+    skipped: bool = False
+    # Already returned from ``feed_audio`` as partial segments.
+    reported: bool = False
+
+
+def _offset_segments(
+    result: TranscriptResult, start_sample: int, *, partial: bool
+) -> list[TranscriptSegment]:
+    offset = start_sample / _SAMPLE_RATE
+    return [
+        TranscriptSegment(
+            text=segment.text,
+            start_time=segment.start_time + offset,
+            end_time=segment.end_time + offset,
+            is_partial=partial,
+        )
+        for segment in result.segments
+    ]
 
 
 def _wait_for_fd(fd: int, *, write: bool, deadline: float, operation: str) -> None:
@@ -173,6 +287,31 @@ def _recv_msg(pipe, *, deadline: float, operation: str) -> dict:
     return msg
 
 
+def _stop_process(process: subprocess.Popen) -> None:
+    """Ask *process* to exit, escalating to terminate and kill; close its pipes."""
+    try:
+        if process.poll() is None and process.stdin is not None:
+            try:
+                _send_msg(
+                    process.stdin,
+                    {"cmd": "shutdown"},
+                    deadline=time.monotonic() + 1.0,
+                    operation="shutdown",
+                )
+                process.wait(timeout=1.0)
+            except Exception:
+                process.terminate()
+                try:
+                    process.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=1.0)
+    finally:
+        for pipe in (process.stdin, process.stdout):
+            if pipe is not None:
+                pipe.close()
+
+
 def _idle_unload_callback(engine_ref: weakref.ref[WhisperGPUEngine], generation: int) -> None:
     """Timer entry point that does not keep a discarded engine alive."""
     engine = engine_ref()
@@ -187,6 +326,10 @@ class WhisperGPUEngine:
     keeping it isolated from onnxruntime in the main process.
     """
 
+    # Gain control (``audio.auto_gain``) is applied here, per window, so the
+    # app feeds raw audio as it is recorded instead of gaining it as a whole.
+    handles_gain_control = True
+
     def __init__(self, config: Config) -> None:
         self._model_name = config.stt.model
         self._threads = config.stt.threads or os.cpu_count() or 4
@@ -195,9 +338,7 @@ class WhisperGPUEngine:
         self._process: subprocess.Popen | None = None
         self._operation_timeout_s = _WORKER_INFERENCE_TIMEOUT
 
-        self._stream_started = False
-        self._audio_buffer = bytearray()
-        self._stream_start_time: float = 0.0
+        self._init_stream_state(auto_gain=config.audio.auto_gain)
         self._init_idle_unload(config.stt.gpu_idle_unload_s)
 
         logger.info(
@@ -208,6 +349,27 @@ class WhisperGPUEngine:
             self._model_path,
         )
 
+    def _init_stream_state(self, *, auto_gain: bool) -> None:
+        # Gain control runs per window here, not on the whole recording in
+        # the app, because windows leave before the recording is complete.
+        self._auto_gain = auto_gain
+        self._stream_started = False
+        # Audio of the open stream not yet sent in a window.
+        self._audio_buffer = bytearray()
+        # Samples of the open stream already sent in background windows.
+        self._dispatched_samples = 0
+        # The open stream's background windows, in audio order. Replaced
+        # rather than cleared when a stream starts, ends or is reset, so a
+        # window thread that outlives its stream only touches its own objects.
+        self._windows: list[_Window] = []
+        self._stream_start_time: float = 0.0
+
+    def _clear_stream_locked(self) -> None:
+        """Drop the open stream's audio and windows; caller holds ``_lock``."""
+        self._audio_buffer = bytearray()
+        self._dispatched_samples = 0
+        self._windows = []
+
     def _init_idle_unload(self, idle_unload_s: float) -> None:
         # ``_lock`` guards ``_process``, the stream flag and the in-flight
         # count against the idle timer thread. It is never held across
@@ -215,11 +377,12 @@ class WhisperGPUEngine:
         # behind a transcription. Re-entrant because ``_ensure_worker`` reaps
         # a dead worker through ``_shutdown_worker`` while holding it.
         self._lock = threading.RLock()
-        # Serialises request/response pairs on the worker's pipes. Only
-        # ``finalize`` takes it, and never while holding ``_lock``.
+        # Serialises request/response pairs on the worker's pipes. Taken by
+        # window threads and ``finalize``, never while holding ``_lock``
+        # (``_lock`` may be taken briefly inside it).
         self._ipc_lock = threading.Lock()
-        # Transcriptions sent to the worker and not yet answered. Like an
-        # open stream, an in-flight transcription blocks idle unload.
+        # Transcriptions (background windows and ``finalize``) not yet
+        # settled. Like an open stream, they block idle unload.
         self._inflight = 0
         self._idle_unload_s: float = idle_unload_s
         self._idle_timer: threading.Timer | None = None
@@ -347,36 +510,30 @@ class WhisperGPUEngine:
         self._cancel_idle_timer()
         process = getattr(self, "_process", None)
         self._process = None
-        if process is None:
-            return
-        try:
-            if process.poll() is None and process.stdin is not None:
-                try:
-                    _send_msg(
-                        process.stdin,
-                        {"cmd": "shutdown"},
-                        deadline=time.monotonic() + 1.0,
-                        operation="shutdown",
-                    )
-                    process.wait(timeout=1.0)
-                except Exception:
-                    process.terminate()
-                    try:
-                        process.wait(timeout=1.0)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait(timeout=1.0)
-        finally:
-            for pipe in (process.stdin, process.stdout):
-                if pipe is not None:
-                    pipe.close()
+        if process is not None:
+            _stop_process(process)
+
+    def _reap(self, process: subprocess.Popen | None) -> None:
+        """Stop *process* after a failed request, unless it was already replaced.
+
+        The process is detached under ``_lock`` and stopped outside it, so a
+        hung worker's escalation to kill never holds up ``feed_audio`` or
+        ``start_stream``. The next ``start_stream`` starts a replacement.
+        """
+        with self._lock:
+            if process is None or self._process is not process:
+                return
+            self._cancel_idle_timer()
+            self._process = None
+        _stop_process(process)
 
     # ------------------------------------------------------------------
     # STTEngine protocol
     # ------------------------------------------------------------------
 
     def _audio_duration(self) -> float:
-        return len(self._audio_buffer) / (_SAMPLE_RATE * _SAMPLE_WIDTH)
+        pending = len(self._audio_buffer) // _SAMPLE_WIDTH
+        return (self._dispatched_samples + pending) / _SAMPLE_RATE
 
     def set_operation_timeout(self, timeout_s: float) -> None:
         """Set the bounded IPC deadline for a caller that owns this engine."""
@@ -395,14 +552,119 @@ class WhisperGPUEngine:
             except BaseException:
                 self._stream_started = False
                 raise
-            self._audio_buffer = bytearray()
+            self._clear_stream_locked()
             self._stream_start_time = time.monotonic()
 
     def feed_audio(self, chunk: bytes) -> list[TranscriptSegment]:
-        if not self._stream_started:
-            raise RuntimeError("start_stream() must be called before feed_audio()")
-        self._audio_buffer.extend(chunk)
-        return []
+        """Buffer *chunk*; send each completed window to the worker in the background.
+
+        Returns the segments of background windows that have finished since
+        the last call, in order and offset to the stream's timeline, marked
+        partial because ``finalize`` returns them again in the full result.
+        Never waits on the worker: a window is handed to its own thread.
+        """
+        with self._lock:
+            if not self._stream_started:
+                raise RuntimeError("start_stream() must be called before feed_audio()")
+            self._audio_buffer.extend(chunk)
+            while len(self._audio_buffer) >= _WINDOW_SAMPLES * _SAMPLE_WIDTH:
+                self._dispatch_window_locked()
+            return self._completed_partials_locked()
+
+    def _dispatch_window_locked(self) -> None:
+        """Cut one window off the pending audio and start its thread; caller holds ``_lock``."""
+        window_samples = np.frombuffer(
+            bytes(self._audio_buffer[: _WINDOW_SAMPLES * _SAMPLE_WIDTH]), dtype=np.int16
+        )
+        cut = _choose_cut(window_samples)
+        half = _CUT_FRAME_SAMPLES // 2
+        previous = self._windows[-1] if self._windows else None
+        window = _Window(
+            start_sample=self._dispatched_samples,
+            audio=window_samples[:cut].tobytes(),
+            previous=previous,
+            # The frame cut through straddles the carried-over audio, so it
+            # counts towards the noise floor along with the window's own.
+            floor_rms=float(_frame_rms(window_samples[cut - half : cut + half], 2 * half)[0]),
+        )
+        del self._audio_buffer[: cut * _SAMPLE_WIDTH]
+        self._dispatched_samples += cut
+        self._windows.append(window)
+        logger.debug(
+            "Dispatching %.1fs window at %.1fs to GPU worker",
+            cut / _SAMPLE_RATE,
+            window.start_sample / _SAMPLE_RATE,
+        )
+
+        thread = threading.Thread(
+            target=self._run_window,
+            args=(window, self._process, self._operation_timeout_s),
+            name="whisper-gpu-window",
+            daemon=True,
+        )
+        window.thread = thread
+        self._inflight += 1
+        try:
+            thread.start()
+        except BaseException as exc:
+            self._inflight -= 1
+            window.thread = None
+            window.error = exc
+            window.done = True
+
+    def _run_window(
+        self,
+        window: _Window,
+        process: subprocess.Popen | None,
+        timeout_s: float,
+    ) -> None:
+        """Window thread: transcribe *window* once every earlier window has settled.
+
+        Windows of one stream go to the worker strictly in order, and none is
+        sent after one has failed, so ``finalize`` reports the first failure.
+        """
+        try:
+            window.floor_rms = min(
+                window.floor_rms,
+                float(
+                    _frame_rms(
+                        np.frombuffer(window.audio, dtype=np.int16), _FLOOR_FRAME_SAMPLES
+                    ).min()
+                ),
+            )
+            previous = window.previous
+            if previous is not None:
+                if previous.thread is not None:
+                    previous.thread.join()
+                if previous.error is not None or previous.skipped:
+                    window.skipped = True
+                    return
+            window.result = self._request(process, window.audio, timeout_s)
+        except BaseException as exc:
+            window.error = exc
+            logger.warning("Background window transcription failed: %s", exc)
+        finally:
+            window.audio = b""
+            window.previous = None
+            with self._lock:
+                window.done = True
+                self._inflight -= 1
+                self._arm_idle_timer()
+
+    def _completed_partials_locked(self) -> list[TranscriptSegment]:
+        """Segments of windows finished since the last call; caller holds ``_lock``."""
+        partials: list[TranscriptSegment] = []
+        for window in self._windows:
+            if window.reported:
+                continue
+            if not window.done:
+                break
+            window.reported = True
+            if window.result is not None:
+                partials.extend(
+                    _offset_segments(window.result, window.start_sample, partial=True)
+                )
+        return partials
 
     def finalize(self) -> TranscriptResult:
         # Snapshot under the lock, run the IPC without it, then settle under
@@ -415,30 +677,41 @@ class WhisperGPUEngine:
 
             duration = self._audio_duration()
             self._stream_started = False
+            windows = self._windows
+            tail = bytes(self._audio_buffer)
+            tail_start = self._dispatched_samples
+            self._clear_stream_locked()
 
-            if not self._audio_buffer:
+            if not windows and not tail:
                 self._arm_idle_timer()
                 return TranscriptResult(duration=duration)
             process = self._process
-            if process is None or process.poll() is not None:
-                self._shutdown_worker()
-                raise GPUWorkerError("GPU worker is unavailable")
-
-            audio_bytes = bytes(self._audio_buffer)
             timeout_s = self._operation_timeout_s
             self._inflight += 1
 
         try:
-            return self._transcribe(process, audio_bytes, duration, timeout_s)
-        except Exception as exc:
-            with self._lock:
-                # Reap only the worker this request used; if it has already
-                # been replaced (or closed), the replacement is not at fault.
-                if self._process is process:
-                    self._shutdown_worker()
-            if isinstance(exc, GPUWorkerError):
-                raise
-            raise GPUWorkerError("failed to communicate with GPU worker") from exc
+            parts: list[tuple[int, TranscriptResult]] = []
+            for window in windows:
+                if window.thread is not None:
+                    window.thread.join()
+            for window in windows:
+                if window.error is not None:
+                    if isinstance(window.error, GPUWorkerError):
+                        raise window.error
+                    raise GPUWorkerError("GPU window transcription failed") from window.error
+                if window.result is None:
+                    raise GPUWorkerError("GPU window transcription did not complete")
+                parts.append((window.start_sample, window.result))
+            if tail and windows:
+                floor_rms = min(window.floor_rms for window in windows)
+                if _is_silent_tail(tail, floor_rms):
+                    logger.debug(
+                        "Skipping %.1fs tail with no audio above the noise floor",
+                        len(tail) / (_SAMPLE_RATE * _SAMPLE_WIDTH),
+                    )
+                    tail = b""
+            if tail:
+                parts.append((tail_start, self._request(process, tail, timeout_s)))
         finally:
             with self._lock:
                 self._inflight -= 1
@@ -447,6 +720,41 @@ class WhisperGPUEngine:
                 # failure, which has already reaped the worker.
                 self._arm_idle_timer()
 
+        segments: list[TranscriptSegment] = []
+        for start_sample, result in parts:
+            segments.extend(_offset_segments(result, start_sample, partial=False))
+        full_text = " ".join(result.full_text for _, result in parts if result.full_text)
+        return TranscriptResult(segments=segments, full_text=full_text, duration=duration)
+
+    def _request(
+        self,
+        process: subprocess.Popen | None,
+        audio_bytes: bytes,
+        timeout_s: float,
+    ) -> TranscriptResult:
+        """Transcribe one window on *process*, reaping it if the request fails.
+
+        Holds ``_ipc_lock`` for the request/response pair and the reap, so a
+        following request can never interleave with a worker being stopped.
+        """
+        if self._auto_gain:
+            audio_bytes = _apply_gain(audio_bytes)
+        with self._ipc_lock:
+            try:
+                with self._lock:
+                    current = process is not None and self._process is process
+                if not current or process.poll() is not None:
+                    raise GPUWorkerError("GPU worker is unavailable")
+                duration = len(audio_bytes) / (_SAMPLE_RATE * _SAMPLE_WIDTH)
+                return self._transcribe(process, audio_bytes, duration, timeout_s)
+            except Exception as exc:
+                # Reap only the worker this request used; if it has already
+                # been replaced (or closed), the replacement is not at fault.
+                self._reap(process)
+                if isinstance(exc, GPUWorkerError):
+                    raise
+                raise GPUWorkerError("failed to communicate with GPU worker") from exc
+
     def _transcribe(
         self,
         process: subprocess.Popen,
@@ -454,24 +762,23 @@ class WhisperGPUEngine:
         duration: float,
         timeout_s: float,
     ) -> TranscriptResult:
-        """Send one transcription to *process* and parse its reply."""
+        """Send one transcription to *process* and parse its reply; caller holds ``_ipc_lock``."""
         logger.debug("Sending %.1fs audio to GPU worker...", duration)
 
-        with self._ipc_lock:
-            deadline = time.monotonic() + timeout_s
-            _send_msg(
-                process.stdin,
-                {"cmd": "transcribe", "audio_length": len(audio_bytes)},
-                deadline=deadline,
-                operation="inference request",
-            )
-            _write_all(
-                process.stdin,
-                audio_bytes,
-                deadline=deadline,
-                operation="inference audio",
-            )
-            msg = _recv_msg(process.stdout, deadline=deadline, operation="inference response")
+        deadline = time.monotonic() + timeout_s
+        _send_msg(
+            process.stdin,
+            {"cmd": "transcribe", "audio_length": len(audio_bytes)},
+            deadline=deadline,
+            operation="inference request",
+        )
+        _write_all(
+            process.stdin,
+            audio_bytes,
+            deadline=deadline,
+            operation="inference audio",
+        )
+        msg = _recv_msg(process.stdout, deadline=deadline, operation="inference response")
         result = _parse_result(msg, duration=duration)
 
         logger.debug(
@@ -483,8 +790,10 @@ class WhisperGPUEngine:
         return result
 
     def reset(self) -> None:
+        # Background windows of an abandoned stream run to completion on
+        # their own threads; their results are dropped with the list.
         with self._lock:
-            self._audio_buffer = bytearray()
+            self._clear_stream_locked()
             was_streaming = self._stream_started
             self._stream_started = False
             if was_streaming:
