@@ -141,6 +141,39 @@ git add tests/benchmarks/baseline/current.json
 Keep the superseded baseline file — the history of what each model swap actually
 bought is the point of the harness.
 
+## Typing harness
+
+`typing_harness.py` measures text injection without ever typing into a window
+it does not own. `ydotool` types into whatever has focus, so pointing it at the
+desktop during development is how test text ends up in someone's chat. The
+harness opens its own window (a GTK text view, a VTE terminal running `cat`, or
+a headed Chromium page), waits until that window is active, types a single
+space and aborts unless that space arrives in its own window, then types the
+fixture text and diffs what the window received against what was sent.
+
+```bash
+python -m tests.benchmarks.typing_harness gtk --chars 350
+python -m tests.benchmarks.typing_harness vte --start-delay 25 --chars 60
+PYTHONPATH=src python -m tests.benchmarks.typing_harness gtk --injector
+```
+
+`--start-delay` and `--key-delay` are passed straight to `ydotool type`;
+`--injector` goes through `YdotoolInjector` instead, with `--key-delay` as its
+`typing_delay`. One `RESULT` line reports wall time and `ok` or the number of
+lost and extra characters.
+
+Numbers behind the injector defaults, measured with it on GNOME Wayland with
+Ubuntu's daemon-less ydotool 0.1.8: a start delay under 50 ms loses the first
+three or four characters (the compositor has not registered the new virtual
+keyboard yet); a key delay of 0 types 350 characters in 150-180 ms into GTK,
+VTE and Chromium with nothing lost, 1200 characters in about 275 ms.
+
+Prefer the `gtk` and `vte` modes: they ask the compositor whether the window is
+active. Chromium's `document.hasFocus()` can report focus it does not have (seen
+under XWayland and native Wayland alike), in which case the probe aborts the run.
+It needs Playwright with a Chromium build; the GTK modes need PyGObject and, for
+`vte`, `gir1.2-vte-2.91`. None of this runs under `pytest tests/`.
+
 ## Caveats
 
 - Latency numbers are hardware-specific. A baseline captured on one machine
