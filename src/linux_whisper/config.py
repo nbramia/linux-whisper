@@ -55,6 +55,8 @@ class PolishConfig:
     llm_model: str = "Qwen3-4B-Instruct-2507-Q4_K_M"
     llm_device: str = "rocm"  # cpu | rocm
     llm_threads: int = 0  # 0 = auto
+    # Seconds without an LLM call before the model is released (0 = never).
+    llm_idle_unload_s: int = 1200
 
 
 @dataclass(frozen=True)
@@ -143,6 +145,11 @@ class Config:
         if self.stt.gpu_idle_unload_s < 0:
             errors.append(
                 f"stt.gpu_idle_unload_s must be >= 0 (0 disables), got {self.stt.gpu_idle_unload_s}"
+            )
+        if self.polish.llm_idle_unload_s < 0:
+            errors.append(
+                "polish.llm_idle_unload_s must be >= 0 (0 disables), "
+                f"got {self.polish.llm_idle_unload_s}"
             )
         if self.inject.method not in InjectConfig.VALID_METHODS:
             errors.append(

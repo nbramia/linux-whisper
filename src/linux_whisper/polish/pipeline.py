@@ -77,6 +77,22 @@ class PolishPipeline:
     # Public API
     # ------------------------------------------------------------------
 
+    def preload_llm(self) -> None:
+        """Load the stage 4c model in the background if it is enabled.
+
+        Never blocks, and is a no-op when the model is already loaded or
+        loading, so it is safe to call from the hotkey thread on every
+        recording start (which is how a model released after
+        ``llm_idle_unload_s`` comes back before it is needed).
+        """
+        if self._llm is not None:
+            self._llm.preload()
+
+    def close(self) -> None:
+        """Release the stage 4c model and stop its idle timer."""
+        if self._llm is not None:
+            self._llm.close()
+
     def process(self, text: str, app_context: str | None = None) -> str:
         """Run the full polish pipeline on *text* and return cleaned output.
 

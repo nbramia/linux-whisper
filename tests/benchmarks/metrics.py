@@ -206,13 +206,40 @@ def capitalization_accuracy(reference: str, hypothesis: str) -> float:
     if not ref_words or not hyp_words:
         return 1.0 if not ref_words and not hyp_words else 0.0
 
+    matches, compared = _capitalization_counts(ref_words, hyp_words)
+    return matches / compared
+
+
+def _capitalization_counts(ref_words: list[str], hyp_words: list[str]) -> tuple[int, int]:
+    """Return ``(matches, compared)`` over the aligned leading positions."""
     compared = min(len(ref_words), len(hyp_words))
     matches = sum(
         1
         for i in range(compared)
         if ref_words[i][:1].isupper() == hyp_words[i][:1].isupper()
     )
-    return matches / compared
+    return matches, compared
+
+
+def corpus_capitalization_accuracy(pairs: list[tuple[str, str]]) -> float:
+    """Capitalisation accuracy over ``(reference, hypothesis)`` pairs.
+
+    Each pair is aligned on its own and the matches and compared positions are
+    summed across pairs (a micro-average, so longer fixtures weigh more).
+    Joining the corpus into one string first would let one inserted or
+    deleted word shift every later fixture out of alignment.
+    """
+    total_matches = 0
+    total_compared = 0
+    for reference, hypothesis in pairs:
+        ref_words = [w for w in re.split(r"\s+", reference.strip()) if w]
+        hyp_words = [w for w in re.split(r"\s+", hypothesis.strip()) if w]
+        matches, compared = _capitalization_counts(ref_words, hyp_words)
+        total_matches += matches
+        total_compared += compared
+    if total_compared == 0:
+        return 1.0
+    return total_matches / total_compared
 
 
 # ---------------------------------------------------------------------------

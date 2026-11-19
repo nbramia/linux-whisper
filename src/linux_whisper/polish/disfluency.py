@@ -123,30 +123,109 @@ _REPETITION_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Self-correction patterns — the speaker backtracks and rephrases.
-_SELF_CORRECTION_PATTERNS: list[re.Pattern[str]] = [
-    # "X actually Y" / "X wait Y" / "X no Y" / "X sorry Y" / "X I mean Y"
-    re.compile(
-        r"(?P<reparandum>\b.{2,40}?)\s+"
-        r"(?:actually|wait|no|sorry|I\s+mean|rather|or\s+rather)\s+"
-        r"(?P<repair>.+)",
-        re.IGNORECASE,
-    ),
-    # "X... Y" — dash/ellipsis mid-sentence restart
-    re.compile(
-        r"(?P<reparandum>\b.{2,40}?)\s*"
-        r"(?:--|—|\.\.\.)\s*"
-        r"(?P<repair>.+)",
-    ),
-    # "X, no, Y" — comma-separated correction
-    re.compile(
-        r"(?P<reparandum>\b.{2,40}?)\s*,\s*"
-        r"(?:no|wait|sorry|actually)\s*,\s*"
-        r"(?P<repair>.+)",
-        re.IGNORECASE,
-    ),
-]
+# ---------------------------------------------------------------------------
+# Self-correction detection
+# ---------------------------------------------------------------------------
+#
+# A positive here wakes stage 4c, the slowest stage in the pipeline, so the
+# detector only fires on markers that actually signal a change of mind.  The
+# bare words "no", "actually", "sorry" and "wait" are ordinary English inside a
+# clause ("There's no way that works", "I'm sorry about the delay") and do not
+# trigger it on their own.  The rules, any one of which is enough:
+#
+# 1. An explicit correction phrase: "no wait", "actually no", "no sorry",
+#    "I mean", "or rather", "scratch that" (and their mirror orders).
+# 2. A pause before the marker — comma, spaced dash or ellipsis — as in
+#    "Tuesday, sorry, Wednesday", unless the words after it are a stock
+#    phrase ("sorry for the delay", "no problem", "wait for the build").
+# 3. A bare marker whose repair repeats the reparandum: the first word after
+#    the marker repeats a content word just before it ("meet at 3 sorry meet
+#    at 5"), or the marker sits between two values of the same kind ("at two
+#    actually make it four", "on tuesday sorry wednesday").
+# 4. A mid-sentence restart on a dash or ellipsis whose next word repeats
+#    the reparandum: the word right before the pause ("I want the -- the
+#    other one") or a content word among the three before it ("go to the...
+#    go to the park").  A dash on its own is punctuation ("Hi John — sorry
+#    for the delay"), and ``--`` or an en dash glued to a word is a flag or
+#    a range ("--no-cache", "pages 3–5"), not a pause.
+#
+# Every rule also needs real words before the marker: "you know I mean the
+# deploy" is a filler run, not a correction.
 
+_CORRECTION_MARKER_SET: frozenset[str] = frozenset({"no", "actually", "sorry", "wait"})
+
+# Rule 1.  "I mean" after "what"/"if" is a verb ("that's not what I mean").
+_EXPLICIT_CORRECTION_RE = re.compile(
+    r"(?<![\w'-])(?:"
+    r"no[\s,]+(?:wait|sorry|actually)"
+    r"|(?:wait|sorry|actually)[\s,]+no"
+    r"|(?<!what\s)(?<!if\s)I\s+mean"
+    r"|or\s+rather"
+    r"|scratch\s+that"
+    r")(?![\w'-])",
+    re.IGNORECASE,
+)
+
+# Rule 2.  The marker is preceded by a pause and followed by more words.
+_PAUSED_MARKER_RE = re.compile(
+    r"(?:,|\s--?\s|\s–\s|—|\.\.\.|…)\s*"
+    r"(?P<marker>no|actually|sorry|wait)(?![\w'-])"
+    r"[\s,.…—–-]*(?P<after>\w[\w'-]*)",
+    re.IGNORECASE,
+)
+
+# Words that, straight after a paused marker, make it a stock phrase rather
+# than a correction: "Hi John, sorry for the late reply", "OK, no problem".
+_STOCK_PHRASE_CONTINUATIONS: dict[str, frozenset[str]] = {
+    "no": frozenset({
+        "problem", "problems", "worries", "idea", "way", "one", "longer", "more",
+        "matter", "need", "doubt", "thanks", "rush", "big", "pressure", "worry",
+    }),
+    "sorry": frozenset({"for", "about", "to", "that", "if", "but", "i'm", "again"}),
+    "wait": frozenset({"for", "until", "till", "a", "and", "to", "on", "here", "there"}),
+    "actually": frozenset(),
+}
+
+# Rule 4.  A dash or an ellipsis between two words; ``-``, ``--`` and ``–``
+# count only when spaced.
+_RESTART_RE = re.compile(
+    r"\w[\w'.,]*(?:\s--?\s|\s–\s|\s*—\s*|\s*(?:\.\.\.|…)\s*)(?P<head>\w[\w'-]*)"
+)
+# How many words before a restart pause its head word may repeat.
+_RESTART_WINDOW = 3
+
+# Function words too common for a repeat to mean the speaker restarted
+# ("the result was actually the same" repeats "the" by accident).
+_HEAD_WORD_STOPWORDS: frozenset[str] = frozenset({
+    "a", "an", "the", "to", "of", "and", "or", "but", "in", "on", "at", "for",
+    "with", "by", "as", "from", "into", "it", "its", "it's", "is", "was", "are",
+    "were", "be", "been", "i", "i'm", "you", "we", "they", "he", "she", "that",
+    "this", "there", "there's", "my", "your", "our", "their", "me", "us",
+    "them", "so", "if", "then", "not", "do", "does", "did", "have", "has",
+    "had", "about",
+})
+
+_NUMBER_WORDS: frozenset[str] = frozenset({
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
+    "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen",
+    "sixteen", "seventeen", "eighteen", "nineteen", "twenty", "thirty", "forty",
+    "fifty", "sixty", "seventy", "eighty", "ninety", "hundred", "thousand",
+    "million", "billion", "half", "noon", "midnight",
+})
+_WEEKDAYS: frozenset[str] = frozenset({
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+    "today", "tomorrow", "yesterday", "tonight",
+})
+_MONTHS: frozenset[str] = frozenset({
+    "january", "february", "march", "april", "june", "july", "august",
+    "september", "october", "november", "december",
+})
+_DIGITS_RE = re.compile(r"^\$?\d+(?:[.:,]\d+)*%?$")
+
+# How far back a repeated head word may sit, and how far into the repair a
+# same-kind value may sit ("at two actually make it four").
+_HEAD_WORD_WINDOW = 8
+_VALUE_REPAIR_WINDOW = 3
 
 # ---------------------------------------------------------------------------
 # Result container
@@ -408,8 +487,79 @@ class DisfluencyRemover:
 
 
 def _detect_self_corrections(text: str) -> bool:
-    """Return True if *text* contains a self-correction pattern."""
-    return any(pattern.search(text) for pattern in _SELF_CORRECTION_PATTERNS)
+    """Return True if *text* contains a self-correction (see the rules above)."""
+    if not text or not text.strip():
+        return False
+
+    for match in _EXPLICIT_CORRECTION_RE.finditer(text):
+        if _has_content(text[: match.start()]) and _has_content(text[match.end() :]):
+            return True
+
+    for match in _PAUSED_MARKER_RE.finditer(text):
+        marker = match.group("marker").lower()
+        after = match.group("after").lower()
+        if after in _STOCK_PHRASE_CONTINUATIONS[marker]:
+            continue
+        if _has_content(text[: match.start()]):
+            return True
+
+    words = [_bare_word(token).lower() for token in text.split()]
+    for i, word in enumerate(words):
+        if word not in _CORRECTION_MARKER_SET or i == 0 or i == len(words) - 1:
+            continue
+        before = [w for w in words[:i] if w]
+        after = [w for w in words[i + 1 :] if w and w not in _CORRECTION_MARKER_SET]
+        if not before or not after:
+            continue
+        head = after[0]
+        if head not in _HEAD_WORD_STOPWORDS and head in before[-_HEAD_WORD_WINDOW:]:
+            return True
+        kind = _value_kind(before[-1])
+        if kind is not None and any(
+            _value_kind(w) == kind for w in after[:_VALUE_REPAIR_WINDOW]
+        ):
+            return True
+
+    return any(_is_restart(text, m) for m in _RESTART_RE.finditer(text))
+
+
+def _is_restart(text: str, match: re.Match[str]) -> bool:
+    """True if the word after a dash/ellipsis pause repeats the reparandum."""
+    head = match.group("head").lower()
+    prefix = text[: match.start("head")]
+    words = (_bare_word(t.strip("-–—")).lower() for t in prefix.split())
+    before = [w for w in words if any(ch.isalnum() for ch in w)]
+    if not before or not _has_content(" ".join(before)):
+        return False
+    if head == before[-1]:
+        return True
+    return head not in _HEAD_WORD_STOPWORDS and head in before[-_RESTART_WINDOW:]
+
+
+def _has_content(fragment: str) -> bool:
+    """True if *fragment* holds at least one word that is not a filler."""
+    stripped = _FILLER_PHRASE_RE.sub(" ", fragment)
+    for token in stripped.split():
+        bare = _bare_word(token).lower()
+        if (
+            bare
+            and any(ch.isalnum() for ch in bare)
+            and not _is_unambiguous_filler(bare)
+            and bare not in _AMBIGUOUS_FILLER_SET
+        ):
+            return True
+    return False
+
+
+def _value_kind(word: str) -> str | None:
+    """Classify *word* as a number, weekday or month value, else None."""
+    if word in _NUMBER_WORDS or _DIGITS_RE.match(word):
+        return "number"
+    if word in _WEEKDAYS:
+        return "day"
+    if word in _MONTHS:
+        return "month"
+    return None
 
 
 def _bare_word(token: str) -> str:

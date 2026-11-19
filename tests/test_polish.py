@@ -416,6 +416,66 @@ class TestDetectSelfCorrections:
     def test_empty_string(self):
         assert _detect_self_corrections("") is False
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # Acceptance negatives from #68: ordinary English, not corrections.
+            "There's no way that works",
+            "It's unclear whether it was actually listening",
+            "I'm sorry about the delay",
+            "Wait for the build to finish",
+            # Stock phrases after a comma are not corrections either.
+            "Hi John, sorry for the late reply.",
+            "OK, no problem.",
+            "Sure, wait for the deploy.",
+            # "I mean" as a verb, and as part of a leading filler run.
+            "That's not what I mean at all",
+            "you know i mean the deploy basically just needs another review",
+            # A repeated function word is coincidence, not a restart.
+            "I think the result was actually the same as the baseline",
+            # Flags and ranges are not pauses.
+            "Run it with --no-cache and --verbose.",
+            "Run git rebase --interactive on main.",
+            "Pages 3–5 are done.",
+            # A dash on its own is punctuation, not a restart.
+            "Hi John — sorry for the delay",
+            "I sent the doc — the team liked it",
+            "I have no idea",
+        ],
+    )
+    def test_bare_markers_do_not_trigger(self, text):
+        assert _detect_self_corrections(text) is False
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # Acceptance positives from #68.
+            "send it Monday, no wait, Tuesday",
+            "the red one, actually no, the blue one",
+            "meet at two, I mean three",
+            "the API, or rather the SDK",
+            # Pause before the marker, as whisper.cpp punctuates it.
+            "The release is on Tuesday, sorry, Wednesday.",
+            "Tell John, sorry, tell Sarah",
+            # Bare marker, repeated head word or same-kind value.
+            "deploy to staging wait deploy to production",
+            "the meeting is in march actually april",
+            "ship it now, scratch that, ship it tomorrow",
+            # Dash/ellipsis restarts that repeat the reparandum.
+            "I want the—the other one",
+            "go to the... go to the park",
+        ],
+    )
+    def test_correction_markers_trigger(self, text):
+        assert _detect_self_corrections(text) is True
+
+    def test_every_benchmark_self_correction_fixture_triggers(self):
+        from tests.benchmarks.text_fixtures import POLISH_FIXTURES
+
+        for fixture in POLISH_FIXTURES:
+            expected = "self-correction" in fixture.tags
+            assert _detect_self_corrections(fixture.raw) is expected, fixture.id
+
 
 class TestNormaliseWhitespace:
     """Test whitespace normalization."""
@@ -2198,3 +2258,358 @@ class TestOnnxPunctuationPath:
         assert r._using_onnx is True
         # Would raise AssertionError inside _process_onnx if sessions were None.
         r.process("some text")
+
+
+# =====================================================================
+# Stage 4c: model preload and idle unload (#68)
+# =====================================================================
+
+import threading  # noqa: E402
+
+import linux_whisper.polish.llm as llm_mod  # noqa: E402
+from linux_whisper.config import Config  # noqa: E402
+
+
+class _ManualTimer:
+    """Stand-in for ``threading.Timer`` that only fires when a test says so.
+
+    ``fire`` runs the callback even after ``cancel``, exactly what a real
+    timer does when it expires just before being cancelled.
+    """
+
+    def __init__(self, interval, function, args=()):
+        self.interval = interval
+        self.function = function
+        self.args = args
+        self.daemon = False
+        self.name = ""
+        self.started = False
+        self.cancelled = False
+
+    def start(self):
+        self.started = True
+
+    def cancel(self):
+        self.cancelled = True
+
+    def fire(self):
+        self.function(*self.args)
+
+
+@pytest.fixture
+def manual_timers(monkeypatch):
+    timers: list[_ManualTimer] = []
+
+    def make(interval, function, args=()):
+        timer = _ManualTimer(interval, function, args)
+        timers.append(timer)
+        return timer
+
+    monkeypatch.setattr(llm_mod.threading, "Timer", make)
+    return timers
+
+
+class _FakeLlama:
+    """Mock ``Llama`` whose construction can be held open by a test."""
+
+    instances: list[_FakeLlama] = []
+    gate: threading.Event | None = None
+
+    def __init__(self, **kwargs):
+        if _FakeLlama.gate is not None:
+            assert _FakeLlama.gate.wait(5)
+        self.kwargs = kwargs
+        self.closed = False
+        self.reply = "Corrected."
+        self.infer_gate: threading.Event | None = None
+        _FakeLlama.instances.append(self)
+
+    def create_chat_completion(self, **kwargs):
+        if self.infer_gate is not None:
+            assert self.infer_gate.wait(5)
+        return {"choices": [{"message": {"content": self.reply}}]}
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.fixture
+def fake_llama(monkeypatch, tmp_path):
+    """Make LLMCorrector load ``_FakeLlama`` from a real (empty) model file."""
+    model = tmp_path / "fake.gguf"
+    model.write_bytes(b"")
+    _FakeLlama.instances = []
+    _FakeLlama.gate = None
+    monkeypatch.setattr(llm_mod, "_LLAMA_AVAILABLE", True)
+    monkeypatch.setattr(llm_mod, "Llama", _FakeLlama)
+    monkeypatch.setattr(llm_mod, "llama_supports_gpu_offload", lambda: False)
+    yield model
+    _FakeLlama.gate = None
+
+
+def _corrector(model: Path, idle_unload_s: int = 1200) -> LLMCorrector:
+    cfg = PolishConfig(llm_model=str(model), llm_device="cpu", llm_idle_unload_s=idle_unload_s)
+    return LLMCorrector(config=cfg)
+
+
+def _wait_until(predicate, timeout: float = 3.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
+
+
+class TestLLMPreload:
+    def test_nothing_is_loaded_at_construction(self, fake_llama):
+        corrector = _corrector(fake_llama)
+        assert corrector.loaded is False
+        assert _FakeLlama.instances == []
+
+    def test_preload_returns_without_waiting_for_the_load(self, fake_llama):
+        _FakeLlama.gate = threading.Event()
+        corrector = _corrector(fake_llama)
+        t0 = time.monotonic()
+        assert corrector.preload() is True
+        assert time.monotonic() - t0 < 0.5
+        assert corrector.loaded is False
+        _FakeLlama.gate.set()
+        assert corrector.wait_until_loaded(3) is True
+        assert len(_FakeLlama.instances) == 1
+
+    def test_preload_is_idempotent(self, fake_llama):
+        _FakeLlama.gate = threading.Event()
+        corrector = _corrector(fake_llama)
+        assert corrector.preload() is True
+        assert corrector.preload() is True  # a load is running
+        _FakeLlama.gate.set()
+        assert corrector.wait_until_loaded(3)
+        assert corrector.preload() is True  # already loaded
+        assert len(_FakeLlama.instances) == 1
+
+    def test_preload_without_model_file_is_a_no_op(self, fake_llama, tmp_path):
+        corrector = _corrector(tmp_path / "missing.gguf")
+        assert corrector.preload() is False
+        assert corrector.wait_until_loaded(0) is False
+
+    def test_process_waits_for_a_running_load(self, fake_llama):
+        _FakeLlama.gate = threading.Event()
+        corrector = _corrector(fake_llama)
+        corrector.preload()
+        threading.Timer(0.1, _FakeLlama.gate.set).start()
+        assert corrector.process("at two actually four") == "Corrected."
+        assert len(_FakeLlama.instances) == 1
+
+    def test_process_gives_up_after_the_timeout_while_loading(self, fake_llama):
+        _FakeLlama.gate = threading.Event()
+        corrector = _corrector(fake_llama)
+        corrector._timeout_s = 0.05
+        corrector.preload()
+        t0 = time.monotonic()
+        assert corrector.process("at two actually four") == "at two actually four"
+        assert time.monotonic() - t0 < 1.0
+        # The load carries on and the next call uses it.
+        _FakeLlama.gate.set()
+        assert corrector.wait_until_loaded(3)
+        assert corrector.process("at two actually four") == "Corrected."
+
+    def test_load_and_inference_share_one_deadline(self, fake_llama, monkeypatch):
+        _FakeLlama.gate = threading.Event()
+        infer_gate = threading.Event()
+
+        def blocked_inference(self, **kwargs):
+            infer_gate.wait(5)
+            return {"choices": [{"message": {"content": "Corrected."}}]}
+
+        monkeypatch.setattr(_FakeLlama, "create_chat_completion", blocked_inference)
+        corrector = _corrector(fake_llama)
+        corrector._timeout_s = 0.4
+        corrector.preload()
+        # The load finishes ~0.25s in; inference then blocks until released.
+        threading.Timer(0.25, _FakeLlama.gate.set).start()
+        t0 = time.monotonic()
+        try:
+            assert corrector.process("at two actually four") == "at two actually four"
+            elapsed = time.monotonic() - t0
+        finally:
+            infer_gate.set()
+        # One 0.4s budget in total, not 0.4s for the load plus 0.4s more.
+        assert elapsed < 0.6
+
+    def test_no_time_left_after_the_load_returns_input(self, fake_llama, monkeypatch):
+        corrector = _corrector(fake_llama)
+        corrector._timeout_s = 0.05
+
+        def slow_ensure(timeout):
+            time.sleep(0.1)  # the load used up the whole budget
+            return True
+
+        monkeypatch.setattr(corrector, "_ensure_loaded", slow_ensure)
+        corrector._model = _FakeLlama()
+        corrector._loaded = True
+        assert corrector.process("at two actually four") == "at two actually four"
+        assert corrector._inflight == 0
+
+    def test_process_starts_a_load_when_none_is_running(self, fake_llama):
+        corrector = _corrector(fake_llama)
+        assert corrector.process("at two actually four") == "Corrected."
+        assert len(_FakeLlama.instances) == 1
+
+    def test_failed_load_is_not_retried(self, fake_llama, monkeypatch):
+        calls = []
+
+        def boom(**kwargs):
+            calls.append(kwargs)
+            raise RuntimeError("bad gguf")
+
+        monkeypatch.setattr(llm_mod, "Llama", boom)
+        corrector = _corrector(fake_llama)
+        assert corrector.process("at two actually four") == "at two actually four"
+        assert corrector.preload() is False
+        assert len(calls) == 1
+
+    def test_close_during_load_releases_the_loaded_model(self, fake_llama):
+        _FakeLlama.gate = threading.Event()
+        corrector = _corrector(fake_llama)
+        corrector.preload()
+        corrector.close()
+        _FakeLlama.gate.set()
+        assert _wait_until(lambda: len(_FakeLlama.instances) == 1)
+        assert _wait_until(lambda: _FakeLlama.instances[0].closed)
+        assert corrector.loaded is False
+        assert corrector.preload() is False
+
+
+class TestLLMIdleUnload:
+    def _loaded(self, model: Path, idle_unload_s: int = 1200) -> LLMCorrector:
+        corrector = _corrector(model, idle_unload_s)
+        corrector.preload()
+        assert corrector.wait_until_loaded(3)
+        return corrector
+
+    def test_load_arms_the_idle_timer(self, fake_llama, manual_timers):
+        self._loaded(fake_llama, idle_unload_s=45)
+        assert manual_timers[-1].started
+        assert manual_timers[-1].interval == 45
+
+    def test_idle_model_is_closed_and_logged(self, fake_llama, manual_timers, caplog):
+        corrector = self._loaded(fake_llama)
+        with caplog.at_level("INFO", logger="linux_whisper.polish.llm"):
+            manual_timers[-1].fire()
+        assert corrector.loaded is False
+        assert _FakeLlama.instances[0].closed
+        assert any("idle" in r.getMessage().lower() for r in caplog.records)
+
+    def test_unloaded_model_reloads_on_preload(self, fake_llama, manual_timers):
+        corrector = self._loaded(fake_llama)
+        manual_timers[-1].fire()
+        assert corrector.preload() is True
+        assert corrector.wait_until_loaded(3)
+        assert len(_FakeLlama.instances) == 2
+        assert corrector.process("at two actually four") == "Corrected."
+
+    def test_a_call_restarts_the_countdown(self, fake_llama, manual_timers):
+        corrector = self._loaded(fake_llama)
+        first = manual_timers[-1]
+        assert corrector.process("at two actually four") == "Corrected."
+        assert first.cancelled
+        second = manual_timers[-1]
+        assert second is not first
+        first.fire()  # the old deadline passes: stale generation, still loaded
+        assert corrector.loaded
+        second.fire()
+        assert corrector.loaded is False
+
+    def test_inflight_inference_blocks_unload(self, fake_llama, manual_timers):
+        corrector = self._loaded(fake_llama)
+        model = _FakeLlama.instances[0]
+        model.infer_gate = threading.Event()
+        corrector._timeout_s = 0.05
+        # The caller gives up on the timeout; the inference is still running.
+        assert corrector.process("at two actually four") == "at two actually four"
+        assert corrector._inflight == 1
+        corrector._unload_if_idle(corrector._idle_generation)
+        assert corrector.loaded
+        assert corrector._idle_timer is None
+        model.infer_gate.set()
+        assert _wait_until(lambda: corrector._inflight == 0)
+        assert corrector._idle_timer is not None
+        manual_timers[-1].fire()
+        assert corrector.loaded is False
+
+    def test_close_during_inference_defers_the_model_close(self, fake_llama, manual_timers):
+        corrector = self._loaded(fake_llama)
+        model = _FakeLlama.instances[0]
+        model.infer_gate = threading.Event()
+        corrector._timeout_s = 0.05
+        # The caller times out; the inference keeps running on its thread.
+        assert corrector.process("at two actually four") == "at two actually four"
+        corrector.close()
+        assert corrector.loaded is False
+        assert model.closed is False  # not freed under the running inference
+        model.infer_gate.set()
+        assert _wait_until(lambda: model.closed)
+        assert corrector._inflight == 0
+        assert corrector._close_after_inflight is None
+
+    def test_close_while_idle_closes_immediately(self, fake_llama, manual_timers):
+        corrector = self._loaded(fake_llama)
+        corrector.close()
+        assert _FakeLlama.instances[0].closed
+
+    def test_zero_disables_idle_unload(self, fake_llama, manual_timers):
+        corrector = self._loaded(fake_llama, idle_unload_s=0)
+        corrector.process("at two actually four")
+        assert manual_timers == []
+        assert corrector._idle_timer is None
+        assert corrector.loaded
+
+    def test_close_cancels_the_timer_and_closes_the_model(self, fake_llama, manual_timers):
+        corrector = self._loaded(fake_llama)
+        timer = manual_timers[-1]
+        corrector.close()
+        assert timer.cancelled
+        assert _FakeLlama.instances[0].closed
+        timer.fire()  # a late fire after close is harmless
+        assert corrector.loaded is False
+
+    def test_timer_does_not_keep_a_discarded_corrector_alive(self, fake_llama, manual_timers):
+        import gc
+        import weakref
+
+        corrector = self._loaded(fake_llama)
+        ref = weakref.ref(corrector)
+        timer = manual_timers[-1]
+        del corrector
+        gc.collect()
+        assert ref() is None
+        timer.fire()  # no-op once the corrector is gone
+
+
+class TestLLMIdleUnloadConfig:
+    def test_default_is_twenty_minutes(self):
+        assert PolishConfig().llm_idle_unload_s == 1200
+
+    @pytest.mark.parametrize("value", [0, 1, 1200])
+    def test_non_negative_values_validate(self, value):
+        assert Config.from_dict({"polish": {"llm_idle_unload_s": value}}).validate() == []
+
+    def test_negative_value_is_rejected(self):
+        errors = Config.from_dict({"polish": {"llm_idle_unload_s": -1}}).validate()
+        assert any("llm_idle_unload_s" in e for e in errors)
+
+
+class TestPipelinePreloadDelegation:
+    def test_preload_and_close_reach_the_llm(self):
+        pipeline = PolishPipeline(PolishConfig())
+        pipeline._llm = MagicMock()
+        pipeline.preload_llm()
+        pipeline.close()
+        pipeline._llm.preload.assert_called_once_with()
+        pipeline._llm.close.assert_called_once_with()
+
+    def test_no_llm_stage_is_a_no_op(self):
+        pipeline = PolishPipeline(PolishConfig(llm=False))
+        pipeline.preload_llm()
+        pipeline.close()

@@ -57,7 +57,7 @@ The polish pipeline uses a hybrid approach:
 - **Stage 4a** -- BERT token classifier (or regex fallback) removes filler words, repetitions, and false starts. Unambiguous fillers ("um", "uh", "hmm") are always stripped; ordinary words that only sometimes function as fillers ("like", "so", "right", "well", "actually", "basically", "literally", "anyway") are stripped only when context marks them as disfluent (comma-bounded, opening the utterance right after a leading unambiguous filler and followed by a clause starter, or utterance-initial/final with a comma) — otherwise they're kept as content. These cues are comma-based, so they only fire once punctuation is present in the input. Cannot hallucinate.
 - **Stage 4b** -- ELECTRA classifier (or rule-based fallback) adds punctuation and fixes capitalization. Cannot hallucinate.
 - **Stage 4d** -- Rule-based formatter converts spoken numbers, dates, times, currency, emails, and phone numbers to their written forms.
-- **Stage 4c** -- Qwen3-4B-Instruct-2507 LLM via llama-cpp resolves self-corrections ("at 2, actually 4" becomes "at 4"). Only invoked when Stage 4a flags self-correction patterns. Context-aware: adapts tone based on the focused application. Lazy-loaded to save ~2.5GB RAM when not needed. Has a 3-second timeout and a 2x length hallucination guard.
+- **Stage 4c** -- Qwen3-4B-Instruct-2507 LLM via llama-cpp resolves self-corrections ("at 2, actually 4" becomes "at 4"). Only invoked when Stage 4a flags self-correction patterns. Context-aware: adapts tone based on the focused application. The self-correction detector fires only on real change-of-mind markers ("no wait", "actually no", "I mean", "or rather", "scratch that", a marker after a comma or pause, or a marker whose repair repeats the reparandum); a bare "no", "actually", "sorry" or "wait" inside a clause does not wake the LLM. The model is loaded in the background once the app is ready, so no dictation pays the load; after `polish.llm_idle_unload_s` seconds (default 1200) without a call it is released to free ~2.5GB and its GPU queue, and the next recording start reloads it in the background. Has a 3-second deadline shared by waiting for a load in progress and the inference itself, and a 2x length hallucination guard.
 
 This split means 80%+ of dictations never touch a generative model.
 
@@ -204,6 +204,7 @@ polish:
   llm_model: "Qwen3-4B-Instruct-2507-Q4_K_M"
   llm_device: "rocm"           # rocm (GPU) | cpu
   llm_threads: 0
+  llm_idle_unload_s: 1200      # release the LLM after 20 min without a call (0 = never)
 
 # Audio capture
 audio:
