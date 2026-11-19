@@ -196,6 +196,12 @@ def run_polish_suite(config: Config, fixtures: list[TextFixture]) -> dict[str, A
 
     if llm is not None:
         logger.info("LLM available: %s", llm.available)
+        # The app preloads the model once it is ready, so stage 4c latency is
+        # scored warm.  Waiting here keeps the load out of the first fixture.
+        if llm.preload():
+            t = time.perf_counter()
+            llm.wait_until_loaded(None)
+            logger.info("LLM preload: %.0f ms", (time.perf_counter() - t) * 1000.0)
 
     stage_latencies: dict[str, list[float]] = {
         "polish_4a": [],

@@ -245,6 +245,11 @@ class App:
 
         logger.info("Ready — press %s to dictate", self.config.hotkey)
 
+        # Warm the stage 4c model now, on its own thread, so the first
+        # self-correction never pays a multi-second load inside a dictation.
+        if self._polish:
+            self._polish.preload_llm()
+
         # Wait for shutdown signal
         await self._shutdown_event.wait()
 
@@ -261,6 +266,8 @@ class App:
             self._tray.stop()
         if self._overlay:
             self._overlay.stop()
+        if self._polish:
+            self._polish.close()
         logger.info("Shutdown complete")
 
     def _request_shutdown(self) -> None:
@@ -416,6 +423,12 @@ class App:
             if self._audio:
                 self._audio.stop_recording()
             raise
+
+        # Bring the stage 4c model back if it was released for idleness.
+        # Non-blocking (a lock check, at most a thread start) and placed after
+        # audio and STT are running, so it never delays the recording.
+        if self._polish:
+            self._polish.preload_llm()
 
         if self._loop is None or self._loop.is_closed():
             return

@@ -1255,3 +1255,39 @@ class TestCreateApp:
         with patch("linux_whisper.app.Config.load", return_value=_make_config()):
             app = create_app()
         assert app.config.hotkey == "fn"
+
+
+# ---------------------------------------------------------------------------
+# Stage 4c model preload (#68)
+# ---------------------------------------------------------------------------
+
+
+class TestLLMPreloadWiring:
+    async def test_run_preloads_the_llm_once_ready_and_closes_it(self):
+        app = _make_app()
+        app._hotkey = None
+        app._audio = None
+        app._overlay = None
+        app._tray = None
+        app._polish = MagicMock()
+        app._shutdown_event.set()  # return immediately after startup
+
+        await app.run()
+
+        app._polish.preload_llm.assert_called_once_with()
+        app._polish.close.assert_called_once_with()
+
+    def test_recording_start_reloads_the_llm_after_stt_is_running(self):
+        app = _make_app()
+        order: list[str] = []
+        app._audio = MagicMock()
+        app._audio.get_pre_roll.return_value = np.zeros(12000, dtype=np.float32)
+        app._stt = MagicMock()
+        app._stt.start_stream.side_effect = lambda: order.append("stt")
+        app._polish = MagicMock()
+        app._polish.preload_llm.side_effect = lambda: order.append("llm")
+        app._loop = None  # prevents scheduling
+
+        app._on_recording_start()
+
+        assert order == ["stt", "llm"]

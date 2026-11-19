@@ -327,7 +327,16 @@ Output: "I was thinking we should probably move it to Friday. Can you update the
 
 **Task:** Resolve self-corrections ("at 2... actually 4") and fix grammar that encoder models can't handle.
 
-**Trigger:** Only invoked when Stage 4a detects self-correction patterns (reparandum + repair spans). For simple dictation without self-corrections, this stage is **skipped entirely**, saving ~300ms.
+**Trigger:** Only invoked when Stage 4a detects a self-correction. For simple dictation without one, this stage is **skipped entirely**. The detector (`_detect_self_corrections` in `polish/disfluency.py`) fires only on markers that signal a change of mind, because every positive pays the slowest stage in the pipeline. Any one of these is enough:
+
+1. An explicit correction phrase: "no wait", "actually no", "no sorry", "I mean", "or rather", "scratch that" (and mirror orders such as "wait no").
+2. A pause before the marker — comma, spaced dash or ellipsis — as in "Tuesday, sorry, Wednesday", unless the next word makes it a stock phrase ("sorry for the delay", "no problem", "wait for the build").
+3. A bare marker whose repair repeats the reparandum: the first word after it repeats a content word just before it ("meet at 3 sorry meet at 5"), or it sits between two values of the same kind — numbers, weekdays, months ("at two actually make it four").
+4. A mid-sentence restart on a dash or ellipsis ("go to the... go to the park"). `--` or an en dash glued to a word is a flag or a range, not a pause.
+
+Every rule also needs a non-filler word before the marker, so "you know I mean the deploy..." is a filler run, not a correction. Bare "no", "actually", "sorry" and "wait" inside a clause ("There's no way that works", "I'm sorry about the delay") do not trigger it. The polish benchmark wakes 4c on exactly its five `self-correction` fixtures.
+
+**Model lifecycle:** The model is loaded on a daemon thread as soon as the app reports ready (`LLMCorrector.preload`), so no dictation pays the multi-second load. If a self-correction arrives while the load is still running, `process` waits for it up to the 3s inference timeout and otherwise returns the text unchanged. After `polish.llm_idle_unload_s` seconds without an LLM call (default 1200; `0` = never) the model is closed with `Llama.close()`, releasing its ~2.5GB and its GPU queue; every recording start calls `preload` again (a lock check, or a thread start when unloaded), so the model is back by the time the recording ends. As with the GPU whisper worker, the idle timer holds a weak reference and a generation counter, the lock is never held across a load or an inference, and an in-flight inference — including one whose caller already timed out — blocks unloading.
 
 **Model Selection:**
 
@@ -365,6 +374,18 @@ We evaluated sub-4B models on **IFEval** (instruction following) as the critical
 So the extra capability does not show on a task this narrow, and +138ms p95 is not worth one fixture. **2507 stays the default.** Qwen3.5-4B remains selectable via `polish.llm_model` if the polish task ever widens.
 
 The rebuild was still worth doing: it is what makes Qwen3-ASR available for the STT fallback path, and it removes the version ceiling on every future model.
+
+**Why not Qwen2.5-1.5B-Instruct?** It is instruct-only and less than half the size (1.1GB Q4_K_M, ~1.4GB peak RSS vs ~2.7GB), and it was benchmarked against 2507 on the polish suite, back to back on the same host. It is faster but **fails the compare gate on quality**:
+
+| | Qwen3-4B-Instruct-2507 | Qwen2.5-1.5B-Instruct |
+|---|---|---|
+| polish WER | **0.0752** | 0.1018 |
+| exact match | **72.7%** | 69.7% |
+| punctuation F1 | **0.9655** | 0.9438 |
+| stage 4c p50 | 277ms | **210ms** |
+| stage 4c p95 | 548ms | **302ms** |
+
+It resolved three of the five self-corrections and left the other two half-done ("Deploy to staging, no wait deploy to production."). A faster stage that leaves the abandoned half in the text defeats its purpose, so **2507 stays the default**.
 
 **Alternative: Gemma 3 4B IT (Q4_K_M)**
 - IFEval 90.2 — absolute best instruction adherence in the sub-4B class
@@ -677,6 +698,7 @@ polish:
   llm_backend: "llama-cpp"
   llm_model: "Qwen3-4B-Instruct-2507-Q4_K_M"
   llm_threads: 8          # CPU threads for LLM inference (0 = auto)
+  llm_idle_unload_s: 1200 # release the LLM after this many seconds without a call (0 = never)
 
 # Audio
 audio:
@@ -742,7 +764,7 @@ The one exception: if we add ROCm GPU acceleration in v0.3+, PyTorch-ROCm may be
 
 ## Memory Budget
 
-STT and encoder models stay warm in RAM for instant response. The LLM (Qwen3-4B-Instruct-2507) is **lazy-loaded** — it remains unloaded until the disfluency detector first flags a self-correction, saving ~2.5GB idle RAM.
+STT and encoder models stay warm in RAM for instant response. The LLM (Qwen3-4B-Instruct-2507) is **preloaded in the background** once the app is ready and **released after `polish.llm_idle_unload_s`** (20 minutes) without a call; the next recording start reloads it. It shares the iGPU with the whisper worker and the LifeOS Gemma server, so while resident its ~2.5GB is a real cost; set `polish.llm: false` to never load it.
 
 | Component | RAM (Resident) | Notes |
 |-----------|---------------|-------|
@@ -750,13 +772,13 @@ STT and encoder models stay warm in RAM for instant response. The LLM (Qwen3-4B-
 | BERT disfluency (ONNX) | ~110MB | Or ~1.3MB with INT8 distilled variant |
 | ELECTRA punctuation (ONNX) | ~60MB | Two 14M-param models |
 | Parakeet TDT 0.6B v3 INT8 (ONNX) | ~1,200MB | Default STT backend, resident in the main process |
-| Qwen3-4B-Instruct-2507 Q4_K_M (llama.cpp) | ~2,500MB | **Lazy-loaded** — only when self-corrections detected |
+| Qwen3-4B-Instruct-2507 Q4_K_M (llama.cpp) | ~2,500MB | **Preloaded at ready**, released after 20 min without a call |
 | llama.cpp runtime overhead | ~100MB | Only when LLM is loaded |
 | ONNX Runtime overhead | ~100MB | Shared across all ONNX models |
 | Silero VAD | ~5MB | Tiny model |
 | Python + app overhead | ~200MB | asyncio, evdev, sounddevice, pystray |
 | **Total (idle, no LLM)** | **~4,475MB** | **~7% of 64GB** |
-| **Total (LLM warm)** | **~7,075MB** | **After first self-correction triggers LLM load** |
+| **Total (LLM warm)** | **~7,075MB** | **From ready until 20 min after the last LLM call** |
 
 ### Comparison with Alternatives
 
@@ -829,7 +851,7 @@ Tasks are chained via `asyncio.Queue` for backpressure-free handoff.
 | Text injection fails | Fall back to clipboard mode, notify user |
 | STT returns empty | Discard silently (noise-only activation) |
 | LLM generates garbage | Fall back to encoder-only output (4a + 4b) for this utterance |
-| LLM times out (>500ms) | Return encoder-only output, log warning |
+| LLM times out (>3s), or is still loading after 3s | Return encoder-only output, log warning |
 | ONNX Runtime error | Fall back to whisper.cpp backend |
 | Out of memory | Shouldn't happen with 64GB, but: unload LLM, switch to encoder-only mode |
 
