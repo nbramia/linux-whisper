@@ -91,7 +91,7 @@ sudo apt install wtype
 
 # For Wayland (GNOME/KDE)
 sudo apt install ydotool
-sudo systemctl enable --now ydotool
+# The ydotoold daemon is optional; ydotool works without it.
 ```
 
 ### Install from source
@@ -217,7 +217,7 @@ audio:
 # Text injection
 inject:
   method: "auto"               # auto | xdotool | ydotool | wtype | clipboard
-  typing_delay: 0
+  typing_delay: 0              # ms per character on every typing backend; 0 is honoured
 
 # System tray
 tray:

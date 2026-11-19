@@ -173,19 +173,30 @@ class WtypeInjector(TextInjector):
 # ---------------------------------------------------------------------------
 
 
+# Measured minimum is 50 ms for the compositor to register the new uinput
+# device; 60 leaves margin. Lower values drop the first characters.
+_YDOTOOL_START_DELAY_MS = 60
+
+
 class YdotoolInjector(TextInjector):
     """Inject text via ``ydotool type`` on any Wayland session.
 
-    Requires the ``ydotoold`` daemon to be running.
+    Works with or without the ``ydotoold`` daemon. Without it (Ubuntu's 0.1.8),
+    every call creates a fresh virtual keyboard, so the start delay is required.
     """
 
     name = "ydotool"
 
     async def inject(self, text: str) -> bool:
-        cmd: list[str] = ["ydotool", "type"]
-        if self.config.typing_delay > 0:
-            cmd.extend(["--key-delay", str(self.config.typing_delay)])
-        cmd.append("--")
+        cmd: list[str] = [
+            "ydotool",
+            "type",
+            "--delay",
+            str(_YDOTOOL_START_DELAY_MS),
+            "--key-delay",
+            str(self.config.typing_delay),
+            "--",
+        ]
         cmd.append(text)
         rc, _out, err = await _run(*cmd)
         if rc != 0:

@@ -292,6 +292,8 @@ class TestYdotoolInjector:
         assert result is True
         args = mock_run.call_args[0]
         assert "ydotool" in args
+        assert args[args.index("--delay") + 1] == "60"
+        assert args[args.index("--key-delay") + 1] == "0"
 
     async def test_inject_with_key_delay(self):
         config = InjectConfig(method="ydotool", typing_delay=30)
@@ -302,8 +304,8 @@ class TestYdotoolInjector:
             await injector.inject("test")
 
         args = mock_run.call_args[0]
-        assert "--key-delay" in args
-        assert "30" in args
+        assert args[args.index("--key-delay") + 1] == "30"
+        assert args[args.index("--delay") + 1] == "60"
 
 
 class TestClipboardInjector:

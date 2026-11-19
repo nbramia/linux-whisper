@@ -70,7 +70,7 @@ class AudioConfig:
 @dataclass(frozen=True)
 class InjectConfig:
     method: str = "auto"
-    typing_delay: int = 0  # ms between keystrokes
+    typing_delay: int = 0  # ms per character on every typing backend; 0 is honoured
 
     VALID_METHODS = ("auto", "xdotool", "ydotool", "wtype", "clipboard")
 
@@ -149,6 +149,8 @@ class Config:
                 f"Invalid inject.method '{self.inject.method}', "
                 f"must be one of {InjectConfig.VALID_METHODS}"
             )
+        if self.inject.typing_delay < 0:
+            errors.append(f"inject.typing_delay must be >= 0, got {self.inject.typing_delay}")
         if self.audio.sample_rate not in (8000, 16000, 22050, 44100, 48000):
             errors.append(f"Unusual sample_rate {self.audio.sample_rate}")
         if not 0.0 < self.audio.vad_threshold < 1.0:
