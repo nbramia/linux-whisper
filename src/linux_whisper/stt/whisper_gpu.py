@@ -40,10 +40,6 @@ _SAMPLE_WIDTH = 2
 _WORKER_STARTUP_TIMEOUT = 60.0  # model load can take ~10-15s on first run
 _WORKER_INFERENCE_TIMEOUT = 120.0
 _MAX_RESPONSE_BYTES = 1_048_576
-# whisper.cpp timestamps are quantized and may include a final padded decoding
-# frame. One second permits that boundary effect without accepting timings that
-# are unrelated to the submitted clip.
-_SEGMENT_END_TOLERANCE_S = 1.0
 
 
 class GPUWorkerError(RuntimeError):
@@ -83,9 +79,16 @@ def _parse_result(msg: dict, *, duration: float) -> TranscriptResult:
             or not isfinite(end)
             or start < 0
             or end < start
-            or end > duration + _SEGMENT_END_TOLERANCE_S
         ):
             raise GPUWorkerProtocolError("GPU worker response has invalid segment timing")
+        if end > duration:
+            # whisper.cpp predicts end times on silence-padded audio, so they can
+            # land past the clip. The overrun says nothing about the text.
+            logger.debug(
+                "Clamping segment timing %.2f-%.2fs to clip duration %.2fs", start, end, duration
+            )
+            start = min(start, duration)
+            end = duration
         text = raw["text"]
         if not text or text != text.strip():
             raise GPUWorkerProtocolError("GPU worker response has invalid segment text")
