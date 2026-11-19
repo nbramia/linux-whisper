@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from linux_whisper import __version__
 from linux_whisper.config import Config
 from linux_whisper.inject.injector import leading_space
 from linux_whisper.state import AppState, StateMachine
@@ -103,7 +104,7 @@ class App:
 
     async def setup(self) -> None:
         """Initialize all components. Call before run()."""
-        logger.info("Initializing Linux Whisper v0.1.0")
+        logger.info("Initializing Linux Whisper v%s", __version__)
         logger.info("build: %s", _build_fingerprint())
         errors = self.config.validate()
         if errors:

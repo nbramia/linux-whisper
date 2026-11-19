@@ -139,9 +139,9 @@ Referenced during planning to assess whether a change is safe.
 | 4b. Punctuation | < 15ms | < 15ms |
 | 4d. Number/date formatting | < 1ms | < 1ms |
 | 4c. LLM correction (conditional) | ~150ms | ~370ms |
-| 5. Text injection | < 20ms | < 20ms |
-| **Total (simple)** | **~340ms** | **~2.6s** |
-| **Total (with LLM)** | **~490ms** | **~2.9s** |
+| 5. Text injection (ydotool, 110 chars) | ~110ms (60ms device start + ~0.4ms/char) | same |
+| **Total (simple, 110 chars)** | **~450ms** | **~2.7s** |
+| **Total (with LLM)** | **~600ms** | **~3.0s** |
 
 The default STT backend is whisper.cpp large-v3-turbo on the ROCm GPU, in a subprocess worker (the pywhispercpp/onnxruntime `libamdhip64` conflict is why). The worker is stopped after `stt.gpu_idle_unload_s` idle seconds (default 1200, `0` = never) to free its VRAM and SDMA queue, so the first dictation after a long idle pays a ~4s model reload. The app feeds audio to the engine during recording, and the GPU engine transcribes each completed 30 s window (cut at the quietest 200 ms of its last 5 s) on a background thread while the user is still speaking, applying gain control per window. Only the tail is left at release, so dictations over 30 s finish in about the time of one window (~0.25 s in `finalize` for 65-83 s, against ~1.2 s for one whole-recording request). A tail with nothing above the noise floor is skipped, because whisper hallucinates on silence. The stage 4c LLM is preloaded in the background when the app is ready and released after `polish.llm_idle_unload_s` idle seconds (default 1200, `0` = never); each recording start reloads it in the background, so the 4c budget below assumes a warm model. The self-correction detector in `polish/disfluency.py` gates that stage: keep the benchmark's `llm_invocations` equal to its `self-correction` fixture count.
 

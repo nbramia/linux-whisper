@@ -1,6 +1,6 @@
 [project]
 name = "linux-whisper"
-version = "0.1.0"
+version = "0.2.0"
 description = "Wispr Flow-quality voice dictation, running entirely locally on Linux"
 readme = "README.md"
 requires-python = ">=3.12"

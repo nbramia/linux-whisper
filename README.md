@@ -22,7 +22,9 @@ Local voice dictation for Linux. Press a hotkey, speak naturally with filler wor
 - **Hot-swappable models** from the system tray menu with automatic config persistence
 - **Four-stage polish pipeline**: BERT disfluency removal, ELECTRA/rule-based punctuation, spoken-form formatting, conditional LLM correction
 - **Pre-roll buffer** (750ms) captures audio before the hotkey press
-- **Text injection** auto-detects display server and compositor, and puts one space between successive dictations typed into the same spot
+- **Text injection** auto-detects display server and compositor, types at about 0.4 ms per character (a 350-character paragraph lands in under 0.2 s), and puts one space between successive dictations typed into the same spot
+- **Long dictations finish as fast as short ones**: each completed 30-second window is transcribed while you are still speaking, so only the last window remains after release
+- **No stalls**: the LLM is loaded in the background at startup and released when idle, and whisper's timestamp overruns are clamped instead of failing the dictation
 - **System tray** with state icons, model/mode switcher, snippets menu, latency stats
 - **Floating GTK3 pill overlay** (via XWayland) with animated audio level bars driven by live mic input — the primary recording indicator; positioned at `bottom-center` (default), `center`, or `top-center` via config, never steals input focus
 - **Full YAML configuration** with validation
@@ -419,7 +421,7 @@ src/linux_whisper/
         formatting.py   # Rule-based number/date/time/currency/email formatting
         llm.py          # Qwen3-4B-Instruct-2507 via llama-cpp-python (ROCm GPU offload)
     inject/
-        injector.py     # Display server detection, xdotool/wtype/ydotool/clipboard
+        injector.py     # Display server detection, xdotool/wtype/ydotool/clipboard, dictation spacing
 tests/
     conftest.py         # Shared fixtures, optional dependency stubs
     test_app.py         # Pipeline orchestration, state transitions, latency
@@ -433,6 +435,7 @@ tests/
     test_snippets.py    # Snippet matching
     test_state.py
     test_stt.py         # STT engine protocol + device config
+    benchmarks/         # Model benchmark harness and the guarded typing harness (not run by pytest)
 ```
 
 ### Running tests
