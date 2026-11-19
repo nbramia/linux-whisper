@@ -17,6 +17,11 @@ Examples::
     python -m tests.benchmarks.typing_harness gtk --key-delay 0 --chars 350
     python -m tests.benchmarks.typing_harness vte --start-delay 25 --chars 60
     python -m tests.benchmarks.typing_harness chromium --injector --chars 1200
+    python -m tests.benchmarks.typing_harness gtk --successive 3
+
+``--successive N`` types N fixture sentences one injection at a time, putting
+the app's leading space in front of each as ``App._inject_text`` would with no
+key or click in between, and expects them joined by single spaces.
 
 The text comes from the ``.txt`` references in ``--fixtures-dir`` (default
 ``~/dictation-fixtures``), joined and truncated to ``--chars``.  Output is one
@@ -49,6 +54,18 @@ def _fixture_text(fixtures_dir: Path, chars: int) -> str:
     if not parts:
         sys.exit(f"no .txt fixtures in {fixtures_dir}")
     return " ".join(parts).replace("\n", " ")[:chars]
+
+
+def _fixture_sentences(fixtures_dir: Path, count: int, chars: int) -> list[str]:
+    """The first *count* fixtures, one sentence each, each cut to *chars*."""
+    parts = [
+        " ".join(p.read_text().split())[:chars].strip()
+        for p in sorted(fixtures_dir.glob("*.txt"))
+    ]
+    parts = [p for p in parts if p]
+    if len(parts) < count:
+        sys.exit(f"need {count} .txt fixtures in {fixtures_dir}, found {len(parts)}")
+    return parts[:count]
 
 
 def _compare(sent: str, got: str) -> str:
@@ -91,6 +108,27 @@ def _type_with_injector(text: str, key_delay: int) -> None:
         print("injector reported failure", file=sys.stderr)
 
 
+def _type_successive(sentences: list[str], key_delay: int) -> None:
+    """Type each sentence as its own injection, spaced the way the app spaces them."""
+    from linux_whisper.inject.injector import leading_space
+
+    previous_end: str | None = None
+    for sentence in sentences:
+        _type_with_injector(leading_space(sentence, previous_end, False) + sentence, key_delay)
+        previous_end = sentence[-1]
+
+
+def _type_text(args: argparse.Namespace, text: str) -> subprocess.Popen | None:
+    """Start typing *text* the way *args* asks; a ``Popen`` if it runs on, else ``None``."""
+    if args.successive:
+        _type_successive(args.sentences, args.key_delay)
+        return None
+    if args.injector:
+        _type_with_injector(text, args.key_delay)
+        return None
+    return _type_with_ydotool(text, args.start_delay, args.key_delay)
+
+
 def _run_gtk(args: argparse.Namespace, text: str) -> None:
     import gi
 
@@ -124,11 +162,12 @@ def _run_gtk(args: argparse.Namespace, text: str) -> None:
 
         def read_back() -> str:
             # ``cat`` echoes what was typed; join the wrapped rows back together.
+            # Only newlines are stripped: the probe is a trailing space.
             try:
                 txt = view.get_text_format(Vte.Format.TEXT)
             except AttributeError:
                 txt = view.get_text(None)[0]
-            return "".join((txt or "").rstrip("\n").split("\n")).rstrip()
+            return "".join((txt or "").rstrip("\n").split("\n"))
 
     def pump(seconds: float) -> None:
         end = time.monotonic() + seconds
@@ -162,12 +201,9 @@ def _run_gtk(args: argparse.Namespace, text: str) -> None:
             Gtk.main_quit()
             return False
         t0 = time.perf_counter()
-        if args.injector:
-            _type_with_injector(text, args.key_delay)
-        else:
-            proc = _type_with_ydotool(text, args.start_delay, args.key_delay)
-            while proc.poll() is None:
-                pump(0.002)  # keep dispatching Wayland events while typing
+        proc = _type_text(args, text)
+        while proc is not None and proc.poll() is None:
+            pump(0.002)  # keep dispatching Wayland events while typing
         ms = (time.perf_counter() - t0) * 1000
         pump(0.6)
         print(_result(args, text, ms, _compare(text, read_back().removeprefix(PROBE))))
@@ -219,10 +255,9 @@ def _run_chromium(args: argparse.Namespace, text: str) -> None:
             browser.close()
             return
         t0 = time.perf_counter()
-        if args.injector:
-            _type_with_injector(text, args.key_delay)
-        else:
-            _type_with_ydotool(text, args.start_delay, args.key_delay).wait()
+        proc = _type_text(args, text)
+        if proc is not None:
+            proc.wait()
         ms = (time.perf_counter() - t0) * 1000
         time.sleep(0.6)
         got = page.evaluate("document.getElementById('t').value").removeprefix(PROBE)
@@ -231,9 +266,10 @@ def _run_chromium(args: argparse.Namespace, text: str) -> None:
 
 
 def _result(args: argparse.Namespace, text: str, ms: float, verdict: str) -> str:
-    start = "injector" if args.injector else args.start_delay
+    start = "injector" if args.injector or args.successive else args.start_delay
+    mode = f"{args.mode}-successive{args.successive}" if args.successive else args.mode
     return RESULT.format(
-        mode=args.mode, start=start, key=args.key_delay, chars=len(text), ms=ms, verdict=verdict
+        mode=mode, start=start, key=args.key_delay, chars=len(text), ms=ms, verdict=verdict
     )
 
 
@@ -252,10 +288,19 @@ def main(argv: list[str] | None = None) -> None:
         "--injector", action="store_true",
         help="type through linux_whisper's YdotoolInjector instead of calling ydotool directly",
     )
+    parser.add_argument(
+        "--successive", type=int, default=0, metavar="N",
+        help="type N fixture sentences as separate injections with the app's spacing rule "
+        "(--chars then limits each sentence)",
+    )
     parser.add_argument("--fixtures-dir", type=Path, default=Path.home() / "dictation-fixtures")
     args = parser.parse_args(argv)
 
-    text = _fixture_text(args.fixtures_dir, args.chars)
+    if args.successive:
+        args.sentences = _fixture_sentences(args.fixtures_dir, args.successive, args.chars)
+        text = " ".join(args.sentences)
+    else:
+        text = _fixture_text(args.fixtures_dir, args.chars)
     if "\n" in text:
         sys.exit("refusing to type a newline")
     if args.mode == "chromium":

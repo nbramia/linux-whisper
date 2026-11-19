@@ -154,7 +154,7 @@ The default STT backend is whisper.cpp large-v3-turbo on the ROCm GPU, in a subp
 | `app.py` | Main orchestrator — wires all pipeline stages, manages async lifecycle |
 | `config.py` | Frozen dataclass config, YAML loading, validation |
 | `state.py` | Async state machine: IDLE → RECORDING → PROCESSING → IDLE |
-| `hotkey.py` | evdev global hotkey daemon, 4 modes (auto/hold/toggle/vad-auto) |
+| `hotkey.py` | evdev global hotkey daemon, 4 modes (auto/hold/toggle/vad-auto); `input_generation` counts other key and mouse-button presses for dictation spacing |
 | `audio.py` | Ring buffer, Silero VAD, AGC, feedback tones, sounddevice capture |
 | `stt/engine.py` | `STTEngine` protocol + factory. All backends implement this. |
 | `stt/whisper_gpu.py` | GPU STT — subprocess isolation, pipe-based IPC with worker |
@@ -162,5 +162,5 @@ The default STT backend is whisper.cpp large-v3-turbo on the ROCm GPU, in a subp
 | `polish/llm.py` | Qwen3 4B via llama-cpp, ROCm GPU offload, context-aware prompts |
 | `focus.py` | Focused app detection (X11/Sway/Hyprland) for tone adaptation |
 | `snippets.py` | Voice snippet matching — fuzzy, bypasses polish pipeline |
-| `inject/injector.py` | Display server detection, 4 injection backends |
+| `inject/injector.py` | Display server detection, 4 injection backends, `leading_space` rule for successive dictations |
 | `overlay.py` | GTK3 (via XWayland) floating recording pill — primary recording indicator, never takes focus |

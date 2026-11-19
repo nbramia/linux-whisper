@@ -73,6 +73,9 @@ class AudioConfig:
 class InjectConfig:
     method: str = "auto"
     typing_delay: int = 0  # ms per character on every typing backend; 0 is honoured
+    # Put one space before a dictation typed right after the previous one
+    # (no key or mouse-button press in between).  Never adds trailing spaces.
+    auto_space: bool = True
 
     VALID_METHODS = ("auto", "xdotool", "ydotool", "wtype", "clipboard")
 
@@ -158,6 +161,10 @@ class Config:
             )
         if self.inject.typing_delay < 0:
             errors.append(f"inject.typing_delay must be >= 0, got {self.inject.typing_delay}")
+        if not isinstance(self.inject.auto_space, bool):
+            errors.append(
+                f"inject.auto_space must be true or false, got {self.inject.auto_space!r}"
+            )
         if self.audio.sample_rate not in (8000, 16000, 22050, 44100, 48000):
             errors.append(f"Unusual sample_rate {self.audio.sample_rate}")
         if not 0.0 < self.audio.vad_threshold < 1.0:

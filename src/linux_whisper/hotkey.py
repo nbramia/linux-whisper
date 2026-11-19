@@ -165,12 +165,25 @@ class HotkeyCombination:
 # Device discovery
 # ---------------------------------------------------------------------------
 
-def _find_keyboard_devices() -> list[InputDevice]:
-    """Return a list of evdev ``InputDevice`` objects that have keyboard capabilities.
+# Devices whose name contains this are ydotool's own virtual keyboard.  The
+# app types through it, so its events must never count as user input.
+_IGNORED_DEVICE_MARKER: Final[str] = "ydotool"
 
+# Mouse buttons that move the caret, so a press means "the user did something".
+_POINTER_BUTTONS: Final[frozenset[int]] = frozenset(
+    (ecodes.BTN_LEFT, ecodes.BTN_RIGHT, ecodes.BTN_MIDDLE)
+)
+
+
+def _find_input_devices() -> list[tuple[InputDevice, bool]]:
+    """Return ``(device, is_pointer)`` for every keyboard and pointer device.
+
+    A keyboard reports ``KEY_A`` or ``KEY_ENTER``; a pointer reports
+    ``BTN_LEFT`` but no ``KEY_A``.  Pointers are only watched for button
+    presses, never for the hotkey.  ydotool's virtual keyboard is skipped.
     Silently skips devices that cannot be opened (permission errors, etc.).
     """
-    devices: list[InputDevice] = []
+    devices: list[tuple[InputDevice, bool]] = []
     input_dir = Path("/dev/input")
     for path in sorted(input_dir.glob("event*")):
         try:
@@ -179,16 +192,16 @@ def _find_keyboard_devices() -> list[InputDevice]:
             logger.debug("Cannot open %s: %s", path, exc)
             continue
 
-        caps = dev.capabilities(verbose=False)
-        # EV_KEY = 1.  A device that reports key events is a candidate.
-        if ecodes.EV_KEY in caps:
-            key_caps: list[int] = caps[ecodes.EV_KEY]
-            # Only include devices that actually report common keyboard keys,
-            # not e.g. a power button that only reports KEY_POWER.
-            if ecodes.KEY_A in key_caps or ecodes.KEY_ENTER in key_caps:
-                devices.append(dev)
-            else:
-                dev.close()
+        name = str(getattr(dev, "name", "") or "")
+        key_caps: list[int] = dev.capabilities(verbose=False).get(ecodes.EV_KEY, [])
+        if _IGNORED_DEVICE_MARKER in name.lower():
+            dev.close()
+        elif ecodes.KEY_A in key_caps or ecodes.KEY_ENTER in key_caps:
+            # Only devices that report common keyboard keys, not e.g. a power
+            # button that only reports KEY_POWER.
+            devices.append((dev, False))
+        elif ecodes.BTN_LEFT in key_caps:
+            devices.append((dev, True))
         else:
             dev.close()
 
@@ -250,6 +263,11 @@ class HotkeyDaemon:
         # Track whether we are in a recording started by this daemon.
         self._recording: bool = False
 
+        # Advances on every key press other than the hotkey and modifiers, and
+        # on every mouse-button press.  Written only by the daemon thread and
+        # read from the asyncio thread (int reads are atomic in CPython).
+        self.input_generation: int = 0
+
         # Auto-mode state: detects hold vs double-tap automatically.
         # - Hold: press and hold > _HOLD_THRESHOLD_S → stop on key-up
         # - Double-tap: two quick taps within _DOUBLE_TAP_WINDOW_S → toggle on, next tap toggles off
@@ -303,6 +321,7 @@ class HotkeyDaemon:
     def _run(self) -> None:
         """Main loop executed in the daemon thread."""
         devices: dict[str, InputDevice] = {}
+        pointer_paths: set[str] = set()
         last_scan: float = 0.0
 
         try:
@@ -310,7 +329,7 @@ class HotkeyDaemon:
                 # Periodic device rescan.
                 now = time.monotonic()
                 if now - last_scan >= _DEVICE_POLL_INTERVAL:
-                    self._rescan_devices(devices)
+                    self._rescan_devices(devices, pointer_paths)
                     last_scan = now
 
                 if not devices:
@@ -333,9 +352,14 @@ class HotkeyDaemon:
                     dev = fds.get(fd)
                     if dev is None:
                         continue
+                    handle = (
+                        self._handle_pointer_event
+                        if dev.path in pointer_paths
+                        else self._handle_event
+                    )
                     try:
                         for event in dev.read():
-                            self._handle_event(event)
+                            handle(event)
                     except OSError:
                         # Device disconnected.
                         logger.info("Device disconnected: %s", dev.path)
@@ -381,7 +405,9 @@ class HotkeyDaemon:
         )
 
     @staticmethod
-    def _rescan_devices(current: dict[str, InputDevice]) -> None:
+    def _rescan_devices(
+        current: dict[str, InputDevice], pointer_paths: set[str] | None = None
+    ) -> None:
         """Refresh the tracked device set.
 
         Keying purely on path is not sufficient.  Bluetooth keyboards and
@@ -390,22 +416,32 @@ class HotkeyDaemon:
         replacement as already-tracked, discards the fresh handle, and keeps a
         dead one forever.  The hotkey then stops working with no error logged
         and no recovery short of a restart.
+
+        Pointer devices are tracked the same way; *pointer_paths* is refilled
+        with the paths that hold one, so their events go to the input counter
+        rather than the hotkey state machine.
         """
-        found = _find_keyboard_devices()
+        found = _find_input_devices()
 
         # Deduplicate by path first so a single scan cannot leak handles.
         fresh_by_path: dict[str, InputDevice] = {}
-        for dev in found:
+        fresh_pointers: set[str] = set()
+        for dev, is_pointer in found:
             if dev.path in fresh_by_path:
                 HotkeyDaemon._safe_close(dev)
                 continue
             fresh_by_path[dev.path] = dev
+            if is_pointer:
+                fresh_pointers.add(dev.path)
+        if pointer_paths is not None:
+            pointer_paths.clear()
+            pointer_paths.update(fresh_pointers)
 
         for path, fresh in fresh_by_path.items():
             existing = current.get(path)
 
             if existing is None:
-                logger.debug("Tracking new keyboard: %s (%s)", path, fresh.name)
+                logger.debug("Tracking new input device: %s (%s)", path, fresh.name)
                 current[path] = fresh
                 continue
 
@@ -457,8 +493,13 @@ class HotkeyDaemon:
 
     # -- event handling -----------------------------------------------------
 
+    def _handle_pointer_event(self, event: InputEvent) -> None:
+        """Count a mouse-button press from a pointer device; nothing else."""
+        if event.type == ecodes.EV_KEY and event.value == 1 and event.code in _POINTER_BUTTONS:
+            self.input_generation += 1
+
     def _handle_event(self, event: InputEvent) -> None:
-        """Process a single evdev input event."""
+        """Process a single evdev input event from a keyboard device."""
         if event.type != ecodes.EV_KEY:
             return
 
@@ -492,7 +533,11 @@ class HotkeyDaemon:
                     self._fire_stop()
             return
 
-        # Non-modifier key.
+        # Non-modifier key.  Anything but the hotkey means the user has done
+        # something since the last dictation (moved the caret, typed, ...).
+        if value == 1 and code != self._combo.key:
+            self.input_generation += 1
+
         if code == self._combo.key:
             if value == 1:  # key down
                 self._principal_held = True

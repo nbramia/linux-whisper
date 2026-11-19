@@ -46,7 +46,7 @@ for _name, _val in _EXTRA_KEYS.items():
 from linux_whisper.hotkey import (  # noqa: E402
     HotkeyCombination,
     HotkeyDaemon,
-    _find_keyboard_devices,
+    _find_input_devices,
     _key_name_to_code,
     _normalize_modifier,
 )
@@ -533,10 +533,10 @@ class TestFireCallbacks:
         assert daemon._recording is False
 
 
-# ── _find_keyboard_devices ───────────────────────────────────────────────────
+# ── _find_input_devices ──────────────────────────────────────────────────────
 
 
-class TestFindKeyboardDevices:
+class TestFindInputDevices:
     """Verify device discovery with mocked /dev/input."""
 
     def test_finds_keyboard_device(self):
@@ -552,10 +552,9 @@ class TestFindKeyboardDevices:
             mock_path_cls.return_value = mock_input_dir
 
             with patch("linux_whisper.hotkey.InputDevice", return_value=mock_dev):
-                devices = _find_keyboard_devices()
+                devices = _find_input_devices()
 
-        assert len(devices) == 1
-        assert devices[0] is mock_dev
+        assert devices == [(mock_dev, False)]
 
     def test_skips_non_keyboard_device(self):
         mock_dev = MagicMock()
@@ -571,7 +570,7 @@ class TestFindKeyboardDevices:
             mock_path_cls.return_value = mock_input_dir
 
             with patch("linux_whisper.hotkey.InputDevice", return_value=mock_dev):
-                devices = _find_keyboard_devices()
+                devices = _find_input_devices()
 
         assert len(devices) == 0
         mock_dev.close.assert_called_once()
@@ -586,9 +585,176 @@ class TestFindKeyboardDevices:
                 "linux_whisper.hotkey.InputDevice",
                 side_effect=PermissionError("no access"),
             ):
-                devices = _find_keyboard_devices()
+                devices = _find_input_devices()
 
         assert len(devices) == 0
+
+
+    @staticmethod
+    def _scan(*devs):
+        with patch("linux_whisper.hotkey.Path") as mock_path_cls:
+            mock_input_dir = MagicMock()
+            mock_input_dir.glob.return_value = [d.path for d in devs]
+            mock_path_cls.return_value = mock_input_dir
+            with patch("linux_whisper.hotkey.InputDevice", side_effect=list(devs)):
+                return _find_input_devices()
+
+    @staticmethod
+    def _dev(path, name, keys):
+        dev = MagicMock()
+        dev.path = path
+        dev.name = name
+        dev.capabilities.return_value = {ecodes.EV_KEY: keys}
+        return dev
+
+    def test_pointer_is_found_as_pointer(self):
+        kbd = self._dev("/dev/input/event0", "kbd", [ecodes.KEY_A, ecodes.KEY_ENTER])
+        mouse = self._dev("/dev/input/event1", "Logitech USB Optical Mouse", [ecodes.BTN_LEFT])
+        assert self._scan(kbd, mouse) == [(kbd, False), (mouse, True)]
+
+    def test_keyboard_with_mouse_buttons_is_a_keyboard(self):
+        # Remapper virtual keyboards report both letters and BTN_LEFT.
+        dev = self._dev("/dev/input/event0", "XWayKeyz", [ecodes.KEY_A, ecodes.BTN_LEFT])
+        assert self._scan(dev) == [(dev, False)]
+
+    def test_ydotool_device_is_skipped(self):
+        dev = self._dev("/dev/input/event20", "ydotool virtual device", [ecodes.KEY_A])
+        assert self._scan(dev) == []
+        dev.close.assert_called_once()
+
+
+# ── input_generation: "has the user done anything since?" ───────────────────
+
+
+class TestInputGeneration:
+    """The counter advances on user input, never on the hotkey or our own typing."""
+
+    @pytest.mark.parametrize(
+        ("hotkey", "events", "expected"),
+        [
+            # Ordinary key press.
+            ("fn", [(ecodes.KEY_A, 1)], 1),
+            ("fn", [(ecodes.KEY_ENTER, 1), (ecodes.KEY_ENTER, 0)], 1),
+            # Release and autorepeat do not count again.
+            ("fn", [(ecodes.KEY_A, 1), (ecodes.KEY_A, 2), (ecodes.KEY_A, 2), (ecodes.KEY_A, 0)], 1),
+            # The hotkey's principal key does not count.
+            ("fn", [(ecodes.KEY_FN, 1), (ecodes.KEY_FN, 0)], 0),
+            # Modifiers alone do not count; the hotkey combo does not count.
+            ("ctrl+shift+e", [
+                (ecodes.KEY_LEFTCTRL, 1), (ecodes.KEY_LEFTSHIFT, 1), (ecodes.KEY_E, 1),
+                (ecodes.KEY_E, 0), (ecodes.KEY_LEFTSHIFT, 0), (ecodes.KEY_LEFTCTRL, 0),
+            ], 0),
+            ("fn", [(ecodes.KEY_RIGHTALT, 1), (ecodes.KEY_RIGHTALT, 0)], 0),
+            # A shortcut counts once, for its non-modifier key.
+            ("fn", [(ecodes.KEY_LEFTCTRL, 1), (ecodes.KEY_V, 1), (ecodes.KEY_V, 0)], 1),
+            # A remapper's virtual keyboard re-emits mouse buttons as keys.
+            ("fn", [(ecodes.BTN_LEFT, 1), (ecodes.BTN_LEFT, 0)], 1),
+        ],
+    )
+    def test_keyboard_events(self, hotkey, events, expected):
+        daemon, _, _ = _make_daemon(hotkey, "hold")
+        for code, value in events:
+            daemon._handle_event(_make_event(ecodes.EV_KEY, code, value))
+        assert daemon.input_generation == expected
+
+    def test_non_key_events_do_not_count(self):
+        daemon, _, _ = _make_daemon()
+        daemon._handle_event(_make_event(0, 0, 0))  # EV_SYN
+        daemon._handle_event(_make_event(2, 0, 5))  # EV_REL
+        assert daemon.input_generation == 0
+
+    def test_hotkey_still_fires(self):
+        daemon, on_start, on_stop = _make_daemon("fn", "hold")
+        daemon._handle_event(_make_event(ecodes.EV_KEY, ecodes.KEY_FN, 1))
+        daemon._handle_event(_make_event(ecodes.EV_KEY, ecodes.KEY_FN, 0))
+        on_start.assert_called_once()
+        on_stop.assert_called_once()
+
+    @pytest.mark.parametrize(
+        ("code", "value", "expected"),
+        [
+            (ecodes.BTN_LEFT, 1, 1),
+            (ecodes.BTN_RIGHT, 1, 1),
+            (ecodes.BTN_MIDDLE, 1, 1),
+            (ecodes.BTN_LEFT, 0, 0),
+            (ecodes.BTN_LEFT, 2, 0),
+            (0x113, 1, 0),  # BTN_SIDE: back/forward, does not move the caret
+        ],
+    )
+    def test_pointer_buttons(self, code, value, expected):
+        daemon, _, _ = _make_daemon()
+        daemon._handle_pointer_event(_make_event(ecodes.EV_KEY, code, value))
+        assert daemon.input_generation == expected
+
+    def test_pointer_motion_does_not_count(self):
+        daemon, _, _ = _make_daemon()
+        daemon._handle_pointer_event(_make_event(2, 0, 5))  # EV_REL
+        assert daemon.input_generation == 0
+
+    def test_pointer_never_triggers_the_hotkey(self):
+        # Even a pointer that reports the hotkey's code (some mice expose extra
+        # keys) only feeds the counter.
+        daemon, on_start, on_stop = _make_daemon("fn", "hold")
+        daemon._handle_pointer_event(_make_event(ecodes.EV_KEY, ecodes.KEY_FN, 1))
+        daemon._handle_pointer_event(_make_event(ecodes.EV_KEY, ecodes.KEY_FN, 0))
+        on_start.assert_not_called()
+        on_stop.assert_not_called()
+
+
+class TestRunRoutesPointerEvents:
+    """_run sends pointer events to the counter and keyboard events to the hotkey."""
+
+    def test_routing(self, monkeypatch):
+        import linux_whisper.hotkey as hk
+
+        class _Dev:
+            def __init__(self, path, fd, events):
+                self.path, self.fd, self._events = path, fd, events
+                self.name, self.phys, self.uniq = path, "", ""
+
+            def read(self):
+                events, self._events = self._events, []
+                return events
+
+            def close(self):
+                pass
+
+        kbd = _Dev("/dev/input/event0", 10, [
+            _make_event(ecodes.EV_KEY, ecodes.KEY_FN, 1),
+            _make_event(ecodes.EV_KEY, ecodes.KEY_A, 1),
+        ])
+        mouse = _Dev("/dev/input/event1", 11, [
+            _make_event(ecodes.EV_KEY, ecodes.KEY_FN, 1),
+            _make_event(ecodes.EV_KEY, ecodes.BTN_LEFT, 1),
+        ])
+        daemon, on_start, _ = _make_daemon("fn", "hold")
+        monkeypatch.setattr(hk, "_find_input_devices", lambda: [(kbd, False), (mouse, True)])
+
+        def fake_select(fds, *_args):
+            if not kbd._events and not mouse._events:
+                daemon._stop_event.set()
+            return [kbd.fd, mouse.fd], [], []
+
+        monkeypatch.setattr(hk.select, "select", fake_select)
+        daemon._run()
+
+        on_start.assert_called_once()  # from the keyboard's fn, not the mouse's
+        assert daemon.input_generation == 2  # keyboard KEY_A + mouse BTN_LEFT
+
+
+class TestRescanTracksPointers:
+    def test_pointer_paths_follow_the_scan(self, monkeypatch):
+        import linux_whisper.hotkey as hk
+
+        kbd = _FakeDevice("/dev/input/event0", fd_ino=1)
+        mouse = _FakeDevice("/dev/input/event1", name="mouse", fd_ino=2)
+        monkeypatch.setattr(hk, "_find_input_devices", lambda: [(kbd, False), (mouse, True)])
+        _patch_inodes(monkeypatch, [kbd, mouse])
+        current: dict = {}
+        pointers = {"/dev/input/event9"}
+        hk.HotkeyDaemon._rescan_devices(current, pointers)
+        assert set(current) == {"/dev/input/event0", "/dev/input/event1"}
+        assert pointers == {"/dev/input/event1"}
 
 
 # ── Device rescan: stale-handle recovery ───────────────────────────────────
@@ -669,7 +835,7 @@ class TestRescanStaleHandles:
     def _rescan(current, found, monkeypatch):
         import linux_whisper.hotkey as hk
 
-        monkeypatch.setattr(hk, "_find_keyboard_devices", lambda: found)
+        monkeypatch.setattr(hk, "_find_input_devices", lambda: [(d, False) for d in found])
         _patch_inodes(monkeypatch, list(current.values()) + list(found))
         hk.HotkeyDaemon._rescan_devices(current)
 
