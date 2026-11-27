@@ -587,7 +587,10 @@ def _install_streams(monkeypatch, audio_mod, plan):
         opened.append(stream)
         return stream
 
-    monkeypatch.setattr(audio_mod.sd, "InputStream", factory)
+    # Replace the whole module handle: in CI ``sounddevice`` is a stub.
+    import types
+
+    monkeypatch.setattr(audio_mod, "sd", types.SimpleNamespace(InputStream=factory))
     return opened
 
 
@@ -765,7 +768,7 @@ class TestInputLossHardening:
             release.wait(5)  # a PortAudio open wedged on the dead device
             raise RuntimeError("timed out")
 
-        monkeypatch.setattr(fast_watchdog.sd, "InputStream", hanging)
+        fast_watchdog.sd.InputStream = hanging
         pipeline = _pipeline(fast_watchdog)
         await pipeline.start()
         opened[0].kill()
