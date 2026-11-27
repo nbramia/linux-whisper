@@ -126,6 +126,10 @@ The decisive test is external: stop the remapper's service, try the hotkey,
 start it again. Prefer a non-modifier hotkey (`capslock`, a function key, or a
 modifier *combo*) over a bare modifier.
 
+## Audio Stack Restarts
+
+On the development machine, PipeWire and WirePlumber are restarted routinely, for example by Bluetooth changes from other tools. When that happens the input stream's callbacks stop, and PortAudio can then leak native memory without bound. `AudioPipeline`'s watchdog reopens the stream after 1.5 s without callbacks; see "Losing the input device" in `architecture.md`. To test it, restart the audio stack under a running pipeline (`systemctl --user restart pipewire wireplumber filter-chain`) and watch RSS for at least 90 s: the leak starts 15–75 s after the restart. Do it only while Nathan is idle (`gdbus call --session --dest org.gnome.Mutter.IdleMonitor --object-path /org/gnome/Mutter/IdleMonitor/Core --method org.gnome.Mutter.IdleMonitor.GetIdletime`), because it breaks every audio client on the machine. The memory caps in `contrib/systemd/linux-whisper.service` are the backstop. Keep them in the shipped unit.
+
 ## Latency Budgets
 
 Referenced during planning to assess whether a change is safe.
@@ -155,7 +159,7 @@ The default STT backend is whisper.cpp large-v3-turbo on the ROCm GPU, in a subp
 | `config.py` | Frozen dataclass config, YAML loading, validation |
 | `state.py` | Async state machine: IDLE → RECORDING → PROCESSING → IDLE |
 | `hotkey.py` | evdev global hotkey daemon, 4 modes (auto/hold/toggle/vad-auto); `input_generation` counts other key and mouse-button presses for dictation spacing |
-| `audio.py` | Ring buffer, Silero VAD, AGC, feedback tones, sounddevice capture |
+| `audio.py` | Ring buffer, Silero VAD, AGC, feedback tones, sounddevice capture; watchdog that reopens a lost input stream; bounded chunk queue |
 | `stt/engine.py` | `STTEngine` protocol + factory. All backends implement this. |
 | `stt/whisper_gpu.py` | GPU STT — subprocess isolation, pipe-based IPC with worker |
 | `polish/pipeline.py` | Four-stage orchestrator: disfluency → punctuation → formatting → LLM |

@@ -118,6 +118,16 @@ PipeWire is the default audio server on modern Linux (Fedora 34+, Ubuntu 22.10+,
 - Bit depth: 16-bit signed integer (converted to float32 for model input)
 - Buffer size: 512 samples (32ms at 16kHz) — balances latency vs. overhead
 
+### Losing the input device
+
+PortAudio reaches PipeWire through ALSA's `pipewire` plugin. When the audio stack restarts (`systemctl --user restart pipewire wireplumber`, which Bluetooth changes on this machine do routinely), the open stream does not fail: its callbacks stop. Between 15 and 75 seconds later, PortAudio's ALSA thread can fall into an xrun-recovery loop (`PaAlsaStream_HandleXrun` → `AlsaRestart` → `snd_pcm_prepare`, failing forever) that leaks native memory at about 200 MB/s while printing four stderr lines per iteration. No Python object grows, so no queue bound can stop it.
+
+`AudioPipeline` therefore supervises the stream. A watchdog task checks every 0.5 s and treats the input as lost when no callback has arrived for 1.5 s (they normally arrive every 32 ms) or PortAudio has ended the stream. It aborts the stream, which takes about 10 ms and never waits on the dead device, and opens a new one on the default device. A reopen counts only once the new stream delivers a callback. Failed or silent reopens retry with backoff from 0.5 s, doubling to a 10 s ceiling. The watchdog acts before the xrun loop can start, and no PortAudio re-initialisation is needed: a plain reopen reconnects to the new PipeWire. A recording in progress keeps its pre-roll and continues on the new stream, with a gap of about 2 s.
+
+Chunks pass from the callback thread to the event loop through a queue bounded at two minutes of audio (3,333 windows, matching the ring buffer). If the consumer falls that far behind, the oldest chunk is dropped and a warning logged. The end-of-recording marker is always the newest entry, so it survives.
+
+The shipped systemd unit (`contrib/systemd/linux-whisper.service`) also caps memory (`MemoryHigh=8G`, `MemoryMax=10G`), so a leak in any native library is contained to the service and cannot exhaust the machine.
+
 ### Voice Activity Detection (VAD)
 
 **Model:** Silero VAD v6

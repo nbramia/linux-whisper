@@ -518,3 +518,262 @@ class TestSileroStateIntrospection:
         session.get_inputs.return_value = [other]
 
         assert SileroVAD._infer_state_dim(session) == (2, 1, 128)
+
+
+# ── Input loss: watchdog reconnect and bounded chunk queue ─────────────────
+
+
+class _FakeStream:
+    """Stands in for ``sd.InputStream``.  A healthy one calls back every 5 ms
+    from its own thread, like PortAudio; a dead one never calls back."""
+
+    def __init__(self, *, callback, healthy: bool, **_kwargs) -> None:
+        import threading
+
+        self._callback = callback
+        self._healthy = healthy
+        self._halt = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self.active = False
+        self.aborted = False
+        self.closed = False
+
+    def start(self) -> None:
+        self.active = True
+        self._thread.start()
+
+    def _run(self) -> None:
+        block = np.zeros((512, 1), dtype=np.float32)
+        while not self._halt.wait(0.005):
+            if self._healthy:
+                self._callback(block, 512, None, 0)
+
+    def kill(self) -> None:
+        """Simulate the audio server going away: callbacks just stop."""
+        self._healthy = False
+
+    def abort(self) -> None:
+        self.aborted = True
+        self.active = False
+        self._halt.set()
+        if self._thread.is_alive():
+            self._thread.join()
+
+    def close(self) -> None:
+        self.closed = True
+
+
+@pytest.fixture
+def fast_watchdog(monkeypatch):
+    import linux_whisper.audio as audio_mod
+
+    monkeypatch.setattr(audio_mod, "STREAM_STALL_S", 0.1)
+    monkeypatch.setattr(audio_mod, "STREAM_CHECK_INTERVAL_S", 0.02)
+    monkeypatch.setattr(audio_mod, "REOPEN_BACKOFF_INITIAL_S", 0.02)
+    monkeypatch.setattr(audio_mod, "REOPEN_BACKOFF_MAX_S", 0.08)
+    return audio_mod
+
+
+def _install_streams(monkeypatch, audio_mod, plan):
+    """Make each ``sd.InputStream(...)`` follow *plan*: "ok", "dead" or "fail"."""
+    opened: list[_FakeStream] = []
+    plan = list(plan)
+
+    def factory(**kwargs):
+        step = plan.pop(0) if plan else "ok"
+        if step == "fail":
+            raise RuntimeError("PortAudio: device unavailable")
+        stream = _FakeStream(healthy=(step == "ok"), **kwargs)
+        opened.append(stream)
+        return stream
+
+    # Replace the whole module handle: in CI ``sounddevice`` is a stub.
+    import types
+
+    monkeypatch.setattr(audio_mod, "sd", types.SimpleNamespace(InputStream=factory))
+    return opened
+
+
+def _pipeline(audio_mod):
+    return audio_mod.AudioPipeline(vad_model_path=Path("/nonexistent/silero_vad.onnx"))
+
+
+async def _until(predicate, timeout: float = 2.0) -> None:
+    import asyncio
+
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() > deadline:
+            raise AssertionError("condition not reached")
+        await asyncio.sleep(0.01)
+
+
+class TestInputLossRecovery:
+    async def test_reopens_when_callbacks_stop(self, monkeypatch, fast_watchdog):
+        opened = _install_streams(monkeypatch, fast_watchdog, ["ok", "ok"])
+        pipeline = _pipeline(fast_watchdog)
+        await pipeline.start()
+        try:
+            opened[0].kill()
+            await _until(lambda: pipeline.reconnects == 1)
+            assert opened[0].aborted and opened[0].closed
+            assert pipeline._stream is opened[1]
+            assert opened[1].active
+        finally:
+            await pipeline.stop()
+
+    async def test_retries_with_backoff_until_audio_flows(self, monkeypatch, fast_watchdog):
+        # The audio server is still restarting: opens fail, then one opens but
+        # stays silent, then a stream finally delivers audio.
+        opened = _install_streams(
+            monkeypatch, fast_watchdog, ["ok", "fail", "fail", "dead", "ok"]
+        )
+        pipeline = _pipeline(fast_watchdog)
+        await pipeline.start()
+        try:
+            opened[0].kill()
+            await _until(lambda: pipeline.reconnects == 1)
+            assert len(opened) == 3
+            assert opened[1].aborted  # the silent one was discarded
+            assert pipeline._stream is opened[2]
+        finally:
+            await pipeline.stop()
+
+    async def test_reopens_when_portaudio_ends_the_stream(self, monkeypatch, fast_watchdog):
+        opened = _install_streams(monkeypatch, fast_watchdog, ["ok", "ok"])
+        pipeline = _pipeline(fast_watchdog)
+        await pipeline.start()
+        try:
+            opened[0].active = False
+            await _until(lambda: pipeline.reconnects == 1)
+        finally:
+            await pipeline.stop()
+
+    async def test_healthy_stream_is_left_alone(self, monkeypatch, fast_watchdog):
+        import asyncio
+
+        opened = _install_streams(monkeypatch, fast_watchdog, ["ok"])
+        pipeline = _pipeline(fast_watchdog)
+        await pipeline.start()
+        try:
+            await asyncio.sleep(0.4)
+            assert pipeline.reconnects == 0
+            assert len(opened) == 1
+        finally:
+            await pipeline.stop()
+
+    async def test_stop_during_reconnect_closes_everything(self, monkeypatch, fast_watchdog):
+        import asyncio
+
+        opened = _install_streams(monkeypatch, fast_watchdog, ["ok"] + ["fail"] * 50)
+        pipeline = _pipeline(fast_watchdog)
+        await pipeline.start()
+        opened[0].kill()
+        await asyncio.sleep(0.3)  # watchdog is now in its retry loop
+        await pipeline.stop()
+        assert pipeline._watchdog is None
+        assert pipeline._stream is None
+        assert all(s.closed for s in opened)
+
+    async def test_recording_survives_reconnect(self, monkeypatch, fast_watchdog):
+        opened = _install_streams(monkeypatch, fast_watchdog, ["ok", "ok"])
+        pipeline = _pipeline(fast_watchdog)
+        await pipeline.start()
+        try:
+            pipeline.start_recording()
+            opened[0].kill()
+            await _until(lambda: pipeline.reconnects == 1)
+            await _until(lambda: pipeline._chunk_queue.qsize() > 0)
+            pipeline._chunk_queue = type(pipeline._chunk_queue)(
+                maxsize=pipeline._chunk_queue.maxsize
+            )
+            await _until(lambda: pipeline._chunk_queue.qsize() > 0)  # chunks flow again
+        finally:
+            await pipeline.stop()
+
+
+class TestChunkQueueBound:
+    def test_drops_oldest_when_full(self, monkeypatch, fast_watchdog):
+        import asyncio
+
+        pipeline = _pipeline(fast_watchdog)
+        pipeline._chunk_queue = asyncio.Queue(maxsize=3)
+
+        def chunk(i: int, final: bool = False) -> AudioChunk:
+            return AudioChunk(np.full(4, i, dtype=np.float32), float(i), True, final)
+
+        for i in range(5):
+            pipeline._put_chunk(chunk(i))
+        pipeline._put_chunk(chunk(5, final=True))
+
+        kept = [pipeline._chunk_queue.get_nowait() for _ in range(3)]
+        assert [c.timestamp for c in kept] == [3.0, 4.0, 5.0]
+        assert kept[-1].is_final  # the end-of-recording marker survives
+        assert pipeline.dropped_chunks == 3
+
+    def test_default_bound_matches_ring_buffer(self, fast_watchdog):
+        pipeline = _pipeline(fast_watchdog)
+        seconds = (
+            fast_watchdog.CHUNK_QUEUE_MAX * fast_watchdog.VAD_WINDOW_SAMPLES / SAMPLE_RATE
+        )
+        assert pipeline._chunk_queue.maxsize == fast_watchdog.CHUNK_QUEUE_MAX
+        assert seconds == pytest.approx(fast_watchdog.DEFAULT_RING_BUFFER_SECONDS, abs=0.1)
+
+
+class TestInputLossHardening:
+    async def test_close_runs_even_if_abort_raises(self, fast_watchdog):
+        class Broken:
+            closed = False
+
+            def abort(self):
+                raise RuntimeError("device gone")
+
+            def close(self):
+                Broken.closed = True
+
+        fast_watchdog.AudioPipeline._close_stream(Broken())
+        assert Broken.closed
+
+    async def test_unreadable_active_counts_as_lost(self, monkeypatch, fast_watchdog):
+        opened = _install_streams(monkeypatch, fast_watchdog, ["ok", "ok"])
+        pipeline = _pipeline(fast_watchdog)
+        await pipeline.start()
+        class Unreadable(_FakeStream):
+            @property
+            def active(self):
+                raise RuntimeError("PaErrorCode -9988")
+
+            @active.setter
+            def active(self, value):
+                pass
+
+        try:
+            opened[0].__class__ = Unreadable
+            await _until(lambda: pipeline.reconnects == 1)
+        finally:
+            await pipeline.stop()
+
+    async def test_stop_is_bounded_when_open_hangs(self, monkeypatch, fast_watchdog):
+        import asyncio
+        import threading
+
+        monkeypatch.setattr(fast_watchdog, "STOP_TIMEOUT_S", 0.2)
+        release = threading.Event()
+        opened = _install_streams(monkeypatch, fast_watchdog, ["ok"])
+        first = fast_watchdog.sd.InputStream
+
+        def hanging(**kwargs):
+            if not opened or opened[0].active:
+                return first(**kwargs)
+            release.wait(5)  # a PortAudio open wedged on the dead device
+            raise RuntimeError("timed out")
+
+        fast_watchdog.sd.InputStream = hanging
+        pipeline = _pipeline(fast_watchdog)
+        await pipeline.start()
+        opened[0].kill()
+        await asyncio.sleep(0.3)
+        started = time.monotonic()
+        await pipeline.stop()
+        assert time.monotonic() - started < 1.0
+        release.set()

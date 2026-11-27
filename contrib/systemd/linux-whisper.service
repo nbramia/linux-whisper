@@ -1,0 +1,23 @@
+[Unit]
+Description=Linux Whisper voice dictation
+After=graphical-session.target pipewire.service
+Wants=pipewire.service
+
+[Service]
+ExecStart=%h/.local/bin/linux-whisper run
+Restart=on-failure
+RestartSec=3
+# Normal use is 3-6 GB (whisper plus the polish LLM, in unified GPU memory).
+# Past MemoryHigh the service is throttled; past MemoryMax the kernel kills it
+# inside its own cgroup and systemd restarts it, so a native leak can never
+# push the whole machine into swap and a global OOM.
+MemoryHigh=8G
+MemoryMax=10G
+MemorySwapMax=1G
+TimeoutStopSec=15
+# Keeps a native error loop (PortAudio prints to stderr) from flooding the journal.
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=1000
+
+[Install]
+WantedBy=graphical-session.target
