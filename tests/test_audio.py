@@ -715,3 +715,62 @@ class TestChunkQueueBound:
         )
         assert pipeline._chunk_queue.maxsize == fast_watchdog.CHUNK_QUEUE_MAX
         assert seconds == pytest.approx(fast_watchdog.DEFAULT_RING_BUFFER_SECONDS, abs=0.1)
+
+
+class TestInputLossHardening:
+    async def test_close_runs_even_if_abort_raises(self, fast_watchdog):
+        class Broken:
+            closed = False
+
+            def abort(self):
+                raise RuntimeError("device gone")
+
+            def close(self):
+                Broken.closed = True
+
+        fast_watchdog.AudioPipeline._close_stream(Broken())
+        assert Broken.closed
+
+    async def test_unreadable_active_counts_as_lost(self, monkeypatch, fast_watchdog):
+        opened = _install_streams(monkeypatch, fast_watchdog, ["ok", "ok"])
+        pipeline = _pipeline(fast_watchdog)
+        await pipeline.start()
+        class Unreadable(_FakeStream):
+            @property
+            def active(self):
+                raise RuntimeError("PaErrorCode -9988")
+
+            @active.setter
+            def active(self, value):
+                pass
+
+        try:
+            opened[0].__class__ = Unreadable
+            await _until(lambda: pipeline.reconnects == 1)
+        finally:
+            await pipeline.stop()
+
+    async def test_stop_is_bounded_when_open_hangs(self, monkeypatch, fast_watchdog):
+        import asyncio
+        import threading
+
+        monkeypatch.setattr(fast_watchdog, "STOP_TIMEOUT_S", 0.2)
+        release = threading.Event()
+        opened = _install_streams(monkeypatch, fast_watchdog, ["ok"])
+        first = fast_watchdog.sd.InputStream
+
+        def hanging(**kwargs):
+            if not opened or opened[0].active:
+                return first(**kwargs)
+            release.wait(5)  # a PortAudio open wedged on the dead device
+            raise RuntimeError("timed out")
+
+        monkeypatch.setattr(fast_watchdog.sd, "InputStream", hanging)
+        pipeline = _pipeline(fast_watchdog)
+        await pipeline.start()
+        opened[0].kill()
+        await asyncio.sleep(0.3)
+        started = time.monotonic()
+        await pipeline.stop()
+        assert time.monotonic() - started < 1.0
+        release.set()

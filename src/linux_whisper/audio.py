@@ -75,6 +75,7 @@ STREAM_STALL_S = 1.5  # no callback for this long = input lost
 STREAM_CHECK_INTERVAL_S = 0.5
 REOPEN_BACKOFF_INITIAL_S = 0.5
 REOPEN_BACKOFF_MAX_S = 10.0
+STOP_TIMEOUT_S = 5.0  # longest stop() waits on native stream calls
 
 # Upper bound on chunks waiting for the consumer: two minutes of 36 ms
 # windows, matching the ring buffer.  Past it the oldest chunk is dropped.
@@ -584,13 +585,17 @@ class AudioPipeline:
         if self._wake is not None:
             self._wake.set()
         if self._watchdog is not None:
-            with contextlib.suppress(Exception):
-                await self._watchdog
+            # Bounded: a native call wedged on a dead device must not hang
+            # shutdown.  An open still in flight closes its own stream.
+            await asyncio.wait({self._watchdog}, timeout=STOP_TIMEOUT_S)
             self._watchdog = None
 
         if self._stream is not None:
-            self._close_stream(self._stream)
-            self._stream = None
+            stream, self._stream = self._stream, None
+            await asyncio.wait(
+                {asyncio.ensure_future(asyncio.to_thread(self._close_stream, stream))},
+                timeout=STOP_TIMEOUT_S,
+            )
 
         # Signal end-of-stream to any waiting consumers
         self._put_chunk(None)
@@ -620,11 +625,11 @@ class AudioPipeline:
     @staticmethod
     def _close_stream(stream: sd.InputStream) -> None:
         """Abort and close *stream*.  ``abort`` does not wait on a dead device."""
-        try:
-            stream.abort()
-            stream.close()
-        except Exception:
-            logger.debug("Error closing audio stream", exc_info=True)
+        for step in (stream.abort, stream.close):
+            try:
+                step()
+            except Exception:
+                logger.debug("Error in audio stream %s", step.__name__, exc_info=True)
 
     def _input_silent_for(self) -> float:
         """Seconds since the current stream last delivered audio (or opened)."""
@@ -634,8 +639,11 @@ class AudioPipeline:
         stream = self._stream
         if stream is None:
             return True
-        if not stream.active:
-            return True  # PortAudio ended the stream (device error)
+        try:
+            if not stream.active:
+                return True  # PortAudio ended the stream (device error)
+        except Exception:
+            return True
         return self._input_silent_for() > STREAM_STALL_S
 
     async def _sleep_unless_stopped(self, seconds: float) -> None:
@@ -652,7 +660,11 @@ class AudioPipeline:
                     "Audio input lost (no audio for %.1fs) — reopening",
                     self._input_silent_for(),
                 )
-                await self._reconnect()
+                try:
+                    await self._reconnect()
+                except Exception:
+                    # Never let one bad reconnect end supervision for good.
+                    logger.exception("Audio input reconnect failed")
 
     async def _reconnect(self) -> None:
         """Replace the lost stream, retrying with backoff until audio flows."""
@@ -663,6 +675,8 @@ class AudioPipeline:
             old, self._stream = self._stream, None
             if old is not None:
                 await asyncio.to_thread(self._close_stream, old)
+            if not self._running:
+                return
             try:
                 stream = await asyncio.to_thread(self._open_stream)
             except Exception as exc:
