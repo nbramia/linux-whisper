@@ -147,21 +147,17 @@ This creates `~/.config/linux-whisper/config.yaml` with sensible defaults.
 
 ### Systemd user service (auto-start on login)
 
-Create `~/.config/systemd/user/linux-whisper.service`:
+Install the unit shipped in [`contrib/systemd/linux-whisper.service`](contrib/systemd/linux-whisper.service),
+adjusting `ExecStart` if `linux-whisper` is not in `~/.local/bin`:
 
-```ini
-[Unit]
-Description=Linux Whisper voice dictation
-After=graphical-session.target
-
-[Service]
-ExecStart=%h/.local/bin/linux-whisper run
-Restart=on-failure
-RestartSec=3
-
-[Install]
-WantedBy=default.target
+```bash
+mkdir -p ~/.config/systemd/user
+cp contrib/systemd/linux-whisper.service ~/.config/systemd/user/
 ```
+
+The unit caps memory: it is throttled past 8 GB and killed and restarted past
+10 GB, against normal use of 3-6 GB, so a leak in native audio code can never
+drag the whole machine into swap.
 
 Enable and start:
 

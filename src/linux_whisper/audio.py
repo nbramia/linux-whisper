@@ -63,6 +63,23 @@ FEEDBACK_FREQ_LOW = 880.0  # Hz
 FEEDBACK_FREQ_HIGH = 1760.0  # Hz
 FEEDBACK_AMPLITUDE = 0.3
 
+# Input stream watchdog.  PortAudio reaches PipeWire through the ALSA
+# ``pipewire`` plugin, and when the audio stack restarts that stream does not
+# fail: its callbacks simply stop.  Some seconds later PortAudio's ALSA thread
+# can fall into an xrun-recovery loop that fails forever and leaks native
+# memory at hundreds of MB/s, outside Python, where no queue bound can reach
+# it.  So the stream is treated as lost as soon as callbacks stop (they
+# normally arrive every 32 ms), closed, and reopened with backoff until a new
+# stream delivers audio again.
+STREAM_STALL_S = 1.5  # no callback for this long = input lost
+STREAM_CHECK_INTERVAL_S = 0.5
+REOPEN_BACKOFF_INITIAL_S = 0.5
+REOPEN_BACKOFF_MAX_S = 10.0
+
+# Upper bound on chunks waiting for the consumer: two minutes of 36 ms
+# windows, matching the ring buffer.  Past it the oldest chunk is dropped.
+CHUNK_QUEUE_MAX = int(DEFAULT_RING_BUFFER_SECONDS * SAMPLE_RATE / VAD_WINDOW_SAMPLES)
+
 # Silero VAD ONNX model path
 SILERO_MODEL_DIR = CACHE_DIR / "models" / "silero-vad"
 SILERO_MODEL_PATH = SILERO_MODEL_DIR / "silero_vad.onnx"
@@ -483,12 +500,23 @@ class AudioPipeline:
         except Exception:
             logger.warning("Failed to load Silero VAD — VAD disabled.", exc_info=True)
 
-        # Sounddevice input stream (created on start)
+        # Sounddevice input stream (created on start, replaced by the watchdog
+        # when the input is lost)
         self._stream: sd.InputStream | None = None
+        self._stream_opened_at: float = 0.0
+        self._last_callback_time: float = 0.0
+        self._watchdog: asyncio.Task[None] | None = None
+        self._wake: asyncio.Event | None = None
+        self.reconnects = 0
+        """Times the input stream was found lost and reopened."""
 
         # Async plumbing
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._chunk_queue: asyncio.Queue[AudioChunk | None] = asyncio.Queue()
+        self._chunk_queue: asyncio.Queue[AudioChunk | None] = asyncio.Queue(
+            maxsize=CHUNK_QUEUE_MAX
+        )
+        self.dropped_chunks = 0
+        """Chunks discarded because the consumer fell CHUNK_QUEUE_MAX behind."""
 
         # State tracking
         self._running = False
@@ -521,23 +549,17 @@ class AudioPipeline:
             return
 
         self._loop = asyncio.get_running_loop()
-        self._chunk_queue = asyncio.Queue()
+        self._chunk_queue = asyncio.Queue(maxsize=CHUNK_QUEUE_MAX)
 
         try:
-            self._stream = sd.InputStream(
-                samplerate=self._sample_rate,
-                channels=CHANNELS,
-                dtype=DTYPE,
-                blocksize=self._buffer_size,
-                callback=self._audio_callback,
-                latency="low",
-            )
-            self._stream.start()
+            self._stream = self._open_stream()
         except Exception:
             logger.exception("Failed to open audio input stream")
             raise
 
         self._running = True
+        self._wake = asyncio.Event()
+        self._watchdog = asyncio.ensure_future(self._watch_stream())
         logger.info(
             "Audio pipeline started: %d Hz, %d-sample blocks, mode=%s, VAD=%s",
             self._sample_rate,
@@ -557,19 +579,120 @@ class AudioPipeline:
 
         self._running = False
 
+        # Let the watchdog finish rather than cancelling it: a reopen it has
+        # in flight runs in a thread, and cancelling would orphan that stream.
+        if self._wake is not None:
+            self._wake.set()
+        if self._watchdog is not None:
+            with contextlib.suppress(Exception):
+                await self._watchdog
+            self._watchdog = None
+
         if self._stream is not None:
-            try:
-                self._stream.stop()
-                self._stream.close()
-            except Exception:
-                logger.debug("Error closing audio stream", exc_info=True)
+            self._close_stream(self._stream)
             self._stream = None
 
         # Signal end-of-stream to any waiting consumers
-        with contextlib.suppress(asyncio.QueueFull):
-            self._chunk_queue.put_nowait(None)
+        self._put_chunk(None)
 
         logger.info("Audio pipeline stopped")
+
+    # -- Input stream supervision --------------------------------------------
+
+    def _open_stream(self) -> sd.InputStream:
+        """Open and start a new input stream on the default device."""
+        stream = sd.InputStream(
+            samplerate=self._sample_rate,
+            channels=CHANNELS,
+            dtype=DTYPE,
+            blocksize=self._buffer_size,
+            callback=self._audio_callback,
+            latency="low",
+        )
+        self._stream_opened_at = time.monotonic()
+        try:
+            stream.start()
+        except Exception:
+            self._close_stream(stream)
+            raise
+        return stream
+
+    @staticmethod
+    def _close_stream(stream: sd.InputStream) -> None:
+        """Abort and close *stream*.  ``abort`` does not wait on a dead device."""
+        try:
+            stream.abort()
+            stream.close()
+        except Exception:
+            logger.debug("Error closing audio stream", exc_info=True)
+
+    def _input_silent_for(self) -> float:
+        """Seconds since the current stream last delivered audio (or opened)."""
+        return time.monotonic() - max(self._last_callback_time, self._stream_opened_at)
+
+    def _stream_lost(self) -> bool:
+        stream = self._stream
+        if stream is None:
+            return True
+        if not stream.active:
+            return True  # PortAudio ended the stream (device error)
+        return self._input_silent_for() > STREAM_STALL_S
+
+    async def _sleep_unless_stopped(self, seconds: float) -> None:
+        assert self._wake is not None
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self._wake.wait(), seconds)
+
+    async def _watch_stream(self) -> None:
+        """Reopen the input stream whenever it stops delivering audio."""
+        while self._running:
+            await self._sleep_unless_stopped(STREAM_CHECK_INTERVAL_S)
+            if self._running and self._stream_lost():
+                logger.warning(
+                    "Audio input lost (no audio for %.1fs) — reopening",
+                    self._input_silent_for(),
+                )
+                await self._reconnect()
+
+    async def _reconnect(self) -> None:
+        """Replace the lost stream, retrying with backoff until audio flows."""
+        delay = REOPEN_BACKOFF_INITIAL_S
+        attempt = 0
+        while self._running:
+            attempt += 1
+            old, self._stream = self._stream, None
+            if old is not None:
+                await asyncio.to_thread(self._close_stream, old)
+            try:
+                stream = await asyncio.to_thread(self._open_stream)
+            except Exception as exc:
+                logger.warning(
+                    "Audio input reopen attempt %d failed (%s); retrying in %.1fs",
+                    attempt, exc, delay,
+                )
+            else:
+                if not self._running:  # stop() ran while the open was in flight
+                    await asyncio.to_thread(self._close_stream, stream)
+                    return
+                self._stream = stream
+                if await self._audio_arrives():
+                    self.reconnects += 1
+                    logger.info("Audio input reconnected after %d attempt(s)", attempt)
+                    return
+                logger.warning(
+                    "Reopened audio input delivers no audio; retrying in %.1fs", delay
+                )
+            await self._sleep_unless_stopped(delay)
+            delay = min(delay * 2, REOPEN_BACKOFF_MAX_S)
+
+    async def _audio_arrives(self) -> bool:
+        """Wait up to STREAM_STALL_S for the current stream's first callback."""
+        deadline = time.monotonic() + STREAM_STALL_S
+        while self._running and time.monotonic() < deadline:
+            if self._last_callback_time > self._stream_opened_at:
+                return True
+            await self._sleep_unless_stopped(0.05)
+        return self._last_callback_time > self._stream_opened_at
 
     # -- Recording session ---------------------------------------------------
 
@@ -714,6 +837,7 @@ class AudioPipeline:
 
         Must be fast (<1ms).  No blocking, no allocation beyond numpy views.
         """
+        self._last_callback_time = time.monotonic()
         if status:
             logger.debug("Audio callback status: %s", status)
 
@@ -788,13 +912,25 @@ class AudioPipeline:
         loop = self._loop
         if loop is None or loop.is_closed():
             return
-        try:
-            loop.call_soon_threadsafe(self._chunk_queue.put_nowait, chunk)
-        except RuntimeError:
-            # Event loop is shutting down
-            pass
-        except asyncio.QueueFull:
-            logger.debug("Audio chunk queue full — dropping chunk")
+        with contextlib.suppress(RuntimeError):  # event loop is shutting down
+            loop.call_soon_threadsafe(self._put_chunk, chunk)
+
+    def _put_chunk(self, chunk: AudioChunk | None) -> None:
+        """Queue *chunk* on the event loop, dropping the oldest one when full."""
+        queue = self._chunk_queue
+        while True:
+            try:
+                queue.put_nowait(chunk)
+                return
+            except asyncio.QueueFull:
+                with contextlib.suppress(asyncio.QueueEmpty):
+                    queue.get_nowait()
+                self.dropped_chunks += 1
+                if self.dropped_chunks == 1 or self.dropped_chunks % 1000 == 0:
+                    logger.warning(
+                        "Audio consumer is behind — dropped %d oldest chunk(s)",
+                        self.dropped_chunks,
+                    )
 
     # -- Utilities -----------------------------------------------------------
 
